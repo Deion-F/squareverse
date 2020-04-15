@@ -280,15 +280,18 @@ class Square():
 
     def moveSquare(self, squareverse):
         
+        # ***to-do***
+        # add logic in collision check to avoid edges of Squareverse
+
         squareverse_size = squareverse.squareverse_size
         list_of_squares = squareverse.created_squares
         squareverse_grid_spacing = squareverse.squareverse_grid_spacing
         movement_dx = 0
         movement_dy = 0
         list_of_coordinates = []
-        collisions = True
+        collision_detected = True
 
-        print("\n\nLength of array 'list_of_squares':" + len(list_of_squares)) # debug
+        print("\n\nLength of array 'list_of_squares': " + len(list_of_squares)) # debug
         if len(list_of_squares) > 1:
 
 
@@ -297,7 +300,7 @@ class Square():
                 list_of_coordinates.append(coordinates)
             print("List of Square coordinates: " + list_of_coordinates) # debug
 
-            while collisions:
+            while collision_detected:
 
                 self.direction = choice(["up", "down", "left", "right"])
             
@@ -326,25 +329,43 @@ class Square():
                 
                 # gets updated coordinates for Square
                 self.coordinates = self.square.getCenter()
-                print("Updated coordinates for Square: " + self.coordinates) # debug
-                print("Updated X coordinates for Square: " + self.coordinates.x) # debug
-                print("Updated Y coordinates for Square: " + self.coordinates.y) # debug
-                print(type(self.coordinates)) # debug
+                print(f"Updated coordinates for Square {self.square_id}: " + self.coordinates) # debug
+                print(f"Updated X coordinates for Square {self.square_id}: " + self.coordinates.x) # debug
+                print(f"Updated Y coordinates for Square {self.square_id}: " + self.coordinates.y) # debug
+                # print(type(self.coordinates)) # debug
 
-                # checks for collisions
+                # checks for collision_detected
+                collision_detected = False
+                
+                for coordinates in list_of_coordinates:
+                    
+                    coordinates_x = coordinates.getX()
+                    coordinates_y = coordinates.getY()
+
+                    if coordinates_x == self.coordinates.getX() and coordinates_y == self.coordinates.getY:
+                        
+                        collision_detected = True
+                        self.square.move(-(movement_dx), -(movement_dy)) # undo Square movement
+                        print("Collision detected!")
+                        break
+                
                 # go throgh everyon point object, compare both X and Y values, update collision value somehow
                 
-                # collisions = self.coordinates in list_of_coordinates
+                # collision_detected = self.coordinates in list_of_coordinates
 
-                if collisions:
-                    print("Collision detected!")
-                    # break
-                else:
-                    print(f"Square {self.square_id} have moved {self.direction}!") # debug
+                # if collision_detected:
+                #     print("Collision detected!")
+                #     # break
+                
+                
+            print(f"Square {self.square_id} has moved {self.direction.upper()}!") # debug
+            print(f"Current coordinates for Square {self.square_id} is: {self.coordinates}") # debug
       
         else:
    
             # no other Squares currently exist, move in any direction
+            print("No other Squares detected!") # debug
+           
             self.direction = choice(["up", "down", "left", "right"])
         
             if self.direction == "up":
@@ -372,8 +393,13 @@ class Square():
             
             # gets updated coordinates for Square
             self.coordinates = self.square.getCenter()
-            print(self.coordinates) # debug
+            
+            print(f"\n\nSquare {self.square_id} has moved {self.direction.upper()}!") # debug
+            print(f"Current coordinates for Square {self.square_id} is: {self.coordinates}") # debug
 
+
+
+    # def collisionCheck():
 
 
    
