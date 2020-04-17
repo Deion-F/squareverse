@@ -30,7 +30,7 @@ class Squareverse():
     def createSquareverseWindow(self):
         
         # creates squareverse window, sets name & size
-        self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_size, height = self.squareverse_size)
+        self.window = GraphWin(title = self.squareverse_name, width = 900, height = 900)
         
         # sets background color of squareverse using RGB
         self.window.setBackground(self.squareverse_window_background_color)
@@ -140,7 +140,7 @@ class Squareverse():
                 square.moveSquare(self)
 
             # controls the movement delay between all Squares
-            # sleep(0.01)
+            sleep(0.3)
 
 
 
@@ -277,11 +277,12 @@ class Square():
         list_of_coordinates = []
         collision_detected = True
         number_of_collisions = 0
-        directions_already_tried = []
+        directions_already_tried = set()
 
         # print("\n\nLength of array 'list_of_squares': " + str(len(list_of_squares))) # debug
         if len(list_of_squares) > 1:
 
+            # builds the list of Square center point coordinates (Point objects) for all Squares that currently exist (including this Square)
             for square in list_of_squares:
                 coordinates = square.coordinates
                 list_of_coordinates.append(coordinates)
@@ -289,33 +290,37 @@ class Square():
 
             while collision_detected == True and number_of_collisions < 4:
 
+                # reset Square color to white
                 self.square.setFill(color_rgb(255, 255, 255))
                 
-
+                # randomly pick a direction for Square move in
                 direction = choice(["up", "down", "left", "right"])
 
-                if direction in directions_already_tried:
-                    self.direction = direction
-                else:
-
-                directions_already_tried.append(direction)
+                # check if direction has already been tried
+                while direction in directions_already_tried:
+                    
+                    print(f"\n\nAlready tried direction {direction}! Choosing another direction!") # debug
+                    direction = choice(["up", "down", "left", "right"])
+                
+                directions_already_tried.add(direction)
+                print(f"\n\nDirections tried: {directions_already_tried}") # debug
             
-                if self.direction == "up":
+                if direction == "up":
                 
                     movement_dx = 0
                     movement_dy = squareverse_grid_spacing
 
-                elif self.direction == "down":
+                elif direction == "down":
 
                     movement_dx = 0
                     movement_dy = -(squareverse_grid_spacing)
 
-                elif self.direction == "left":
+                elif direction == "left":
 
                     movement_dx = -(squareverse_grid_spacing)
                     movement_dy = 0
 
-                elif self.direction == "right":
+                elif direction == "right":
                 
                     movement_dx = squareverse_grid_spacing
                     movement_dy = 0
@@ -331,10 +336,10 @@ class Square():
                 # print(type(self.coordinates)) # debug
 
                 # checks for collisions with Squareverse border and other Squares
-                print("\n\nRunning logic for collision detection!") # debug
                 collision_detected = False
                 
-                if self.coordinates.getX() < 0 or self.coordinates.getY() < 0 or self.coordinates.getX() > squareverse_size or self.coordinates.getY() > squareverse_size:
+                print("\n\nRunning logic for border detection!") # debug
+                if self.coordinates.getX() <= 0 or self.coordinates.getY() <= 0 or self.coordinates.getX() >= squareverse_size or self.coordinates.getY() >= squareverse_size:
                     
                     collision_detected = True
                     self.square.setFill("Yellow")
@@ -345,6 +350,7 @@ class Square():
 
                 else:
 
+                    print("\n\nRunning logic for collision detection!") # debug
                     for coordinates in list_of_coordinates:
                         
                         coordinate_x = coordinates.getX()
@@ -356,10 +362,10 @@ class Square():
                             self.square.setFill("Red")
                             self.square.move(-(movement_dx), -(movement_dy)) # reverses Square movement
                             number_of_collisions += 1
-                            print(f"\n\n{number_of_collisions} collisions detected!")
+                            print(f"\n\nCollision with another Square detected!")
                         
             print(f"\n\nNumber of collisions for Square {self.square_id} is: {number_of_collisions}")
-            print(f"Square {self.square_id} has moved {self.direction.upper()}!") # debug
+            print(f"Square {self.square_id} has moved {direction.upper()}!") # debug
             print(f"Current coordinates for Square {self.square_id} is: {self.coordinates}") # debug
       
         else:
@@ -367,24 +373,33 @@ class Square():
             print("\n\nNo other Squares detected!") # debug
             while collision_detected == True:
 
-                self.direction = choice(["up", "down", "left", "right"])
+                direction = choice(["up", "down", "left", "right"])
             
-                if self.direction == "up":
+                # checks if direction has already been tried
+                while direction in directions_already_tried:
+                    
+                    print(f"\n\nAlready tried direction {direction.upper()}! Choosing another direction!") # debug
+                    direction = choice(["up", "down", "left", "right"])
+                
+                directions_already_tried.add(direction)
+                print(f"\n\nDirections tried: {directions_already_tried}") # debug
+
+                if direction == "up":
                 
                     movement_dx = 0
                     movement_dy = squareverse_grid_spacing
 
-                elif self.direction == "down":
+                elif direction == "down":
 
                     movement_dx = 0
                     movement_dy = -(squareverse_grid_spacing)
 
-                elif self.direction == "left":
+                elif direction == "left":
 
                     movement_dx = -(squareverse_grid_spacing)
                     movement_dy = 0
 
-                elif self.direction == "right":
+                elif direction == "right":
                 
                     movement_dx = squareverse_grid_spacing
                     movement_dy = 0
@@ -395,20 +410,20 @@ class Square():
                 # gets updated coordinates for Square
                 self.coordinates = self.square.getCenter()
             
-                print("\n\nRunning logic for collision detection!") # debug
+                # checks for collisions with Squareverse boarder
                 collision_detected = False
                 
+                print("\n\nRunning logic for border detection!") # debug
                 if self.coordinates.getX() < 0 or self.coordinates.getY() < 0 or self.coordinates.getX() > squareverse_size or self.coordinates.getY() > squareverse_size:
                     
                     collision_detected = True
                     self.square.setFill("Yellow")
                     self.square.move(-(movement_dx), -(movement_dy)) # reverses Square movement
-                    # number_of_collisions += 1
                     
                     print("\n\nCollision with Squareverse boarder detected!") # debug
             
             
-            print(f"\n\nSquare {self.square_id} has moved {self.direction.upper()}!") # debug
+            print(f"\n\nSquare {self.square_id} has moved {direction.upper()}!") # debug
             print(f"Current coordinates for Square {self.square_id} is: {self.coordinates}") # debug
 
 
