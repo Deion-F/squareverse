@@ -81,27 +81,24 @@ class Squareverse():
 
     def createSquares(self, number_of_squares = 1):
 
-        # creates number of Squares provided by numSquares
+        # creates number of Squares provided by number_of_squares
         for _ in range(number_of_squares):
             
             grid_occupied = True
-            max_x = self.squareverse_size
-            print(max_x) # debug
-            
-            
-            
+            squareverse_max_xy = self.squareverse_size
+
             if len(self.created_squares) > 0:
                
                 while grid_occupied == True:
                
-                    top_left_corner_x = randrange(0, (max_x - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
-                    top_left_corner_y = randrange(0, (max_y - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
+                    top_left_corner_x = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
+                    top_left_corner_y = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
 
                     for square in self.created_squares:
                         
                         if square.top_left_corner_x == top_left_corner_x and square.top_left_corner_y == top_left_corner_y:
                             
-                            # print("A Square already exists in this location!")
+                            # print("A Square already exists in this location!") # debug
                             grid_occupied = True
                             
                             break
@@ -109,40 +106,25 @@ class Squareverse():
                         else:
                             
                             grid_occupied = False
+            
             else:
-                top_left_corner_x = randrange(100, (max_x - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
-                max_y = self.squareverse_size
-                top_left_corner_y = randrange(100, (max_y - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
-                print(max_y) # debug
+                
+                top_left_corner_x = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
+                top_left_corner_y = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
 
-            
-            
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
             bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
             square = Square(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, self.window)
-            # square_object = (new_square, new_square.coordinate)
 
             # adds Square object to array for Squareverse
             self.created_squares.append(square)
 
+            # defines the Square ID based on the array index            
+            (self.created_squares[len(self.created_squares) - 1]).square_id = len(self.created_squares) - 1
 
-            # defines the Square ID based on the array index
-            # self.squares[i].square_id = len(self.squares) - 1
-            
-            (self.created_squares[len(self.created_squares) -1]).square_id = len(self.created_squares) -1
 
-            
-
-            # top_corner = Point(top_corner_dimension, top_corner_dimension + (self.squareverse_grid_spacing * 3))
-            # bottom_corner = Point(bottom_corner_dimension, bottom_corner_dimension + (self.squareverse_grid_spacing * 3))
-
-            # square = Rectangle(top_corner, bottom_corner)
-            # square.setFill(new_square.square_color)
-            # square.draw(self.window)
-
-            print(f"Square {(self.created_squares[len(self.created_squares) -1]).square_id} has been spawned at - top:{(self.created_squares[len(self.created_squares) -1]).top_left_corner_x}:{(self.created_squares[len(self.created_squares) -1]).top_left_corner_y} bottom:{(self.created_squares[len(self.created_squares) -1]).bottom_right_corner_x}:{(self.created_squares[len(self.created_squares) -1]).bottom_right_corner_y} center: {(self.created_squares[len(self.created_squares) -1]).coordinates}") # debug
-            # print((self.squares[new_square.square_id]).square_id) # debug
+            print(f"\n\nSquare {(self.created_squares[len(self.created_squares) - 1]).square_id} has been spawned at - top:{(self.created_squares[len(self.created_squares) - 1]).top_left_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).top_left_corner_y} bottom:{(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_y} center: {(self.created_squares[len(self.created_squares) - 1]).coordinates}") # debug
 
 
 
