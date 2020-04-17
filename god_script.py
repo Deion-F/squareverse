@@ -21,7 +21,7 @@ class Squareverse():
         self.squareverse_grid_spacing = squareverse_grid_spacing
         self.created_squares = []
         
-        print(f"\n\n***Squareverse Values***\nSquareverse ID: {self.squareverse_id}\nSquareverse Name: {self.squareverse_name}\nSquareverse Size: {self.squareverse_size}px\nSquareverse Grid Spacing: {self.squareverse_grid_spacing}px") #debug
+        print(f"\n\n***Squareverse Values***\nSquareverse ID: {self.squareverse_id}\nSquareverse Name: {self.squareverse_name}\nSquareverse Size: {self.squareverse_size}px\nSquareverse Grid Spacing: {self.squareverse_grid_spacing}px") # debug
         
         self.createSquareverseWindow()
 
@@ -80,8 +80,6 @@ class Squareverse():
 
 
     def createSquares(self, number_of_squares = 1):
-        
-        # self.numSquares = numSquares
 
         # creates number of Squares provided by numSquares
         for _ in range(number_of_squares):
@@ -89,32 +87,36 @@ class Squareverse():
             grid_occupied = True
             max_x = self.squareverse_size
             print(max_x) # debug
-            top_left_corner_x = randrange(0, max_x, self.squareverse_grid_spacing)
-            max_y = self.squareverse_size
-            top_left_corner_y = randrange(0, max_y, self.squareverse_grid_spacing)
-            print(max_y) # debug
             
             
-            if len(self.created_squares) != 0:
+            
+            if len(self.created_squares) > 0:
                
                 while grid_occupied == True:
                
-                    top_left_corner_x = randrange(0, max_x, self.squareverse_grid_spacing)
-                    top_left_corner_y = randrange(0, max_y, self.squareverse_grid_spacing)
+                    top_left_corner_x = randrange(0, (max_x - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
+                    top_left_corner_y = randrange(0, (max_y - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
 
                     for square in self.created_squares:
                         
                         if square.top_left_corner_x == top_left_corner_x and square.top_left_corner_y == top_left_corner_y:
                             
-                            print("A Square already exists in this location!")
+                            # print("A Square already exists in this location!")
                             grid_occupied = True
                             
-                            # break
-                       
+                            break
+
                         else:
                             
                             grid_occupied = False
+            else:
+                top_left_corner_x = randrange(100, (max_x - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
+                max_y = self.squareverse_size
+                top_left_corner_y = randrange(100, (max_y - (self.squareverse_grid_spacing * 2)), self.squareverse_grid_spacing)
+                print(max_y) # debug
 
+            
+            
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
             bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
@@ -176,7 +178,7 @@ def createSquareverse():
     
     squareverse_id = randint(1, 100)
     squareverse_name = "Squareverse" + str(squareverse_id)
-    squareverse_size = input("Squareverse Size (default - 800px): ")
+    squareverse_size = input("\n\nSquareverse Size (default - 800px): ")
 
     assert len(squareverse_size) == 0 or squareverse_size.isnumeric == True, "E: the value entered was not a number!"
 

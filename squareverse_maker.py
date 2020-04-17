@@ -11,10 +11,5 @@ def runSquareverseSimulation():
     showMenu(squareverse)
 
     
-
-
-
-
-
-    
+ 
 runSquareverseSimulation()
