@@ -266,6 +266,7 @@ class Square():
         # add logic in collision check to avoid edges of Squareverse
         # add logic to increase color of Square for each consecutive collision
         # split method for collision/border check into separate methods
+        # add logic to ensure that Square only checks each direction once
 
 
         squareverse_size = squareverse.squareverse_size
@@ -276,10 +277,10 @@ class Square():
         list_of_coordinates = []
         collision_detected = True
         number_of_collisions = 0
+        directions_already_tried = []
 
-        print("\n\nLength of array 'list_of_squares': " + str(len(list_of_squares))) # debug
+        # print("\n\nLength of array 'list_of_squares': " + str(len(list_of_squares))) # debug
         if len(list_of_squares) > 1:
-
 
             for square in list_of_squares:
                 coordinates = square.coordinates
@@ -289,7 +290,15 @@ class Square():
             while collision_detected == True and number_of_collisions < 4:
 
                 self.square.setFill(color_rgb(255, 255, 255))
-                self.direction = choice(["up", "down", "left", "right"])
+                
+
+                direction = choice(["up", "down", "left", "right"])
+
+                if direction in directions_already_tried:
+                    self.direction = direction
+                else:
+
+                directions_already_tried.append(direction)
             
                 if self.direction == "up":
                 
