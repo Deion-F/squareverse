@@ -7,6 +7,7 @@ from random import randint, randrange, choice
 #COMMENT LEGEND
 # Code for debugging - #D
 # Code for providing information - #I
+# Temporary code used for testing
 
 
 class Squareverse():
@@ -84,26 +85,26 @@ class Squareverse():
 
 
 
-    def createSquares(self, number_of_squares = 1):
+    def createSquares(self, number_of_squares):
 
         # creates number of Squares provided by number_of_squares
         for _ in range(number_of_squares):
             
             grid_occupied = True
-            squareverse_max_xy = self.squareverse_size
+            squareverse_max_xy = (self.squareverse_size + self.squareverse_grid_spacing)
 
             if len(self.created_squares) > 0:
                
                 while grid_occupied == True:
                
-                    top_left_corner_x = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
-                    top_left_corner_y = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
+                    top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+                    top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
 
                     for square in self.created_squares:
                         
                         if square.top_left_corner_x == top_left_corner_x and square.top_left_corner_y == top_left_corner_y:
                             
-                            # print("A Square already exists in this location!") # debug
+                            # print(f"\n\nSquare [{square.square_id}] already exists in this location!") #D
                             grid_occupied = True
                             
                             break
@@ -114,13 +115,14 @@ class Squareverse():
             
             else:
                 
-                top_left_corner_x = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
-                top_left_corner_y = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
+                top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+                top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+
 
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
             bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
-            square = Square(760, 0, 800, 40, self.window) #T
+            square = Square(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, self.window)
 
             # adds Square object to array for Squareverse
             self.created_squares.append(square)
@@ -129,11 +131,11 @@ class Squareverse():
             (self.created_squares[len(self.created_squares) - 1]).square_id = len(self.created_squares) - 1
 
 
-            print(f"\n\nSquare {(self.created_squares[len(self.created_squares) - 1]).square_id} has been spawned at - top:{(self.created_squares[len(self.created_squares) - 1]).top_left_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).top_left_corner_y} bottom:{(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_y} center: {(self.created_squares[len(self.created_squares) - 1]).coordinates}") # debug
+            print(f"\n\nSquare [{(self.created_squares[len(self.created_squares) - 1]).square_id}] has been spawned at: [top left corner - {(self.created_squares[len(self.created_squares) - 1]).top_left_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).top_left_corner_y}] [bottom right corner - {(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_y}] [center - {(self.created_squares[len(self.created_squares) - 1]).coordinates}]") #D
 
 
 
-    def moveSquares(self, duration):
+    def moveSquares(self):
 
 
         mouse_clicked = self.window.checkMouse()
@@ -147,10 +149,10 @@ class Squareverse():
             mouse_clicked = self.window.checkMouse()
             for square in self.created_squares:
 
-                print(f"\n\nMouse clicked = {mouse_clicked}") # debug
+                print(f"\n\nMouse clicked = {mouse_clicked}") #D
                 square.moveSquare(self)
 
-            # controls the movement delay between all Squares
+            # controls the movement delay between cycles
             sleep(0.5)
 
 
@@ -217,15 +219,15 @@ def showMenu(squareverse):
             pass
         elif user_selection == "m":
             
-            default_duration = 10
-            duration = input(f"Enter a duration for movement (default {default_duration}): ")
+            # default_duration = 10
+            # duration = input(f"Enter a duration for movement (default {default_duration}): ")
             
-            if duration == "" or duration.isnumeric == False:
-                duration = default_duration
+            # if duration == "" or duration.isnumeric == False:
+            #     duration = default_duration
 
-            print(f"Moving Squares for {duration} cycles. Please wait...")
+            print(f"Moving Squares...")
             
-            squareverse.moveSquares(int(duration))
+            squareverse.moveSquares()
 
         else:
             squareverse.destroy_squareverse()
@@ -302,22 +304,22 @@ class Square():
                 
                 # randomly pick a direction for Square move in
                 direction = choice(["up", "down", "left", "right"])
-                print(f"\n\nCoordinates for Square {self.square_id} before moving is {self.coordinates}") # debug
-                print(f"Square {self.square_id} will attempt to move {direction.upper()}") # debug
+                print(f"\n\nCoordinates for Square [{self.square_id}] before moving are [{self.coordinates}]") #D
+                print(f"Square [{self.square_id}] will attempt to move [{direction.upper()}]") #D
 
                 # check if direction has already been tried
                 while direction in directions_already_tried:
                     
-                    print(f"\n\nAlready tried direction {direction.upper()}! Choosing another direction!") # debug
+                    print(f"\n\nAlready tried direction [{direction.upper()}] so choosing another direction") #D
                     direction = choice(["up", "down", "left", "right"])
                 
                 directions_already_tried.add(direction)
-                print(f"\n\nDirections tried for Square {self.square_id}: {directions_already_tried}") # debug
+                print(f"\n\nDirections tried for Square [{self.square_id}] are [{directions_already_tried}]") #D
             
                 if direction == "up":
                 
                     movement_dx = 0
-                    movement_dy = 40
+                    movement_dy = -40
 
                 elif direction == "down":
 
