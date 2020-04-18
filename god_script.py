@@ -4,6 +4,9 @@ from random import randint, randrange, choice
 # import threading
 # end of imports
 
+#COMMENT LEGEND
+# Code for debugging - #D
+# Code for providing information - #I
 
 
 class Squareverse():
@@ -19,9 +22,10 @@ class Squareverse():
         self.squareverse_name = squareverse_name
         self.squareverse_size = squareverse_size
         self.squareverse_grid_spacing = squareverse_grid_spacing
+        self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
         self.created_squares = []
         
-        print(f"\n\n***Squareverse Values***\nSquareverse ID: {self.squareverse_id}\nSquareverse Name: {self.squareverse_name}\nSquareverse Size: {self.squareverse_size}px\nSquareverse Grid Spacing: {self.squareverse_grid_spacing}px") # debug
+        print(f"\n\n***Squareverse Values***\nSquareverse ID: [{self.squareverse_id}]\nSquareverse Name: [{self.squareverse_name}]\nSquareverse Size: [{self.squareverse_size}px]\nSquareverse Grid Spacing: [{self.squareverse_grid_spacing}px]\nSquareverse Window Size: [{self.squareverse_window_size}px]") #D
         
         self.createSquareverseWindow()
 
@@ -30,12 +34,12 @@ class Squareverse():
     def createSquareverseWindow(self):
         
         # creates squareverse window, sets name & size
-        self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_size, height = self.squareverse_size)
+        self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
         
         # sets background color of squareverse using RGB
         self.window.setBackground(self.squareverse_window_background_color)
 
-        print(f"\n\nSquareverse window for has been successfully created for: {self.squareverse_name}")
+        print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #I
         
         # generates grid for squareverse
         self.createSquareverseGrid()
@@ -44,18 +48,19 @@ class Squareverse():
 
     def createSquareverseGrid(self):
         
-        print(f"\n\nCreating Squareverse grid for {self.squareverse_name} using the following grid spacing: {self.squareverse_grid_spacing}px")
+        print(f"\n\nCreating Squareverse grid for [{self.squareverse_name}] using grid spacing of [{self.squareverse_grid_spacing}px]") #I
 
-        vertical_starting_point = 0
-        horizontal_starting_point = 0
-        number_of_lines = self.squareverse_size // self.squareverse_grid_spacing # probably needs tuning to create the exact amount of lines required
-        # print(number_of_lines, type(number_of_lines)) #debug
+        vertical_starting_point = self.squareverse_grid_spacing
+        horizontal_starting_point = self.squareverse_grid_spacing
+        number_of_lines = (self.squareverse_size // self.squareverse_grid_spacing) + 1 # probably needs tuning to create the exact amount of lines required
+        print(f"\n\n[{number_of_lines}] grid lines required") #D
 
         for _ in range(number_of_lines):
 
             # creates vertical lines
-            first_point = Point(vertical_starting_point, 0)
-            second_point = Point(vertical_starting_point, self.squareverse_size)
+            first_point = Point(vertical_starting_point, self.squareverse_grid_spacing)
+            second_point = Point(vertical_starting_point, (self.squareverse_size + self.squareverse_grid_spacing))
+            # print(f"\n\nCoordinates for grid line [first point - {first_point}] [second point - {second_point}]") #D
             vertical_line = Line(first_point, second_point)
            
             vertical_line.setOutline(self.squareverse_grid_color)
@@ -65,8 +70,8 @@ class Squareverse():
             vertical_starting_point = vertical_starting_point + self.squareverse_grid_spacing
 
             # creates horizontal lines
-            first_point = Point(0, horizontal_starting_point)
-            second_point = Point(self.squareverse_size, horizontal_starting_point)
+            first_point = Point(self.squareverse_grid_spacing, horizontal_starting_point)
+            second_point = Point((self.squareverse_size + self.squareverse_grid_spacing), horizontal_starting_point)
             horizontal_line = Line(first_point, second_point)
             
             horizontal_line.setOutline(self.squareverse_grid_color)
@@ -75,7 +80,7 @@ class Squareverse():
 
             horizontal_starting_point = horizontal_starting_point + self.squareverse_grid_spacing
 
-        print(f"\n\nSquareverse grid has been successfully created for {self.squareverse_name}")
+        print(f"\n\nSquareverse grid has been successfully created for [{self.squareverse_name}]") #D
 
 
 
@@ -115,7 +120,7 @@ class Squareverse():
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
             bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
-            square = Square(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, self.window)
+            square = Square(760, 0, 800, 40, self.window) #T
 
             # adds Square object to array for Squareverse
             self.created_squares.append(square)
@@ -130,17 +135,23 @@ class Squareverse():
 
     def moveSquares(self, duration):
 
-        # continues moving all Squares until the window is clicked
-        # while self.window.checkMouse() == None:
 
-        for _ in range(duration):
+        mouse_clicked = self.window.checkMouse()
 
+        # for _ in range(duration):
+
+        # stops the simulation on the next cycle after the mouse is clicked
+        while mouse_clicked == None:
+        # print(f"\n\nMouse clicked = {mouse_clicked}")
+            
+            mouse_clicked = self.window.checkMouse()
             for square in self.created_squares:
 
+                print(f"\n\nMouse clicked = {mouse_clicked}") # debug
                 square.moveSquare(self)
 
             # controls the movement delay between all Squares
-            sleep(0.3)
+            sleep(0.5)
 
 
 
@@ -175,12 +186,9 @@ def createSquareverse():
         squareverse_grid_spacing = 40
         # squareverse_grid_spacing = randrange(20, 80, 20)
 
-    # creates squareverse using provided values
+    # creates Squareverse using provided values
     squareverse = Squareverse(squareverse_id, squareverse_name, int(squareverse_size), int(squareverse_grid_spacing))
     print(f"\n\nThe new Squareverse, {squareverse.squareverse_name}, has been successfully created!")
-
-    # show Squareverse menu
-    # showMenu(squareverse)
 
 
     return squareverse
@@ -309,12 +317,12 @@ class Square():
                 if direction == "up":
                 
                     movement_dx = 0
-                    movement_dy = -40
+                    movement_dy = 40
 
                 elif direction == "down":
 
                     movement_dx = 0
-                    movement_dy = 40
+                    movement_dy = -40
 
                 elif direction == "left":
 
@@ -392,16 +400,16 @@ class Square():
                 if direction == "up":
                 
                     movement_dx = 0
-                    movement_dy = (squareverse_grid_spacing * -1)
+                    movement_dy = (squareverse_grid_spacing * 1)
 
                 elif direction == "down":
 
                     movement_dx = 0
-                    movement_dy = squareverse_grid_spacing
+                    movement_dy = squareverse_grid_spacing * - 1
 
                 elif direction == "left":
 
-                    movement_dx = (squareverse_grid_spacing * -1)
+                    movement_dx = (squareverse_grid_spacing * - 1)
                     movement_dy = 0
 
                 elif direction == "right":
