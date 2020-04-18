@@ -185,7 +185,7 @@ def createSquareverse():
     assert len(squareverse_grid_spacing) == 0 or squareverse_grid_spacing.isnumeric == True, "E: the value entered was not a number!"
 
     if len(squareverse_grid_spacing) == 0:
-        squareverse_grid_spacing = 40
+        squareverse_grid_spacing = 20
         # squareverse_grid_spacing = randrange(20, 80, 20)
 
     # creates Squareverse using provided values
