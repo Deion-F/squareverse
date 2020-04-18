@@ -279,8 +279,8 @@ class Square():
 
 
         squareverse_size = squareverse.squareverse_size
-        list_of_squares = squareverse.created_squares
         squareverse_grid_spacing = squareverse.squareverse_grid_spacing
+        list_of_squares = squareverse.created_squares
         movement_dx = 0
         movement_dy = 0
         list_of_coordinates = []
@@ -324,7 +324,7 @@ class Square():
                 elif direction == "down":
 
                     movement_dx = 0
-                    movement_dy = -40
+                    movement_dy = 40
 
                 elif direction == "left":
 
@@ -349,8 +349,8 @@ class Square():
                 # checks for collisions with Squareverse border and other Squares
                 collision_detected = False
                 
-                print("\n\nRunning logic for border detection!") # debug
-                if self.coordinates.getX() <= 0 or self.coordinates.getY() <= 0 or self.coordinates.getX() >= 800 or self.coordinates.getY() >= 800:
+                print("\n\nRunning logic for border detection!") #D
+                if self.coordinates.getX() <= squareverse.squareverse_grid_spacing or self.coordinates.getY() <= squareverse.squareverse_grid_spacing or self.coordinates.getX() >= (squareverse.squareverse_size + squareverse.squareverse_grid_spacing) or self.coordinates.getY() >= (squareverse.squareverse_size + squareverse.squareverse_grid_spacing):
                     
                     collision_detected = True
                     self.square.setFill("Yellow")
@@ -359,6 +359,8 @@ class Square():
                     number_of_collisions += 1
                     
                     print("\n\nCollision with Squareverse border detected!") # debug
+
+                    # break
 
                 else:
 
@@ -372,7 +374,7 @@ class Square():
                             
                             collision_detected = True
                             self.square.setFill("Red")
-                            self.square.move((movement_dx * -1), (movement_dy * 1)) # reverses Square movement
+                            self.square.move((movement_dx * -1), (movement_dy * -1)) # reverses Square movement
                             self.coordinates = self.square.getCenter()
                             number_of_collisions += 1
                             print(f"\n\nCollision with another Square detected!")
