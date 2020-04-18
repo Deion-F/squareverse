@@ -30,7 +30,7 @@ class Squareverse():
     def createSquareverseWindow(self):
         
         # creates squareverse window, sets name & size
-        self.window = GraphWin(title = self.squareverse_name, width = 1000, height = 1000)
+        self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_size, height = self.squareverse_size)
         
         # sets background color of squareverse using RGB
         self.window.setBackground(self.squareverse_window_background_color)
@@ -46,15 +46,15 @@ class Squareverse():
         
         print(f"\n\nCreating Squareverse grid for {self.squareverse_name} using the following grid spacing: {self.squareverse_grid_spacing}px")
 
-        vertical_starting_point = 40
-        horizontal_starting_point = 40
+        vertical_starting_point = 0
+        horizontal_starting_point = 0
         number_of_lines = self.squareverse_size // self.squareverse_grid_spacing # probably needs tuning to create the exact amount of lines required
         # print(number_of_lines, type(number_of_lines)) #debug
 
         for _ in range(number_of_lines):
 
             # creates vertical lines
-            first_point = Point(vertical_starting_point, 40)
+            first_point = Point(vertical_starting_point, 0)
             second_point = Point(vertical_starting_point, self.squareverse_size)
             vertical_line = Line(first_point, second_point)
            
@@ -91,8 +91,8 @@ class Squareverse():
                
                 while grid_occupied == True:
                
-                    top_left_corner_x = randrange(40, squareverse_max_xy, self.squareverse_grid_spacing)
-                    top_left_corner_y = randrange(40, squareverse_max_xy, self.squareverse_grid_spacing)
+                    top_left_corner_x = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
+                    top_left_corner_y = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
 
                     for square in self.created_squares:
                         
@@ -109,8 +109,8 @@ class Squareverse():
             
             else:
                 
-                top_left_corner_x = randrange(40, squareverse_max_xy, self.squareverse_grid_spacing)
-                top_left_corner_y = randrange(40, squareverse_max_xy, self.squareverse_grid_spacing)
+                top_left_corner_x = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
+                top_left_corner_y = randrange(0, squareverse_max_xy, self.squareverse_grid_spacing)
 
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
             bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
@@ -165,7 +165,7 @@ def createSquareverse():
     assert len(squareverse_size) == 0 or squareverse_size.isnumeric == True, "E: the value entered was not a number!"
 
     if len(squareverse_size) == 0:
-        squareverse_size = 900
+        squareverse_size = 800
 
     squareverse_grid_spacing = input("Grid Spacing (default - random): ")
 
