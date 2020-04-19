@@ -95,46 +95,44 @@ class Squareverse():
             
             grid_occupied = True
             number_of_empty_grids = (self.max_number_of_squares - len(self.created_squares))
-            print(f"\n\n[{number_of_empty_grids}] empty grids remaining before spawing Square | Max number of Squares [{self.max_number_of_squares}] | Length of created Squares [{len(self.created_squares)}]") #D
+            # print(f"\n\n[{number_of_empty_grids}] empty grids remaining before spawing Square | Max number of Squares [{self.max_number_of_squares}] | Length of created Squares [{len(self.created_squares)}]") #D
             squareverse_max_xy = (self.squareverse_size + self.squareverse_grid_spacing)
 
-            
-            
-            while number_of_empty_grids > 0 and grid_occupied == True and len(self.created_squares) > 0:
-               
-                # while grid_occupied == True:
-                print(f"\n\nCreating random coordinates for Square top left corner")
-                print(f"List of Squares: [{self.created_squares}]")
+            if number_of_empty_grids == 0 :
+                 
+                print(f"\n\nThere are [{number_of_empty_grids}] empty grids remaining (no more grid space)") #D
+
+                break
+
+            elif len(self.created_squares) == 0:
+                
                 top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
                 top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
-
-                for square in self.created_squares:
-                    
-                    if square.top_left_corner_x == top_left_corner_x and square.top_left_corner_y == top_left_corner_y:
-                        
-                        print(f"\n\nSquare [{square.square_id}] already exists in this location!") #D
-                        grid_occupied = True
-                        
-                        break
-
-                    else:
-                        
-                        grid_occupied = False
-
-                        break
                 
             else:
+            
+                while number_of_empty_grids > 0 and grid_occupied == True:
                 
-                if len(self.created_squares) == 0:
-                    
+                    # while grid_occupied == True:
+                    print(f"\n\nCreating random coordinates for Square top left corner") #D
+                    # print(f"List of Squares: [{self.created_squares}]") #D
                     top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
                     top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
 
-                else:
+                    for square in self.created_squares:
+                        
+                        if square.top_left_corner_x == top_left_corner_x and square.top_left_corner_y == top_left_corner_y:
+                            
+                            print(f"\n\nSquare [{square.square_id}] already exists in this location!") #D
+                            grid_occupied = True
+                            
+                            break
 
-                    print(f"\n\nThere are [{number_of_empty_grids}] empty grids remaining (no more grid space)") #D
+                        else:
+                            
+                            grid_occupied = False
 
-                    break
+
 
 
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
