@@ -14,7 +14,7 @@ class Squareverse():
 
 
     squareverse_window_background_color = color_rgb(97, 97, 97)
-    squareverse_grid_color = color_rgb(255, 255, 255)
+    squareverse_grid_color = color_rgb(0, 255, 0)
 
 
     def __init__(self, squareverse_id, squareverse_name, squareverse_size, squareverse_grid_spacing):
@@ -53,8 +53,8 @@ class Squareverse():
 
         vertical_starting_point = self.squareverse_grid_spacing
         horizontal_starting_point = self.squareverse_grid_spacing
-        number_of_lines = (self.squareverse_size // self.squareverse_grid_spacing) + 1
-        self.max_number_of_squares = (self.squareverse_size // self.squareverse_grid_spacing) ** 2
+        number_of_lines = int(round((self.squareverse_size / self.squareverse_grid_spacing), 0) + 1)
+        self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
         
         print(f"\n\n[{number_of_lines}] grid lines required") #D
         print(f"[{self.max_number_of_squares}] maximum Squares can be created") #D
@@ -189,29 +189,37 @@ def createSquareverse():
     
     #TO-DO
     # figure out why Squareverse grid breaks when grid spacing is too big (e.g. 90px)
+    # add logic to create Squareverse size based on number system (e.g. size 4 = 400px)
 
     squareverse_id = randint(1, 100)
-    squareverse_name = "Squareverse" + str(squareverse_id)
-    squareverse_size = input("\n\nSquareverse Size (default - 800px): ")
+    squareverse_name = "Squareverse " + str(squareverse_id)
+    squareverse_size = input("\n\nSquareverse Size (1 - 10): ")
 
     # print(f"\n\nAmount of values provided for Squareverse size are [{len(squareverse_size)}] and numeric check is [{squareverse_size.isnumeric()}]") #D
-    assert len(squareverse_size) == 0 or squareverse_size.isnumeric() == True, f"'{squareverse_size}' is not a number"
+    # assert len(squareverse_size) == 0 or squareverse_size.isnumeric() == True, f"'{squareverse_size}' is not a number"
 
     if len(squareverse_size) == 0:
-        squareverse_size = 800
+        squareverse_size = 8
+    else:
+        pass
+
+    squareverse_size = (int(squareverse_size) * 100) # calculates actual Squareverse window size
 
     squareverse_grid_spacing = input("\n\nGrid Spacing (default - random): ")
 
     # print(f"\n\nAmount of values provided for Squareverse grid spacing are [{len(squareverse_grid_spacing)}] and numeric check is [{squareverse_grid_spacing.isnumeric()}]") #D
-    assert len(squareverse_grid_spacing) == 0 or squareverse_grid_spacing.isnumeric() == True, f"'{squareverse_grid_spacing}' is not a number"
+    # assert len(squareverse_grid_spacing) == 0 or squareverse_grid_spacing.isnumeric() == True, f"'{squareverse_grid_spacing}' is not a number"
 
     if len(squareverse_grid_spacing) == 0:
         # squareverse_grid_spacing = 40
-        squareverse_grid_spacing = randrange(10, 100, 10)
+        squareverse_grid_spacing = randrange(10, 100, 5)
+        print(f"\n\nRandomly chosen grid spacing is [{squareverse_grid_spacing}px]") #D
+    else:
+        pass
 
     # creates Squareverse using provided values
     squareverse = Squareverse(squareverse_id, squareverse_name, int(squareverse_size), int(squareverse_grid_spacing))
-    print(f"\n\n[{squareverse.squareverse_name}] has been successfully created") #I
+    print(f"\n\n[{squareverse.squareverse_name}] has been successfully created") #D
 
 
     return squareverse
@@ -349,21 +357,21 @@ class Square():
                 if direction == "up":
                 
                     movement_dx = 0
-                    movement_dy = -40
+                    movement_dy = -squareverse_grid_spacing
 
                 elif direction == "down":
 
                     movement_dx = 0
-                    movement_dy = 40
+                    movement_dy = squareverse_grid_spacing
 
                 elif direction == "left":
 
-                    movement_dx = -40
+                    movement_dx = -squareverse_grid_spacing
                     movement_dy = 0
 
                 elif direction == "right":
                 
-                    movement_dx = 40
+                    movement_dx = squareverse_grid_spacing
                     movement_dy = 0
 
                 # move Square one grid space in randomly chosen direction
@@ -380,7 +388,7 @@ class Square():
                 collision_detected = False
                 
                 print("\n\nRunning logic for border detection!") #D
-                if self.coordinates.getX() <= squareverse.squareverse_grid_spacing or self.coordinates.getY() <= squareverse.squareverse_grid_spacing or self.coordinates.getX() >= (squareverse.squareverse_size + squareverse.squareverse_grid_spacing) or self.coordinates.getY() >= (squareverse.squareverse_size + squareverse.squareverse_grid_spacing):
+                if self.coordinates.getX() <= squareverse_grid_spacing or self.coordinates.getY() <= squareverse_grid_spacing or self.coordinates.getX() >= (squareverse_size + squareverse_grid_spacing) or self.coordinates.getY() >= (squareverse_size + squareverse_grid_spacing):
                     
                     collision_detected = True
                     self.square.setFill("Yellow")
