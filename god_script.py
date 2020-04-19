@@ -40,7 +40,7 @@ class Squareverse():
         # sets background color of squareverse using RGB
         self.window.setBackground(self.squareverse_window_background_color)
 
-        print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #I
+        print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #D
         
         # generates grid for squareverse
         self.createSquareverseGrid()
@@ -49,12 +49,15 @@ class Squareverse():
 
     def createSquareverseGrid(self):
         
-        print(f"\n\nCreating Squareverse grid for [{self.squareverse_name}] using grid spacing of [{self.squareverse_grid_spacing}px]") #I
+        print(f"\n\nCreating Squareverse grid for [{self.squareverse_name}] using grid spacing of [{self.squareverse_grid_spacing}px]") #D
 
         vertical_starting_point = self.squareverse_grid_spacing
         horizontal_starting_point = self.squareverse_grid_spacing
-        number_of_lines = (self.squareverse_size // self.squareverse_grid_spacing) + 1 # probably needs tuning to create the exact amount of lines required
+        number_of_lines = (self.squareverse_size // self.squareverse_grid_spacing) + 1
+        self.max_number_of_squares = (self.squareverse_size // self.squareverse_grid_spacing) ** 2
+        
         print(f"\n\n[{number_of_lines}] grid lines required") #D
+        print(f"[{self.max_number_of_squares}] maximum Squares can be created") #D
 
         for _ in range(number_of_lines):
 
@@ -91,32 +94,36 @@ class Squareverse():
         for _ in range(number_of_squares):
             
             grid_occupied = True
+            number_of_empty_grids = (self.max_number_of_squares - len(self.created_squares))
+            print(f"\n\n[{number_of_empty_grids}] empty grids remaining before spawing Square") #D
             squareverse_max_xy = (self.squareverse_size + self.squareverse_grid_spacing)
 
-            if len(self.created_squares) > 0:
+            while number_of_empty_grids != 0 and grid_occupied == True:
                
-                while grid_occupied == True:
-               
-                    top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
-                    top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+                # while grid_occupied == True:
+                print(f"\n\nCreating random coordinates for Square top left corner")
+                print(f"List of Squares: [{self.created_squares}]")
+                top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+                top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
 
-                    for square in self.created_squares:
+                for square in self.created_squares:
+                    
+                    if square.top_left_corner_x == top_left_corner_x and square.top_left_corner_y == top_left_corner_y:
                         
-                        if square.top_left_corner_x == top_left_corner_x and square.top_left_corner_y == top_left_corner_y:
-                            
-                            # print(f"\n\nSquare [{square.square_id}] already exists in this location!") #D
-                            grid_occupied = True
-                            
-                            break
+                        print(f"\n\nSquare [{square.square_id}] already exists in this location!") #D
+                        grid_occupied = True
+                        
+                        break
 
-                        else:
-                            
-                            grid_occupied = False
+                    else:
+                        
+                        grid_occupied = False
             
             else:
                 
-                top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
-                top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+                print(f"\n\nThere are [{number_of_empty_grids}] empty grids remaining") #D
+
+                break
 
 
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
@@ -171,26 +178,31 @@ class Squareverse():
 
 def createSquareverse():
     
+    #TO-DO
+    # figure out why Squareverse grid breaks when grid spacing is too big (e.g. 90px)
+
     squareverse_id = randint(1, 100)
     squareverse_name = "Squareverse" + str(squareverse_id)
     squareverse_size = input("\n\nSquareverse Size (default - 800px): ")
 
-    assert len(squareverse_size) == 0 or squareverse_size.isnumeric == True, "E: the value entered was not a number!"
+    # print(f"\n\nAmount of values provided for Squareverse size are [{len(squareverse_size)}] and numeric check is [{squareverse_size.isnumeric()}]") #D
+    assert len(squareverse_size) == 0 or squareverse_size.isnumeric() == True, f"'{squareverse_size}' is not a number"
 
     if len(squareverse_size) == 0:
         squareverse_size = 800
 
-    squareverse_grid_spacing = input("Grid Spacing (default - random): ")
+    squareverse_grid_spacing = input("\n\nGrid Spacing (default - random): ")
 
-    assert len(squareverse_grid_spacing) == 0 or squareverse_grid_spacing.isnumeric == True, "E: the value entered was not a number!"
+    # print(f"\n\nAmount of values provided for Squareverse grid spacing are [{len(squareverse_grid_spacing)}] and numeric check is [{squareverse_grid_spacing.isnumeric()}]") #D
+    assert len(squareverse_grid_spacing) == 0 or squareverse_grid_spacing.isnumeric() == True, f"'{squareverse_grid_spacing}' is not a number"
 
     if len(squareverse_grid_spacing) == 0:
-        squareverse_grid_spacing = 20
-        # squareverse_grid_spacing = randrange(20, 80, 20)
+        # squareverse_grid_spacing = 40
+        squareverse_grid_spacing = randrange(10, 100, 10)
 
     # creates Squareverse using provided values
     squareverse = Squareverse(squareverse_id, squareverse_name, int(squareverse_size), int(squareverse_grid_spacing))
-    print(f"\n\nThe new Squareverse, {squareverse.squareverse_name}, has been successfully created!")
+    print(f"\n\n[{squareverse.squareverse_name}] has been successfully created") #I
 
 
     return squareverse
@@ -210,8 +222,18 @@ def showMenu(squareverse):
 
         if user_selection == "s":
             
-            numSquares = input("How many Squares would you like to spawn: ")
-            squareverse.createSquares(int(numSquares))
+            number_of_squares = input("Enter the number of Squares to spawn (m = max allowed, h = half max, q = quarter max): ")
+
+            if number_of_squares == "m":
+                number_of_squares = (squareverse.max_number_of_squares - len(squareverse.created_squares))
+            elif number_of_squares == "h":
+                number_of_squares = squareverse.max_number_of_squares // 2
+            elif number_of_squares == "q":
+                number_of_squares = squareverse.max_number_of_squares // 4
+            # else:
+            #     number_of_squares = int(number_of_squares)
+
+            squareverse.createSquares(int(number_of_squares))
 
         elif user_selection == "d":
             pass
@@ -273,7 +295,6 @@ class Square():
     def moveSquare(self, squareverse):
         
         # ***to-do***
-        # add logic in collision check to avoid edges of Squareverse
         # add logic to increase color of Square for each consecutive collision
         # split method for collision/border check into separate methods
 
