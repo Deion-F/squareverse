@@ -7,14 +7,14 @@ from random import randint, randrange, choice
 #COMMENT LEGEND
 # Code for debugging - #D
 # Code for providing information - #I
-# Temporary code used for testing
+# Temporary code used for testing - #T
 
 
 class Squareverse():
 
 
     squareverse_window_background_color = color_rgb(97, 97, 97)
-    squareverse_grid_color = color_rgb(0, 255, 0)
+    squareverse_grid_color = color_rgb(0, 255, 255)
 
 
     def __init__(self, squareverse_id, squareverse_name, squareverse_size, squareverse_grid_spacing):
@@ -34,10 +34,10 @@ class Squareverse():
 
     def createSquareverseWindow(self):
         
-        # creates squareverse window, sets name & size
+        # creates Squareverse window, sets name & size
         self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
         
-        # sets background color of squareverse using RGB
+        # sets background color of Squareverse using RGB
         self.window.setBackground(self.squareverse_window_background_color)
 
         print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #D
@@ -153,23 +153,21 @@ class Squareverse():
 
     def moveSquares(self):
 
-
+        
         mouse_clicked = self.window.checkMouse()
-
-        # for _ in range(duration):
-
-        # stops the simulation on the next cycle after the mouse is clicked
         while mouse_clicked == None:
-        # print(f"\n\nMouse clicked = {mouse_clicked}")
-            
-            mouse_clicked = self.window.checkMouse()
+
             for square in self.created_squares:
 
-                print(f"\n\nMouse clicked = {mouse_clicked}") #D
-                square.moveSquare(self)
+                if mouse_clicked == None:
+  
+                    square.moveSquare(self)
+                    mouse_clicked = self.window.checkMouse()
+               
+                else:
+                    
+                    break
 
-            # controls the movement delay between cycles
-            sleep(0.5)
 
 
 
@@ -205,17 +203,24 @@ def createSquareverse():
 
     squareverse_size = (int(squareverse_size) * 100) # calculates actual Squareverse window size
 
-    squareverse_grid_spacing = input("\n\nGrid Spacing (default - random): ")
+    print(f"Calculating possible grid sizes for [{squareverse_size}px]")
+
+    valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0]
+    print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]")
+    
+    squareverse_grid_spacing = choice(valid_grid_sizes)
+    
+    # squareverse_grid_spacing = input("\n\nGrid Spacing (default - random): ")
 
     # print(f"\n\nAmount of values provided for Squareverse grid spacing are [{len(squareverse_grid_spacing)}] and numeric check is [{squareverse_grid_spacing.isnumeric()}]") #D
     # assert len(squareverse_grid_spacing) == 0 or squareverse_grid_spacing.isnumeric() == True, f"'{squareverse_grid_spacing}' is not a number"
 
-    if len(squareverse_grid_spacing) == 0:
-        # squareverse_grid_spacing = 40
-        squareverse_grid_spacing = randrange(10, 100, 5)
-        print(f"\n\nRandomly chosen grid spacing is [{squareverse_grid_spacing}px]") #D
-    else:
-        pass
+    # if len(squareverse_grid_spacing) == 0:
+    #     # squareverse_grid_spacing = 40
+    #     squareverse_grid_spacing = randrange(10, 100, 5)
+    #     print(f"\n\nRandomly chosen grid spacing is [{squareverse_grid_spacing}px]") #D
+    # else:
+    #     pass
 
     # creates Squareverse using provided values
     squareverse = Squareverse(squareverse_id, squareverse_name, int(squareverse_size), int(squareverse_grid_spacing))
