@@ -25,7 +25,8 @@ class Squareverse():
         self.squareverse_grid_spacing = squareverse_grid_spacing
         self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
         self.created_squares = []
-        self.directions = {"up": (0, (self.squareverse_grid_spacing * -1)), "down": (0, self.squareverse_grid_spacing), "left": ((self.squareverse_grid_spacing * -1), 0),"right": (0, self.squareverse_grid_spacing)}
+        self.square_center_coordinates
+        self.valid_directions = {"up": (0, (self.squareverse_grid_spacing * -1)), "down": (0, self.squareverse_grid_spacing), "left": ((self.squareverse_grid_spacing * -1), 0),"right": (0, self.squareverse_grid_spacing)}
         
         print(f"\n\n***Squareverse Values***\nSquareverse ID: [{self.squareverse_id}]\nSquareverse Name: [{self.squareverse_name}]\nSquareverse Size: [{self.squareverse_size}px]\nSquareverse Grid Spacing: [{self.squareverse_grid_spacing}px]\nSquareverse Window Size: [{self.squareverse_window_size}px]") #D
         
@@ -91,15 +92,20 @@ class Squareverse():
 
     def createSquares(self, number_of_squares):
 
+        # sets boundary for where Squares can spawn in the Squareverse
+        squareverse_max_xy = (self.squareverse_size + self.squareverse_grid_spacing)
+
         # creates number of Squares provided by number_of_squares
         for _ in range(number_of_squares):
             
+            # creates Square object
+            square = Square()
+
             grid_occupied = True
             number_of_empty_grids = (self.max_number_of_squares - len(self.created_squares))
             # print(f"\n\n[{number_of_empty_grids}] empty grids remaining before spawing Square | Max number of Squares [{self.max_number_of_squares}] | Length of created Squares [{len(self.created_squares)}]") #D
-            squareverse_max_xy = (self.squareverse_size + self.squareverse_grid_spacing)
-
-            if number_of_empty_grids == 0 :
+            
+            if number_of_empty_grids == 0:
                  
                 print(f"\n\nThere are [{number_of_empty_grids}] empty grids remaining (no more grid space)") #D
 
@@ -108,16 +114,18 @@ class Squareverse():
             elif len(self.created_squares) == 0:
                 
                 top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+                
                 top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
                 
             else:
             
-                while number_of_empty_grids > 0 and grid_occupied == True:
+                while grid_occupied == True:
                 
-                    # while grid_occupied == True:
                     print(f"\n\nCreating random coordinates for Square top left corner") #D
                     # print(f"List of Squares: [{self.created_squares}]") #D
+                    
                     top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
+                    
                     top_left_corner_y = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
 
                     for square in self.created_squares:
@@ -134,18 +142,19 @@ class Squareverse():
                             grid_occupied = False
 
 
-
-
             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
             bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
-            square = Square(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, self.window)
-
-            # adds Square object to array for Squareverse
+            square.drawSquareBody(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, self.window)
+            
+            # adds Square to array of created Squares for Squareverse
             self.created_squares.append(square)
 
             # defines the Square ID based on the array index            
             (self.created_squares[len(self.created_squares) - 1]).square_id = len(self.created_squares) - 1
+
+
+            self.square_center_coordinates.append(f"y {self.created_squares[square.square_id].center_coordinates["x"]} {self.created_squares[square.square_id].center_coordinates["y"]})
 
 
             print(f"\n\nSquare [{(self.created_squares[len(self.created_squares) - 1]).square_id}] has been spawned at: [top left corner - {(self.created_squares[len(self.created_squares) - 1]).top_left_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).top_left_corner_y}] [bottom right corner - {(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_y}] [center - {(self.created_squares[len(self.created_squares) - 1]).coordinates}]") #D
@@ -285,30 +294,34 @@ def showMenu(squareverse):
 class Square():
 
     
-    def __init__(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, window):
+    def __init__(self):
         
-        self.window = window
-        self.top_left_corner_x = top_left_corner_x
-        self.top_left_corner_y = top_left_corner_y
-        self.bottom_right_corner_x = bottom_right_corner_x
-        self.bottom_right_corner_y = bottom_right_corner_y
-        self.square_color = color_rgb(0, randrange(0, 256), randrange(0, 256)) #testing random Square color
-        self.square_id = 0
+        
+        # self.top_left_corner_x = top_left_corner_x
+        # self.top_left_corner_y = top_left_corner_y
+        # self.bottom_right_corner_x = bottom_right_corner_x
+        # self.bottom_right_corner_y = bottom_right_corner_y
+        
+        self.body_color = color_rgb(0, randrange(0, 256), randrange(0, 256)) #testing random Square color
+        # self.square_id = 0
         
 
-        self.drawSquare()
+        # self.drawSquare()
 
 
 
-    def drawSquare(self):
+    def drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, window):
 
-        self.square = Rectangle(Point(self.top_left_corner_x, self.top_left_corner_y), Point(self.bottom_right_corner_x, self.bottom_right_corner_y))
+        self.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
         
-        self.coordinates = self.square.getCenter()
-
-        self.square.setFill(self.square_color)
+        self.body.setFill(self.body_color)
         
-        self.square.draw(self.window)
+        self.body.draw(window)
+
+        center_point = self.body.getCenter()
+
+        self.center_coordinates = {"x": center_point.getX(), "y": center_point.getY()}
+
 
 
 
@@ -317,6 +330,9 @@ class Square():
         # ***to-do***
         # add logic to increase color of Square for each consecutive collision
         # split method for collision/border check into separate methods
+
+        previous_direction = None
+        self.valid_directions = squareverse.valid_directions
 
 
         squareverse_size = squareverse.squareverse_size
@@ -328,9 +344,9 @@ class Square():
         collision_detected = True
         number_of_collisions = 0
         directions_already_tried = set()
-        direction_last_moved = ""
+        
         direction_opposites = {"up": "down", "down": "up", "left": "right", "right": "left"}
-        self.possible_directions = squareverse.directions
+        
 
 
         # UPDATED MOVING LOGIC
@@ -338,13 +354,41 @@ class Square():
         # reset Square color
         self.square.setFill(self.square_color)
         
-        if direction_last_moved == "":
+        if previous_direction == None:
             
-            # randomly picks a directions to move in
-            chosen_direction = choice(tuple(possible_directions))
+            #  builds the list of Square center point coordinates (Point objects) for all Squares that currently exist (including this Square)
+            for square in squareverse.created_squares:
+                
+                coordinate_ x = square.coordinate.getX()
+                coordinate_ y = 
+                coordinates = square.coordinates
+                list_of_coordinates.append(coordinates)
+            # print("\n\nList of Square coordinates: " + str(list_of_coordinates)) # debug
+
+
+            for direction in self.valid_directions:
+
+                collision = self.collisionCheck(squareverse, selected_direction)
+
+                if collision == False:
+                    
+                    break
+
+                else:
+
+                    self.valid_directions.remove(direction)
+
+
+            self.square.move(possible_directions(chosen_direction[0]), possible_directions(chosen_direction[1]))
+
+
+
             
-            print(f"\n\nSquare [{self.square_id}] will attempt to move [{chosen_direction.upper()}]") #D
-            print(f"\n\nCoordinates for Square [{self.square_id}] before moving are [X: {self.coordinates.getX()} Y: {self.coordinates.getY()}]") #D
+            # randomly selects a directions to move in
+            selected_direction = choice(tuple(self.valid_directions))
+            
+            print(f"\n\nSquare [{self.square_id}] will attempt to move [{selected_direction.upper()}]") #D
+            print(f"Coordinates for Square [{self.square_id}] before moving are [X: {self.coordinates.getX()} Y: {self.coordinates.getY()}]") #D
 
             # # checks if direction has already been tried
             # while chosen_direction in directions_already_tried:
@@ -361,7 +405,11 @@ class Square():
 
             # print(f"\n\nDirections tried for Square [{self.square_id}] are [{directions_already_tried}]") #D
 
-            collision = collisionCheck(squareverse, chosen_direction)
+            
+            
+            collision = collisionCheck(squareverse, selected_direction)
+
+
 
              
 
@@ -396,7 +444,7 @@ class Square():
                 # break
 
             else:
-
+                pass
 
             
         
@@ -669,29 +717,32 @@ class Square():
 
 
 
-    def collisionCheck(self, squareverse, chosen_direction):
+    def collisionCheck(self, squareverse, selected_direction):
 
-        # creates an  clone of the Square ("Square's soul")
+        # creates a clone of the Square ("Square's soul")
         square_soul = self.square.clone()
+        square_soul.setOutline("Orange")
         
         # moves Square's soul to check for collisions
-        square_soul.move(self.possible_directions(chosen_direction[0]), self.possible_directions(chosen_direction[1]))
+        square_soul.move(self.valid_directions(selected_direction[0]), self.valid_directions(selected_direction[1]))
 
-        # checks where Square's soul currently is
-        coordinates = square_soul.getCenter()
+        # checks current coordinates of Square's soul
+        square_soul_coordinates = square_soul.getCenter()
 
-        print(f"\n\nCoordinates of the soul for Square [{self.square_id}] are [X: {square_soul.getX()} Y: {square_soul.getY()}]")
+        print(f"\n\nCoordinates of the soul for Square [{self.square_id}] are [X: {square_soul_coordinates.getX()} Y: {square_soul_coordinates.getY()}]")
 
         print("\n\nRunning logic for border detection!") #D
 
-        if coordinates.getX() <= squareverse_grid_spacing or coordinates.getY() <= squareverse_grid_spacing or coordinates.getX() >= (squareverse_size + squareverse_grid_spacing) or coordinates.getY() >= (squareverse_size + squareverse_grid_spacing):
+        if square_soul_coordinates.getX() <= squareverse.squareverse_grid_spacing or square_soul_coordinates.getY() <= squareverse.squareverse_grid_spacing or square_soul_coordinates.getX() >= (squareverse.squareverse_size + squareverse.squareverse_grid_spacing) or square_soul_coordinates.getY() >= (squareverse.squareverse_size + squareverse.squareverse_grid_spacing):
 
             collision_detected = True
-            square_soul.delItem()
+            
 
             print("\n\nCollision with Squareverse border detected") #D
 
             return collision_detected
+        
+        else:
    
 
 
