@@ -92,14 +92,13 @@ class Squareverse():
 
     def createSquares(self, number_of_squares):
 
-        # sets boundary for where Squares can spawn in the Squareverse
+        # sets limits for where Squares can spawn in the Squareverse
         squareverse_max_xy = (self.squareverse_size + self.squareverse_grid_spacing)
 
         # creates number of Squares provided by number_of_squares
         for _ in range(number_of_squares):
             
             square = Square()
-            grid_occupied = True
             number_of_existing_squares = len(self.created_squares)
             number_of_empty_grids = self.max_number_of_squares - number_of_existing_squares
             # print(f"\n\n[{number_of_empty_grids}] empty grids remaining before spawing Square | Max number of Squares [{self.max_number_of_squares}] | Length of created Squares [{len(self.created_squares)}]") #D
@@ -119,12 +118,14 @@ class Squareverse():
                 bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
                 
                 bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
+
+                center_point = str((top_left_corner_x + bottom_right_corner_x) // 2) + ":" + str((top_left_corner_y + bottom_right_corner_y) // 2)
                 
             else:
             
                 duplicate = True
 
-                while duplicate:
+                while duplicate == True:
                     
                     top_left_corner_x = randrange(self.squareverse_grid_spacing, squareverse_max_xy, self.squareverse_grid_spacing)
                         
@@ -134,7 +135,12 @@ class Squareverse():
                     
                     bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
-                    duplicate = self.duplicateCheck(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+
+                    duplicate, center_point = self.duplicateCheck(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+
+
+            # draws the Square
+            square.drawSquareBody(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, center_point, self.window)
                 
                 
                 
@@ -164,21 +170,21 @@ class Squareverse():
             # bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
             # bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
-            # draws the Square
-            square.drawSquareBody(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, self.window)
+            
             
             # defines the Square ID based on the array index            
             square.square_id = len(self.created_squares)
 
-            # adds to set of unique Square center coordinates
-            self.square_center_coordinates.add(f"{square.center_coordinates['x']}:{square.center_coordinates['y']}")
+            # adds coordinates to set of unique Square center coordinates
+            self.square_center_coordinates.add(square.center_coordinates)
 
             # adds Square to array of created Squares for Squareverse
             self.created_squares.append(square)
 
 
-            print(f"\n\nSquare {square.square_id} has been spawned at [X: {square.center_coordinates['x']} Y: {square.center_coordinates['y']}]")
-            print(self.square_center_coordinates)
+            # print(f"\n\nSquare {square.square_id} has been spawned at [X: {square.center_coordinates['x']} Y: {square.center_coordinates['y']}]")
+            print(f"\n\nSquare {square.square_id} has been spawned at {square.center_coordinates}")
+            # print(self.square_center_coordinates)
 
             # print(f"\n\nSquare [{(square.square_id}] has been spawned at: [top left corner - {(self.created_squares[len(self.created_squares) - 1]).top_left_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).top_left_corner_y}] [bottom right corner - {(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_x}:{(self.created_squares[len(self.created_squares) - 1]).bottom_right_corner_y}] [center - {(self.created_squares[len(self.created_squares) - 1]).coordinates}]") #D
 
@@ -215,18 +221,24 @@ class Squareverse():
 
     def duplicateCheck(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
 
-        center_point = str((top_left_corner_x + bottom_right_corner_x) / 2) + ":" + str((top_left_corner_y + bottom_right_corner_y) / 2)
+        square_coordinates = str((top_left_corner_x + bottom_right_corner_x) // 2) + ":" + str((top_left_corner_y + bottom_right_corner_y) // 2)
 
-        if center_point in self.square_center_coordinates:
+        if square_coordinates in self.square_center_coordinates:
 
             duplicate = True
+
+            print(f"\n\nA Square already exists @ {square_coordinates}") #D
+            
+
+            return duplicate, square_coordinates
+
+            
         
         else:
 
             duplicate = False
 
-        return duplicate
-
+            return duplicate, square_coordinates
 
 
 # ---CLASSLESS FUNCTIONS--- 
@@ -294,16 +306,23 @@ def showMenu(squareverse):
 
         if user_selection == "s":
             
-            number_of_squares = input("Enter the number of Squares to spawn (m = max allowed, h = half max, q = quarter max): ")
+            number_of_squares = input("\n\nEnter the number of Squares to spawn (m = max allowed, h = half max, q = quarter max): ")
 
             if number_of_squares == "m":
+                
                 number_of_squares = (squareverse.max_number_of_squares - len(squareverse.created_squares))
+            
             elif number_of_squares == "h":
+                
                 number_of_squares = squareverse.max_number_of_squares // 2
+            
             elif number_of_squares == "q":
+                
                 number_of_squares = squareverse.max_number_of_squares // 4
-            # else:
-            #     number_of_squares = int(number_of_squares)
+            
+            else:
+                
+                pass
 
             squareverse.createSquares(int(number_of_squares))
 
@@ -350,7 +369,7 @@ class Square():
 
 
 
-    def drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, window):
+    def drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y, center_point, window):
 
         self.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
         
@@ -358,9 +377,7 @@ class Square():
         
         self.body.draw(window)
 
-        center_point = self.body.getCenter()
-
-        self.center_coordinates = {"x": center_point.getX(), "y": center_point.getY()}
+        self.center_coordinates = center_point
 
 
 
