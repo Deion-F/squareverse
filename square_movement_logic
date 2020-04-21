@@ -1,0 +1,17 @@
+Logic for Square movement
+
+Moving for the 1st time
+- Pick a random direction
+- Run logic for border/collision detection
+	- If unable to move in randomly chosen direction then "bounce" (attempt to move in the opposite direction)
+	- If unable to move in the direction "bounced" in, then randomly choose another valid direction
+- Move Square if possible and record direction last moved in
+
+
+
+Moving after the 1st time
+- First attempt to move in the direction last moved in
+- Run logic for border/collision detection
+	- If unable to move in chosen direction then "bounce" (attempt to move in the opposite direction)
+	- If unable to move in the direction "bounced" in, then randomly choose another valid direction
+- Move Square if possible and record direction last moved in
