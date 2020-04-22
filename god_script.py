@@ -386,13 +386,13 @@ class Square():
 
     def moveSquare(self, squareverse):
         
-        # ***to-do***
-        # add logic to increase color of Square for each consecutive collision
-        # split method for collision/border check into separate methods
-
-        self.previous_direction = None
-        number_of_squares = len(squareverse.created_squares)
         list_of_squares = squareverse.created_squares
+        number_of_squares = len(squareverse.created_squares)
+        square_center_coordinates = self.center_coordinates.split()
+        print(f"Center coordinates for Square {self.square_id} are {square_center_coordinates}")
+        
+        self.previous_direction = None
+        
         
         self.valid_directions = squareverse.valid_directions
         print(f"\n\nValid directions are [{self.valid_directions}]") #D
@@ -432,7 +432,7 @@ class Square():
             # # print("\n\nList of Square coordinates: " + str(list_of_coordinates)) # debug
 
 
-            for direction in self.valid_directions:
+            for direction in self.valid_directions.items():
 
                 # selected_direction = direction
                 # direction_movement = self.valid_directions[direction]
@@ -440,24 +440,24 @@ class Square():
                 # selected_direction = direction[0]
                 # direction_movement = direction[1]
                 
-                print(f"\n\nSelected direction is [{direction}]") #D
+                print(f"\n\nRunning collision check for the direction[{direction}]") #D
                 
-                collision = self.collisionCheck(squareverse, direction, direction_movement)
+                collision_check = self.collisionCheck(squareverse, direction)
 
-                if collision == False:
+                if collision_check == False:
                     
-                    selected_direction = selected_direction
+                    # selected_direction = selected_direction
                     break
 
                 else:
 
-                    del self.valid_directions[selected_direction]
+                    # del self.valid_directions[selected_direction]
                     # self.valid_directions.pop(selected_direction)
                     print(self.valid_directions)
 
 
-            self.body.move(direction_movement[0], (direction_movement[1]))
-            self.previous_direction = selected_direction
+            self.body.move(direction[0][0], direction[0][1])
+            self.previous_direction = direction[0]
 
         else:
 
@@ -479,14 +479,14 @@ class Square():
 
 
 
-    def collisionCheck(self, squareverse, direction, direction_movement):
+    def collisionCheck(self, squareverse, direction):
 
         # creates an invisible clone of the Square's body ("Square's soul")
         square_soul = self.body.clone()
         square_soul.setOutline("Orange") #T
         
         # moves Square's soul to check for collisions
-        square_soul.move(squareverse.valid_directions[direction[0]], squareverse.valid_directions[direction[1])
+        square_soul.move(direction[0][0], direction[0][1])
 
         # checks current coordinates of Square's soul
         square_soul_coordinates = square_soul.getCenter()
