@@ -597,6 +597,11 @@ class _BBox(GraphicsObject):
         p2 = self.p2
         return Point((p1.x+p2.x)/2.0, (p1.y+p2.y)/2.0)
 
+    def getCoordinates(self):
+        p1 = self.p1
+        p2 = self.p2
+        return f"{p1.x}:{p1.y}:{p2.x}:{p2.y}"
+
     
 class Rectangle(_BBox):
     
