@@ -4,21 +4,17 @@ from random import randint, randrange, choice
 # import threading
 # end of imports
 
-#COMMENT LEGEND
-# Code for debugging - #D
-# Code for providing information - #I
-# Temporary code used for testing - #T
 
 
 class Squareverse():
 
 
     squareverse_window_background_color = color_rgb(97, 97, 97)
-    squareverse_grid_color = color_rgb(0, 255, 255)
+    squareverse_grid_color = color_rgb(255, 255, 255)
 
 
     def __init__(self, squareverse_id, squareverse_name, squareverse_size, squareverse_grid_spacing):
-        
+
         self.squareverse_id = squareverse_id
         self.squareverse_name = squareverse_name
         self.squareverse_size = squareverse_size
@@ -46,9 +42,6 @@ class Squareverse():
                 "x": self.squareverse_grid_spacing, 
                 "y": 0,
                 "i": "left"}}
-        
-
-
 
         print(f"\n\n***Squareverse Values***\nSquareverse ID: [{self.squareverse_id}]\nSquareverse Name: [{self.squareverse_name}]\nSquareverse Size: [{self.squareverse_size}px]\nSquareverse Grid Spacing: [{self.squareverse_grid_spacing}px]\nSquareverse Window Size: [{self.squareverse_window_size}px]") #D
         
@@ -63,10 +56,9 @@ class Squareverse():
         
         # sets background color of Squareverse using RGB
         self.window.setBackground(self.squareverse_window_background_color)
-
         print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #D
         
-        # generates grid for squareverse
+        # generates grid for Squareverse
         self.createSquareverseGrid()
 
 
@@ -78,9 +70,9 @@ class Squareverse():
         vertical_starting_point = self.squareverse_grid_spacing
         horizontal_starting_point = self.squareverse_grid_spacing
         number_of_lines = int(round((self.squareverse_size / self.squareverse_grid_spacing), 0) + 1)
-        self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
-        
         print(f"\n\n[{number_of_lines}] grid lines required") #D
+        
+        self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
         print(f"[{self.max_number_of_squares}] maximum Squares can be created") #D
 
         for _ in range(number_of_lines):
@@ -164,9 +156,30 @@ class Squareverse():
 
 
 
+    def duplicateSquareCheck(self, square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
+
+        square_coordinates = f"{top_left_corner_x}:{top_left_corner_y}:{bottom_right_corner_x}:{bottom_right_corner_y}"
+
+        if square_coordinates in self.square_positions:
+
+            duplicate_square = True
+
+            print(f"\n\nA Square already exists @ {square_coordinates}") #D
+
+            return duplicate_square
+
+        else:
+
+            duplicate_square = False
+
+            square.coordinates = square_coordinates
+
+            return duplicate_square
+    
+    
+    
     def moveAllSquares(self):
 
-        
         mouse_clicked = self.window.checkMouse()
        
         while mouse_clicked == None:
@@ -185,9 +198,8 @@ class Squareverse():
 
 
 
-
     # closes the Squareverse window
-    def destroy_squareverse(self):
+    def destroySquareverse(self):
         
         self.window.close()
         print(f"Ending the Squareverse simulation for {self.squareverse_name}!")
@@ -195,28 +207,7 @@ class Squareverse():
 
 
 
-    def duplicateSquareCheck(self, square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
 
-        square_coordinates = f"{top_left_corner_x}:{top_left_corner_y}:{bottom_right_corner_x}:{bottom_right_corner_y}"
-
-        # square_center_coordinates = str((top_left_corner_x + bottom_right_corner_x) / 2) + ":" +  str((top_left_corner_y + bottom_right_corner_y) / 2)
-        
-        
-        if square_coordinates in self.square_positions:
-
-            duplicate_square = True
-
-            print(f"\n\nA Square already exists @ {square_coordinates}") #D
-
-            return duplicate_square
-
-        else:
-
-            duplicate_square = False
-
-            square.coordinates = square_coordinates
-
-            return duplicate_square
 
 
 # ---CLASSLESS FUNCTIONS--- 
@@ -260,7 +251,6 @@ def createSquareverse():
 
     return squareverse
     
-
 
 
 
@@ -312,7 +302,7 @@ def showMenu(squareverse):
             squareverse.moveAllSquares()
 
         else:
-            squareverse.destroy_squareverse()
+            squareverse.destroySquareverse()
             break
 
 
@@ -327,7 +317,7 @@ class Square():
         
         self.square_id = 0
         self.body_color = color_rgb(255, 255, 255)
-        self.outline_color = color_rgb(255, 255, 255)
+        self.outline_color = color_rgb(0, randrange(0, 256), randrange(0, 256))
         self.coordinates = None
         self.valid_directions = None
         self.previous_direction = None
@@ -378,13 +368,6 @@ class Square():
 
             print(f"\n\nSquare {self.square_id} did not move last cycle so picking a random direction") #D
             
-            
-
-            
-
-            
-            
-            
             while self.number_of_collisions < 4:
 
                 remaining_directions = valid_directions.difference(directions_already_tried)
@@ -424,11 +407,6 @@ class Square():
 
                 print("There are no move valid directions remaining")
                 self.body.setOutline("Red")
-
-
-
-                   
-
 
         elif self.previous_direction != None:
 
@@ -542,7 +520,8 @@ class Square():
 
         # creates an invisible clone of the Square's body ("Square's soul")
         square_soul = self.body.clone()
-        square_soul.setOutline("Orange") #T
+        square_soul.setFill("Orange") #T
+        # square_soul.draw(squareverse.window)
         
         # moves Square's soul to check for collisions
         square_soul.move(squareverse.valid_directions[selected_direction]['x'], squareverse.valid_directions[selected_direction]['y'])
