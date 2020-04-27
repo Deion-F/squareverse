@@ -4,10 +4,6 @@ from random import randint, randrange, choice
 # import threading
 # end of imports
 
-#COMMENT LEGEND
-# Code for debugging - #D
-# Code for providing information - #I
-# Temporary code used for testing - #T
 
 
 class Squareverse():
@@ -227,7 +223,6 @@ def createSquareverse():
 
     squareverse_id = randint(1, 100)
     squareverse_name = f"Squareverse [{squareverse_id}]"
-    
     # determines Squareverse size by multiplying provided value by 100
     squareverse_size = input("\n\nSquareverse size (1 - 10): ")
 
@@ -236,7 +231,7 @@ def createSquareverse():
         # default value for Squareverse size
         squareverse_size = 8 
     
-    elif squareverse_size > 10:
+    elif squareverse_size < 1 or squareverse_size > 10:
 
         print("\n\nPlease choose a value within the provided range")
     
@@ -245,17 +240,12 @@ def createSquareverse():
         pass
 
     squareverse_size = (int(squareverse_size) * 100) # calculates actual Squareverse window size
-
-    print(f"\n\nCalculating possible grid sizes for [{squareverse_size}px]")
-
     valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0]
-    print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]")
-    
     squareverse_grid_spacing = choice(valid_grid_sizes)
-    
     squareverse = Squareverse(squareverse_id, squareverse_name, squareverse_size, squareverse_grid_spacing)
     
     print(f"\n\n[{squareverse_name}] has been successfully created") #D
+
 
 
     return squareverse
