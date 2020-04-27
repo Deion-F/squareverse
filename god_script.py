@@ -217,14 +217,12 @@ class Squareverse():
 def createSquareverse():
 
     squareverse_id = randint(1, 100)
-    squareverse_name = f"Squareverse [{squareverse_id}]"
-    # determines Squareverse size by multiplying provided value by 100
-    squareverse_size = input("\n\nSquareverse size (1 - 10): ")
+    squareverse_name = f"Squareverse[{squareverse_id}]"
+    squareverse_size = input("\n\nSquareverse size (1 - 10): ") # determines Squareverse size by multiplying provided value by 100
 
     if len(squareverse_size) == 0:
         
-        # default value for Squareverse size
-        squareverse_size = 8 
+        squareverse_size = 8 # default value for Squareverse size
     
     elif int(squareverse_size) > 10 or int(squareverse_size) < 1:
 
@@ -237,15 +235,14 @@ def createSquareverse():
     squareverse_size = (int(squareverse_size) * 100) # calculates actual Squareverse window size
     valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0]
     squareverse_grid_spacing = choice(valid_grid_sizes)
-    squareverse = Squareverse(squareverse_id, squareverse_name, squareverse_size, squareverse_grid_spacing)
+    squareverse = Squareverse(squareverse_id, squareverse_name, squareverse_size, squareverse_grid_spacing) # creates a Squareverse
     
-    # print(f"\n\n[{squareverse_name}] has been successfully created") #D
+    print(f"\n\n[{squareverse_name}] has been successfully created") #D
 
 
 
     return squareverse
     
-
 
 
 def showMenu(squareverse):
