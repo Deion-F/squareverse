@@ -600,7 +600,7 @@ class _BBox(GraphicsObject):
     def getCoordinates(self):
         p1 = self.p1
         p2 = self.p2
-        return f"{p1.x}:{p1.y}:{p2.x}:{p2.y}"
+        return f"{int(p1.x)}:{int(p1.y)}:{int(p2.x)}:{int(p2.y)}"
 
     
 class Rectangle(_BBox):
