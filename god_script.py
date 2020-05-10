@@ -218,6 +218,7 @@ def createSquareverse():
 
     squareverse_id = randint(1, 100)
     squareverse_name = f"Squareverse-{squareverse_id}"
+    
     invalid_squareverse_size = True
 
     while invalid_squareverse_size == True:
@@ -243,7 +244,6 @@ def createSquareverse():
     squareverse = Squareverse(squareverse_id, squareverse_name, squareverse_size, squareverse_grid_spacing) # creates a Squareverse
     
     print(f"\n\n[{squareverse_name}] has been successfully created") #D
-
 
 
     return squareverse
