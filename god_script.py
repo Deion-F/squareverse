@@ -217,20 +217,25 @@ class Squareverse():
 def createSquareverse():
 
     squareverse_id = randint(1, 100)
-    squareverse_name = f"Squareverse[{squareverse_id}]"
-    squareverse_size = input("\n\nSquareverse size (1 - 10): ") # determines Squareverse size by multiplying provided value by 100
+    squareverse_name = f"Squareverse-{squareverse_id}"
+    invalid_squareverse_size = True
 
-    if len(squareverse_size) == 0:
-        
-        squareverse_size = 8 # default value for Squareverse size
-    
-    elif int(squareverse_size) > 10 or int(squareverse_size) < 1:
+    while invalid_squareverse_size == True:
 
-        print("\n\nPlease choose a value within the provided range")
-    
-    else:
+        squareverse_size = input("\n\nInput Squareverse size (1 - 10): ") # determines Squareverse size in px by multiplying provided value by 100
+
+        if len(squareverse_size) == 0:
+
+            squareverse_size = 8 # default value for Squareverse size
+            invalid_squareverse_size = False
+
+        elif int(squareverse_size) <= 10 and int(squareverse_size) >= 1:
         
-        pass
+            invalid_squareverse_size = False
+
+        else:
+
+            print("\n\nPlease choose a value within the provided range")
 
     squareverse_size = (int(squareverse_size) * 100) # calculates actual Squareverse window size
     valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0]
