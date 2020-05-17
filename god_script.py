@@ -402,7 +402,7 @@ class Square():
             else:
 
                 # print("There are no move valid directions remaining")
-                self.body.setOutline("Red")
+                self.body.setFill("Red")
 
         elif self.previous_direction != None:
 
@@ -508,7 +508,7 @@ class Square():
                         elif collision_check == True:
 
                             # print("There are no move valid directions remaining")
-                            self.body.setOutline("Red")
+                            self.body.setFill("Red")
 
 
 
@@ -516,7 +516,7 @@ class Square():
 
         # creates an invisible clone of the Square's body ("Square's soul")
         square_soul = self.body.clone()
-        square_soul.setFill("Orange") #T
+        # square_soul.setFill("Orange") #T
         # square_soul.draw(squareverse.window)
         
         # moves Square's soul to check for collisions

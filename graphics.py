@@ -212,8 +212,8 @@ class GraphWin(tk.Canvas):
         assert type(title) == type(""), "Title must be a string"
         master = tk.Toplevel(_root)
         master.protocol("WM_DELETE_WINDOW", self.close)
-        tk.Canvas.__init__(self, master, width=width, height=height,
-                           highlightthickness=0, bd=0)
+        # tk.Canvas.__init__(self, master, width=width, height=height,
+        #                    highlightthickness=0, bd=0)
         self.master.title(title)
         self.pack()
         master.resizable(0,0)
