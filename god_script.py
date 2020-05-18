@@ -88,7 +88,7 @@ class Squareverse():
         vertical_starting_point = self.squareverse_grid_spacing
         horizontal_starting_point = self.squareverse_grid_spacing
         number_of_lines = int(round((self.squareverse_size / self.squareverse_grid_spacing), 0) + 1)
-        # print(f"\n\n[{number_of_lines}] grid lines required") #D
+        print(f"\n\n[{number_of_lines}] grid lines required") #debug
         
         self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
         # print(f"[{self.max_number_of_squares}] maximum Squares can be created") #D
