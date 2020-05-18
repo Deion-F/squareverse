@@ -22,26 +22,7 @@ class Squareverse():
         
         self.created_squares = []
         self.square_positions = set()
-        self.valid_directions = {
-            "up": {
-                "x": 0, 
-                "y": (self.squareverse_grid_spacing * - 1), 
-                "i": "down"
-                }, 
-            "down": {
-                "x": 0, 
-                "y": self.squareverse_grid_spacing, 
-                "i": "up"
-                }, 
-            "left": {
-                "x": (self.squareverse_grid_spacing * - 1), 
-                "y": 0,
-                "i": "right"
-                },
-            "right": {
-                "x": self.squareverse_grid_spacing, 
-                "y": 0,
-                "i": "left"}}
+       
 
         # print(f"\n\n***Squareverse Values***\nSquareverse ID: [{self.squareverse_id}]\nSquareverse Name: [{self.squareverse_name}]\nSquareverse Size: [{self.squareverse_size}px]\nSquareverse Grid Spacing: [{self.squareverse_grid_spacing}px]\nSquareverse Window Size: [{self.squareverse_window_size}px]") #D
         
@@ -49,27 +30,57 @@ class Squareverse():
 
     
 
-    def createSquareverseWindow(self, squareverse_size, squareverse_grid_spacing):
+    def createSquareverseWindow(self, squareverse_size, squareverse_grid_spacing, create_window):
         
         self.squareverse_size = squareverse_size
         self.squareverse_grid_spacing = squareverse_grid_spacing
+        self.valid_directions = {
+        "up": {
+            "x": 0, 
+            "y": (self.squareverse_grid_spacing * - 1), 
+            "i": "down"
+            }, 
+        "down": {
+            "x": 0, 
+            "y": self.squareverse_grid_spacing, 
+            "i": "up"
+            }, 
+        "left": {
+            "x": (self.squareverse_grid_spacing * - 1), 
+            "y": 0,
+            "i": "right"
+            },
+        "right": {
+            "x": self.squareverse_grid_spacing, 
+            "y": 0,
+            "i": "left"}}
+
+        self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
         
-        self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
+        if create_window == True:
+            
+            self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
 
 
 
-        # creates Squareverse window, sets name & size
-        self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
-        
-        # sets background color of Squareverse using RGB
-        self.window.setBackground(self.squareverse_window_background_color)
-        # print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #D
-        
-        # generates grid for Squareverse
-        self.createSquareverseGrid()
+            # creates Squareverse window, sets name & size
+            self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
+            
+            # sets background color of Squareverse using RGB
+            self.window.setBackground(self.squareverse_window_background_color)
+            # print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #D
+            
+            # generates grid for Squareverse
+            self.createSquareverseGrid()
+
+        else:
+
+            pass
 
 
-
+    
+    
+    
     def createSquareverseGrid(self):
         
         # print(f"\n\nCreating Squareverse grid for [{self.squareverse_name}] using grid spacing of [{self.squareverse_grid_spacing}px]") #D
@@ -119,6 +130,10 @@ class Squareverse():
         # creates number of Squares provided by number_of_squares
         for _ in range(number_of_squares):
             
+            # defines the Square ID based on the array index            
+            square_id = len(self.created_squares)
+
+            square = Square(square_id ,self)
             # square = Square(self)
             number_of_empty_grids = self.max_number_of_squares - len(self.created_squares)
             duplicate_square_check = True
@@ -145,10 +160,7 @@ class Squareverse():
                     duplicate_square_check = self.duplicateSquareCheck(square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
 
 
-            # defines the Square ID based on the array index            
-            square_id = len(self.created_squares)
-
-            square = Square(square_id ,self)
+            
 
             # adds coordinates to Square positions set for tracking
             self.square_positions.add(square.coordinates)
@@ -159,7 +171,7 @@ class Squareverse():
             # draws the Square if there are no duplicates
             if draw_squares == True:
 
-                square.drawSquareBody(self.window, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+                square.drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
 
             else:
 
@@ -233,6 +245,7 @@ def createSquareverse():
 
     squareverse_id = randint(1, 100)
     squareverse_name = f"Squareverse-{squareverse_id}"
+    create_window = True
     
     invalid_squareverse_size = True
 
@@ -257,7 +270,7 @@ def createSquareverse():
     valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0]
     squareverse_grid_spacing = choice(valid_grid_sizes)
     squareverse_parent = Squareverse(squareverse_id, squareverse_name)
-    squareverse_parent.createSquareverseWindow(squareverse_size, squareverse_grid_spacing) # creates a Squareverse
+    squareverse_parent.createSquareverseWindow(squareverse_size, squareverse_grid_spacing, create_window) # creates a Squareverse window
     
     print(f"\n\n[{squareverse_name}] has been successfully created") #D
 
@@ -342,11 +355,16 @@ class Square():
         self.valid_directions = None
         self.previous_direction = None
         self.number_of_collisions = 0
-        self.inner_squareverse = Squareverse(squareverse_parent.squareverse_id, f"{squareverse_parent.squareverse_name}-CHILD-{square_id}")
+        self.squareverse_child = Squareverse(squareverse_parent.squareverse_id, f"{squareverse_parent.squareverse_name}-CHILD-{square_id}")
+
+        # create_window = False
+        # draw_squares = False
+        # self.squareverse_child.createSquareverseWindow(squareverse_parent.squareverse_size, squareverse_parent.squareverse_grid_spacing, create_window)
+        # self.squareverse_child.createSquares((self.squareverse_child.max_number_of_squares // 2), draw_squares)
 
 
 
-    def drawSquareBody(self, squareverse_window, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
+    def drawSquareBody(self, squareverse_parent, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
 
         self.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
         
@@ -354,7 +372,16 @@ class Square():
 
         self.body.setOutline(self.outline_color)
         
-        self.body.draw(squareverse_window)
+        self.body.draw(squareverse_parent.window)
+
+        create_window = False
+        draw_squares = False
+        self.squareverse_child.createSquareverseWindow(squareverse_parent.squareverse_size, squareverse_parent.squareverse_grid_spacing, create_window)
+        self.squareverse_child.createSquares((self.squareverse_child.max_number_of_squares // 2), draw_squares)
+
+        print(len(self.squareverse_child.square_positions)) #debug
+        print(self.squareverse_child.square_positions) #debug
+
 
         # print(f"\n\nTk ID for Square is [{tk_id}]") #D
         # print(f"Square body has been successfully drawn") #D
