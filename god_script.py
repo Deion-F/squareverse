@@ -34,6 +34,11 @@ class Squareverse():
         
         self.squareverse_size = squareverse_size
         self.squareverse_grid_spacing = squareverse_grid_spacing
+        self.top_border = squareverse_grid_spacing
+        self.bottom_border = squareverse_size + squareverse_grid_spacing
+        self.left_border = squareverse_grid_spacing
+        self.right_border = squareverse_size + squareverse_grid_spacing
+        self.center_point_coordinate = ((squareverse_size + squareverse_grid_spacing) + squareverse_grid_spacing) // 2
         self.valid_directions = {
         "up": {
             "x": 0, 
@@ -69,6 +74,12 @@ class Squareverse():
             # sets background color of Squareverse using RGB
             self.window.setBackground(self.squareverse_window_background_color)
             # print(f"\n\nSquareverse window for has been successfully created for [{self.squareverse_name}]") #D
+
+            self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate)
+            self.center_point.setFill("Orange")
+
+            
+
             
             # generates grid for Squareverse
             self.createSquareverseGrid()
@@ -117,6 +128,16 @@ class Squareverse():
             horizontal_line.draw(self.window)
 
             horizontal_starting_point = horizontal_starting_point + self.squareverse_grid_spacing
+
+        vertical_center_line = Line(Point(self.center_point_coordinate, self.top_border), Point(self.center_point_coordinate, self.bottom_border))
+        horizontal_center_line = Line(Point(self.left_border, self.center_point_coordinate), Point(self.right_border, self.center_point_coordinate))
+
+        vertical_center_line.setFill("Cyan")
+        horizontal_center_line.setFill("Cyan")
+
+        vertical_center_line.draw(self.window)
+        horizontal_center_line.draw(self.window)
+        self.center_point.draw(self.window)
 
         # print(f"\n\nSquareverse grid has been successfully created for [{self.squareverse_name}]") #D
 
@@ -267,7 +288,7 @@ def createSquareverse():
             print("\n\nPlease choose a value within the provided range")
 
     squareverse_size = (int(squareverse_size) * 100) # calculates actual Squareverse window size
-    valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0]
+    valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and squareverse_size % 2 == 0]
     squareverse_grid_spacing = choice(valid_grid_sizes)
     squareverse_parent = Squareverse(squareverse_id, squareverse_name)
     squareverse_parent.createSquareverseWindow(squareverse_size, squareverse_grid_spacing, create_window) # creates a Squareverse window
