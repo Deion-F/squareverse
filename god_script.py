@@ -473,7 +473,7 @@ class Square():
         
         valid_directions = set(squareverse.valid_directions.keys())
         selected_direction = None
-        directions_already_tried = set()
+        self.directions_already_tried = set()
         remaining_directions = set()
         collision_detected = True
         self.number_of_collisions = 0
@@ -497,18 +497,18 @@ class Square():
             #trying to figure out new movement logic with chile squareverse interaction
             while self.number_of_collisions < 4:
 
-                remaining_directions = valid_directions.difference(directions_already_tried)
+                remaining_directions = valid_directions.difference(self.directions_already_tried)
                 # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
 
                 selected_direction = self.squareverse_child.moveChildSquares(child_squareverse_movement_cycles) #new movement logic
 
-                while selected_direction in directions_already_tried and len(directions_already_tried) <= len(valid_directions):
+                while selected_direction in self.directions_already_tried and len(self.directions_already_tried) <= len(valid_directions):
 
-                    selected_direction = self.squareverse_child.moveChildSquares((child_squareverse_movement_cycles + 2))
+                    selected_direction = self.squareverse_child.moveChildSquares(child_squareverse_movement_cycles)
                 
                 # selected_direction = choice(list(remaining_directions))
 
-                directions_already_tried.add(selected_direction)
+                self.directions_already_tried.add(selected_direction)
 
                 collision_detected = self.collisionCheck(squareverse, selected_direction)
 
@@ -568,10 +568,10 @@ class Square():
             # attempts to move in the inverse direction ('i') next
             elif collision_check == True:
 
-                directions_already_tried.add(selected_direction)
+                self.directions_already_tried.add(selected_direction)
                 # print(f"Directions already tried are [{directions_already_tried}]") #D
 
-                remaining_directions = valid_directions.difference(directions_already_tried)
+                remaining_directions = valid_directions.difference(self.directions_already_tried)
                 # print(f"\n\nRemaining directions are [{remaining_directions}]")
                 
                 selected_direction = squareverse.valid_directions[selected_direction]['i']
@@ -596,10 +596,10 @@ class Square():
                 # attempts to randomly move in any remaining direction
                 elif collision_check == True:
 
-                    directions_already_tried.add(selected_direction)
+                    self.directions_already_tried.add(selected_direction)
                     # print(f"Directions already tried are [{directions_already_tried}]") #D
 
-                    remaining_directions = valid_directions.difference(directions_already_tried)
+                    remaining_directions = valid_directions.difference(self.directions_already_tried)
                     # print(f"\n\nRemaining directions are [{remaining_directions}]")
 
                     selected_direction = choice(list(remaining_directions))
@@ -621,10 +621,10 @@ class Square():
 
                     elif collision_check == True:
 
-                        directions_already_tried.add(selected_direction)
+                        self.directions_already_tried.add(selected_direction)
                         # print(f"Directions already tried are [{directions_already_tried}]") #D
 
-                        remaining_directions = valid_directions.difference(directions_already_tried)
+                        remaining_directions = valid_directions.difference(self.directions_already_tried)
                         # print(f"\n\nRemaining directions are [{remaining_directions}]")
 
                         selected_direction = choice(list(remaining_directions))
@@ -655,19 +655,19 @@ class Square():
     
     
     
-    def moveChildSquare(self, squareverse):
+    def moveChildSquare(self, squareverse_child):
         
 
         # list_of_squares = squareverse.created_squares
         # number_of_squares = len(squareverse.created_squares)
         # square_coordinates = self.coordinates.split(":")
         
-        valid_directions = set(squareverse.valid_directions.keys())
+        valid_directions = set(squareverse_child.valid_directions.keys())
         selected_direction = None
-        directions_already_tried = set()
+        self.directions_already_tried = squareverse_child.directions_already_tried
         remaining_directions = set()
         collision_detected = True
-        self.number_of_collisions = 0
+        self.number_of_collisions = squareverse_child.number_of_collisions
 
         # print(f"\n\nCoordinates of Square [{self.square_id}] before moving are {self.coordinates}") #D
         # print(f"Valid directions to move in are {valid_directions}") #D
@@ -679,33 +679,33 @@ class Square():
         # print(f"\n\nColor and outline of Square [{self.square_id}] has been reset to [{self.body_color}:{self.outline_color}]") #D
         
         # checks if Square moved last cycle
-        if self.previous_direction == None:
+        if self.previous_direction == None or self.previous_direction in self.directions_already_tried:
 
-            self.squareverse_child.checkSquarePositions() #testing
+            # self.squareverse_child.checkSquarePositions() #testing
             
             while self.number_of_collisions < 4:
 
-                remaining_directions = valid_directions.difference(directions_already_tried)
+                remaining_directions = valid_directions.difference(self.directions_already_tried)
                 # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
 
                 selected_direction = choice(list(remaining_directions))
 
-                directions_already_tried.add(selected_direction)
+                self.directions_already_tried.add(selected_direction)
 
-                collision_detected = self.collisionCheck(squareverse, selected_direction)
+                collision_detected = self.collisionCheck(squareverse_child, selected_direction)
 
                 if collision_detected == False:
 
-                    self.body.move(squareverse.valid_directions[selected_direction]['x'], squareverse.valid_directions[selected_direction]['y'])
+                    self.body.move(squareverse_child.valid_directions[selected_direction]['x'], squareverse_child.valid_directions[selected_direction]['y'])
                     # print(f"\n\nSquare [{self.square_id}] has moved [{selected_direction}]")
                     
                     self.previous_direction = selected_direction
 
-                    squareverse.square_positions.remove(self.coordinates)
+                    squareverse_child.square_positions.remove(self.coordinates)
                 
                     self.coordinates = self.body.getCoordinates()
                 
-                    squareverse.square_positions.add(self.coordinates)
+                    squareverse_child.square_positions.add(self.coordinates)
 
                     break
                     
@@ -723,106 +723,107 @@ class Square():
                 # print("There are no move valid directions remaining")
                 self.body.setFill("Red")
 
+        
         elif self.previous_direction != None:
 
             # attempts to contine moving in the previous direction first
             selected_direction = self.previous_direction
 
-            collision_check = self.collisionCheck(squareverse, selected_direction)
+            collision_check = self.collisionCheck(squareverse_child, selected_direction)
 
             if collision_check == False:
 
-                self.body.move(squareverse.valid_directions[selected_direction]['x'], squareverse.valid_directions[selected_direction]['y'])
+                self.body.move(squareverse_child.valid_directions[selected_direction]['x'], squareverse_child.valid_directions[selected_direction]['y'])
                 # print(f"\n\nSquare [{self.square_id}] has moved [{selected_direction.upper()}]") #D
 
                 # self.previous_direction = selected_direction
                 
-                squareverse.square_positions.remove(self.coordinates)
+                squareverse_child.square_positions.remove(self.coordinates)
                 
                 self.coordinates = self.body.getCoordinates()
                 
-                squareverse.square_positions.add(self.coordinates)
+                squareverse_child.square_positions.add(self.coordinates)
 
                 # break
             
             # attempts to move in the inverse direction ('i') next
             elif collision_check == True:
 
-                directions_already_tried.add(selected_direction)
+                self.directions_already_tried.add(selected_direction)
                 # print(f"Directions already tried are [{directions_already_tried}]") #D
 
-                remaining_directions = valid_directions.difference(directions_already_tried)
+                remaining_directions = valid_directions.difference(self.directions_already_tried)
                 # print(f"\n\nRemaining directions are [{remaining_directions}]")
                 
-                selected_direction = squareverse.valid_directions[selected_direction]['i']
+                selected_direction = squareverse_child.valid_directions[selected_direction]['i']
 
-                collision_check = self.collisionCheck(squareverse, selected_direction)
+                collision_check = self.collisionCheck(squareverse_child, selected_direction)
 
                 if collision_check == False:
 
-                    self.body.move(squareverse.valid_directions[selected_direction]['x'], squareverse.valid_directions[selected_direction]['y'])
+                    self.body.move(squareverse_child.valid_directions[selected_direction]['x'], squareverse_child.valid_directions[selected_direction]['y'])
                     # print(f"\n\nSquare [{self.square_id}] has moved [{selected_direction}]")
 
                     self.previous_direction = selected_direction
                     
-                    squareverse.square_positions.remove(self.coordinates)
+                    squareverse_child.square_positions.remove(self.coordinates)
                     
                     self.coordinates = self.body.getCoordinates()
                     
-                    squareverse.square_positions.add(self.coordinates)
+                    squareverse_child.square_positions.add(self.coordinates)
 
                     # break
 
                 # attempts to randomly move in any remaining direction
                 elif collision_check == True:
 
-                    directions_already_tried.add(selected_direction)
+                    self.directions_already_tried.add(selected_direction)
                     # print(f"Directions already tried are [{directions_already_tried}]") #D
 
-                    remaining_directions = valid_directions.difference(directions_already_tried)
+                    remaining_directions = valid_directions.difference(self.directions_already_tried)
                     # print(f"\n\nRemaining directions are [{remaining_directions}]")
 
                     selected_direction = choice(list(remaining_directions))
 
-                    collision_check = self.collisionCheck(squareverse, selected_direction)
+                    collision_check = self.collisionCheck(squareverse_child, selected_direction)
 
                     if collision_check == False:
 
-                        self.body.move(squareverse.valid_directions[selected_direction]['x'], squareverse.valid_directions[selected_direction]['y'])
+                        self.body.move(squareverse_child.valid_directions[selected_direction]['x'], squareverse_child.valid_directions[selected_direction]['y'])
                         # print(f"\n\nSquare [{self.square_id}] has moved [{selected_direction}]")
 
                         self.previous_direction = selected_direction
                         
-                        squareverse.square_positions.remove(self.coordinates)
+                        squareverse_child.square_positions.remove(self.coordinates)
                         
                         self.coordinates = self.body.getCoordinates()
                         
-                        squareverse.square_positions.add(self.coordinates)
+                        squareverse_child.square_positions.add(self.coordinates)
 
                     elif collision_check == True:
 
-                        directions_already_tried.add(selected_direction)
+                        self.directions_already_tried.add(selected_direction)
                         # print(f"Directions already tried are [{directions_already_tried}]") #D
 
-                        remaining_directions = valid_directions.difference(directions_already_tried)
+                        remaining_directions = valid_directions.difference(self.directions_already_tried)
                         # print(f"\n\nRemaining directions are [{remaining_directions}]")
 
                         selected_direction = choice(list(remaining_directions))
 
-                        collision_check = self.collisionCheck(squareverse, selected_direction)
+                        collision_check = self.collisionCheck(squareverse_child, selected_direction)
 
                         if collision_check == False:
 
-                            self.body.move(squareverse.valid_directions[selected_direction]['x'], squareverse.valid_directions[selected_direction]['y'])
+                            self.body.move(squareverse_child.valid_directions[selected_direction]['x'], squareverse_child.valid_directions[selected_direction]['y'])
                             # print(f"\n\nSquare [{self.square_id}] has moved [{selected_direction}]")
 
                             self.previous_direction = selected_direction
                             
-                            squareverse.square_positions.remove(self.coordinates)
+                            squareverse_child.square_positions.remove(self.coordinates)
                             
                             self.coordinates = self.body.getCoordinates()
                             
-                            squareverse.square_positions.add(self.coordinates)
+                            squareverse_child.square_positions.add(self.coordinates)
 
                         elif collision_check == True:
 
