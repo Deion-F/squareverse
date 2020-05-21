@@ -597,6 +597,13 @@ class _BBox(GraphicsObject):
         p2 = self.p2
         return Point((p1.x+p2.x)/2.0, (p1.y+p2.y)/2.0)
 
+    def getCenterCoordinates(self):
+        p1 = self.p1
+        p2 = self.p2
+        # print(f"{int((p1.x+p2.x)//2)}:{int((p1.y+p2.y)//2)}") #debug
+        return f"{int((p1.x+p2.x)//2)}:{int((p1.y+p2.y)//2)}"
+        
+
     def getCoordinates(self):
         p1 = self.p1
         p2 = self.p2
