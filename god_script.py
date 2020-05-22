@@ -246,19 +246,27 @@ class Squareverse():
 
 
 
-    def moveChildSquares(self, number_of_cycles, parent_square):
+    def moveSquareChildren(self, number_of_cycles, square_p):
 
         for _ in range(number_of_cycles):
 
-            for child_square in self.created_squares:
+            for square in self.created_squares:
 
-                child_square.moveChildSquare(self, parent_square)
+                square.moveSquareChild(self, square_p)
 
         self.checkSquarePositions()
         
-        print(f"\n\nDirection with the most Squares: {max(self.square_locations, key=lambda key: self.square_locations[key])}") #debug
+        self.direction_with_the_most_squares = max(i for i in self.square_locations.values())
 
-        return(max(self.square_locations, key=lambda key: self.square_locations[key]))
+        print(f"\n\nDirection with the most Squares: {self.direction_with_the_most_squares}") #debug
+
+        tie_breaker = choice([i for i in self.square_locations.keys() if self.square_locations.get(i) == self.direction_with_the_most_squares])
+
+        print(f"\n\nDirection with the most Squares after tie-breaker: {tie_breaker}") #debug
+
+        # return(max(self.square_locations, key=lambda key: self.square_locations[key]))
+
+        return tie_breaker
     
     
     
@@ -500,11 +508,11 @@ class Square():
                 remaining_directions = valid_directions.difference(self.directions_already_tried)
                 # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
 
-                selected_direction = self.squareverse_child.moveChildSquares(child_squareverse_movement_cycles, self) #new movement logic
+                selected_direction = self.squareverse_child.moveSquareChildren(child_squareverse_movement_cycles, self) #new movement logic
 
                 while selected_direction in self.directions_already_tried and len(self.directions_already_tried) <= len(valid_directions):
 
-                    selected_direction = self.squareverse_child.moveChildSquares(child_squareverse_movement_cycles)
+                    selected_direction = self.squareverse_child.moveSquareChildren(child_squareverse_movement_cycles, self)
                 
                 # selected_direction = choice(list(remaining_directions))
 
@@ -679,7 +687,7 @@ class Square():
             while self.number_of_collisions < 4:
 
                 self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
-                # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
+                print(f"\n\nRemaining directions for Square [{self.square_id}] are {self.remaining_directions}")
 
                 self.selected_direction = choice(list(self.remaining_directions))
 
