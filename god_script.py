@@ -246,13 +246,13 @@ class Squareverse():
 
 
 
-    def moveChildSquares(self, number_of_cycles):
+    def moveChildSquares(self, number_of_cycles, parent_square):
 
         for _ in range(number_of_cycles):
 
             for child_square in self.created_squares:
 
-                child_square.moveChildSquare(self)
+                child_square.moveChildSquare(self, parent_square)
 
         self.checkSquarePositions()
         
@@ -500,7 +500,7 @@ class Square():
                 remaining_directions = valid_directions.difference(self.directions_already_tried)
                 # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
 
-                selected_direction = self.squareverse_child.moveChildSquares(child_squareverse_movement_cycles) #new movement logic
+                selected_direction = self.squareverse_child.moveChildSquares(child_squareverse_movement_cycles, self) #new movement logic
 
                 while selected_direction in self.directions_already_tried and len(self.directions_already_tried) <= len(valid_directions):
 
@@ -655,30 +655,23 @@ class Square():
     
     
     
-    def moveChildSquare(self, squareverse_child):
+    def moveChildSquare(self, squareverse, square_p):
         
 
-        # list_of_squares = squareverse.created_squares
-        # number_of_squares = len(squareverse.created_squares)
-        # square_coordinates = self.coordinates.split(":")
+        self.valid_directions = set(squareverse.valid_directions.keys())
+        self.directions_already_tried = square_p.directions_already_tried #inherits directions tried from parent square
+        self.remaining_directions = set()
+        self.selected_direction = None
         
-        valid_directions = set(squareverse_child.valid_directions.keys())
-        selected_direction = None
-        self.directions_already_tried = squareverse_child.directions_already_tried
-        remaining_directions = set()
-        collision_detected = True
-        self.number_of_collisions = squareverse_child.number_of_collisions
+        self.number_of_collisions = square_p.number_of_collisions #inherits number of collisions from parent
+        self.collision_detected = True
 
-        # print(f"\n\nCoordinates of Square [{self.square_id}] before moving are {self.coordinates}") #D
-        # print(f"Valid directions to move in are {valid_directions}") #D
         
-
         # resets color and outline for Square
-        self.body.setFill(self.body_color)
-        self.body.setOutline(self.outline_color)
-        # print(f"\n\nColor and outline of Square [{self.square_id}] has been reset to [{self.body_color}:{self.outline_color}]") #D
-        
-        # checks if Square moved last cycle
+        # self.body.setFill(self.body_color) #not required for child Square
+        # self.body.setOutline(self.outline_color) #not required for child Square
+
+        # checks if Square moved last cycle or if direction last moved has already been tried by parent Square this cycle
         if self.previous_direction == None or self.previous_direction in self.directions_already_tried:
 
             # self.squareverse_child.checkSquarePositions() #testing
@@ -721,10 +714,10 @@ class Square():
             else:
 
                 # print("There are no move valid directions remaining")
-                self.body.setFill("Red")
+                # self.body.setFill("Red")
 
         
-        elif self.previous_direction != None:
+        elif self.previous_direction != None and self.previous_direction not in self.directions_already_tried:
 
             # attempts to contine moving in the previous direction first
             selected_direction = self.previous_direction
