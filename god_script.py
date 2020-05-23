@@ -25,9 +25,7 @@ class Squareverse():
        
         
 
-        # print(f"\n\n***Squareverse Values***\nSquareverse ID: [{self.squareverse_id}]\nSquareverse Name: [{self.squareverse_name}]\nSquareverse Size: [{self.squareverse_size}px]\nSquareverse Grid Spacing: [{self.squareverse_grid_spacing}px]\nSquareverse Window Size: [{self.squareverse_window_size}px]") #D
-        
-        # self.createSquareverseWindow()
+        # print(f"\n\n***Squareverse Values***\nSquareverse ID: [{self.squareverse_id}]\nSquareverse Name: [{self.squareverse_name}]\nSquareverse Size: [{self.squareverse_size}px]\nSquareverse Grid Spacing: [{self.squareverse_grid_spacing}px]\nSquareverse Window Size: [{self.squareverse_window_size}px]") #debug
 
     
 
@@ -86,8 +84,8 @@ class Squareverse():
 
         self.vertical_starting_point = self.squareverse_grid_spacing
         self.horizontal_starting_point = self.squareverse_grid_spacing
-        self.number_of_lines = int(round((self.squareverse_size / self.squareverse_grid_spacing), 0) + 1)
-        # print(f"\n\n[{number_of_lines}] grid lines required") #debug
+        self.number_of_lines = int(round((self.squareverse_size // self.squareverse_grid_spacing), 0) + 1)
+        print(f"\n\n[{self.number_of_lines}] grid lines required") #debug
         # self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
 
 
@@ -455,23 +453,27 @@ class SquareverseChild(Squareverse):
 
 
 
-def createSquareverse():
+def createSquareverseSimulation():
 
-    squareverse_id = randint(1, 100)
-    squareverse_name = f"Squareverse-{squareverse_id}"
-    
-    # create_window = True
-    
+
+    squareverse_id = randint(0, 100)
+    squareverse_name = f"Squareverse [{squareverse_id}]"
+    squareverse_default_size = 8
     invalid_squareverse_size = True
+
 
     while invalid_squareverse_size == True:
 
-        squareverse_size = input("\n\nInput Squareverse size (1 - 10): ") # determines Squareverse size in px by multiplying provided value by 100
-
+        squareverse_size = input("\n\nSelect size for Squareverse (1 - 10): ") #info
+        
         if len(squareverse_size) == 0:
 
-            squareverse_size = 8 # default value for Squareverse size
+            squareverse_size = squareverse_default_size
             invalid_squareverse_size = False
+
+        elif float(squareverse_size) % 1 != 0:
+
+            print("\n\nPlease choose a whole number for Squareverse size") #info
 
         elif int(squareverse_size) <= 10 and int(squareverse_size) >= 1:
         
@@ -479,30 +481,24 @@ def createSquareverse():
 
         else:
 
-            print("\n\nPlease choose a value within the provided range")
+            print("\n\nPlease choose a valid size for Squareverse") #info
 
-    squareverse_size = (int(squareverse_size) * 100) # calculates actual Squareverse window size
-    valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and squareverse_size % 2 == 0]
+    squareverse_size = (int(squareverse_size) * 100) #calculates Squareverse window size in px
+    valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and i % 2 == 0]
+    # print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]") #debug
     squareverse_grid_spacing = choice(valid_grid_sizes)
+    # print(f"\n\nSelected grid spacing is [{squareverse_grid_spacing}]") #debug
+    squareverse = Squareverse(squareverse_id, squareverse_name)
+    squareverse.createSquareverseWindow(squareverse_size, squareverse_grid_spacing)
     
-    squareverse_parent = Squareverse(squareverse_id, squareverse_name)
-    squareverse_parent.createSquareverseWindow(squareverse_size, squareverse_grid_spacing) # creates a Squareverse window
-    
-    print(f"\n\n[{squareverse_name}] has been successfully created") #D
+    print(f"\n\n{squareverse.squareverse_name} has been successfully created") #debug
 
 
-    return squareverse_parent
+    return squareverse
 
 
 
-# def createInnerSquareverse(squareverse):
-
-#     hhhh
-
-    
-
-
-def showMenu(squareverse):
+def showSquareverseMenu(squareverse):
 
     valid_options = ["s", "d", "a", "m", "e"]
 
@@ -599,7 +595,7 @@ class Square():
 
         # self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 2))
 
-        self.squareverse_c.createSquares(1)
+        self.squareverse_c.createSquares(10)
 
         # self.squareverse_child.createSquares(10, draw_squares) #testing
 

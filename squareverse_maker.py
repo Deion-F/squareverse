@@ -1,14 +1,14 @@
 #!/usr/bin/env python3.7
-from god_script import createSquareverse, showMenu
+from god_script import createSquareverseSimulation, showSquareverseMenu
 # end of imports
 
 
 
 def runSquareverseSimulation():
     
-    squareverse = createSquareverse()
+    squareverse = createSquareverseSimulation()
 
-    showMenu(squareverse)
+    showSquareverseMenu(squareverse)
 
     
  
