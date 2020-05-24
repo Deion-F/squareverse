@@ -224,56 +224,56 @@ class Squareverse():
 
 
 
-    def moveSquareChildren(self, number_of_cycles, square_p):
+    # def moveSquareChildren(self, number_of_cycles, square_p):
 
-        for _ in range(number_of_cycles):
-            print(f"Moving all children for Square [{square_p.square_id}]") #debug
-            for square in self.created_squares:
+    #     for _ in range(number_of_cycles):
+    #         print(f"Moving all children for Square [{square_p.square_id}]") #debug
+    #         for square in self.created_squares:
 
-                square.moveSquareChild(self, square_p)
+    #             square.moveSquareChild(self, square_p)
 
-        self.checkSquarePositions()
+    #     self.checkSquarePositions()
         
-        self.direction_with_the_most_squares = max(i for i in self.square_locations.values())
+    #     self.direction_with_the_most_squares = max(i for i in self.square_locations.values())
 
-        # print(f"\n\nMax Squares in a direction: {self.direction_with_the_most_squares}") #debug
+    #     # print(f"\n\nMax Squares in a direction: {self.direction_with_the_most_squares}") #debug
 
-        tie_breaker = choice([i for i in self.square_locations.keys() if self.square_locations.get(i) == self.direction_with_the_most_squares])
+    #     tie_breaker = choice([i for i in self.square_locations.keys() if self.square_locations.get(i) == self.direction_with_the_most_squares])
 
-        # print(f"\n\nDirection with the most Squares after tie-breaker: {tie_breaker}") #debug
+    #     # print(f"\n\nDirection with the most Squares after tie-breaker: {tie_breaker}") #debug
 
-        # return(max(self.square_locations, key=lambda key: self.square_locations[key]))
+    #     # return(max(self.square_locations, key=lambda key: self.square_locations[key]))
 
-        return tie_breaker
+    #     return tie_breaker
     
     
     
-    def checkSquarePositions(self):
+    # def checkSquarePositions(self):
 
-        # self.squares_left = 0
-        # self.squares_right = 0
-        # self.squares_up = 0
-        # self.squares_down = 0
+    #     # self.squares_left = 0
+    #     # self.squares_right = 0
+    #     # self.squares_up = 0
+    #     # self.squares_down = 0
 
-        self.square_locations = {"left": 0, "right": 0, "up": 0, "down": 0}
+    #     self.square_locations = {"left": 0, "right": 0, "up": 0, "down": 0}
         
-        for square in self.created_squares:
+    #     for square in self.created_squares:
 
-            square_center = square.body.getCenterCoordinates()
-            square_center_coordinates = square_center.split(':')
+    #         square_center = square.body.getCenterCoordinates()
+    #         square_center_coordinates = square_center.split(':')
 
-            if int(square_center_coordinates[0]) < self.center_point_coordinate:
-                self.square_locations["left"] = self.square_locations["left"] + 1
-            else:
-                self.square_locations["right"] = self.square_locations["right"] + 1
+    #         if int(square_center_coordinates[0]) < self.center_point_coordinate:
+    #             self.square_locations["left"] = self.square_locations["left"] + 1
+    #         else:
+    #             self.square_locations["right"] = self.square_locations["right"] + 1
 
-            if int(square_center_coordinates[1]) < self.center_point_coordinate:
-                self.square_locations["up"] = self.square_locations["up"] + 1
-            else:
-                self.square_locations["down"] = self.square_locations["down"] + 1
+    #         if int(square_center_coordinates[1]) < self.center_point_coordinate:
+    #             self.square_locations["up"] = self.square_locations["up"] + 1
+    #         else:
+    #             self.square_locations["down"] = self.square_locations["down"] + 1
 
-        # print(f"\n\nSquares left: {self.square_locations['left']}\n\nSquares right: {self.square_locations['right']}\n\nSquares up: {self.square_locations['up']}\n\nSquares down: {self.square_locations['down']}") #debug
-        # print(max(self.square_locations, key=lambda key: self.square_locations[key]))
+    #     # print(f"\n\nSquares left: {self.square_locations['left']}\n\nSquares right: {self.square_locations['right']}\n\nSquares up: {self.square_locations['up']}\n\nSquares down: {self.square_locations['down']}") #debug
+    #     # print(max(self.square_locations, key=lambda key: self.square_locations[key]))
 
 
 
@@ -486,9 +486,9 @@ def createSquareverseSimulation():
 
     squareverse_size = (int(squareverse_size) * 100) #calculates Squareverse window size in px
     valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and (squareverse_size / i) % 2 == 0]
-    print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]") #debug
+    # print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]") #debug
     squareverse_grid_spacing = choice(valid_grid_sizes)
-    print(f"\n\nSelected grid spacing is [{squareverse_grid_spacing}]") #debug
+    # print(f"\n\nSelected grid spacing is [{squareverse_grid_spacing}]") #debug
     squareverse = Squareverse(squareverse_id, squareverse_name)
     squareverse.createSquareverseWindow(squareverse_size, squareverse_grid_spacing)
     
@@ -594,7 +594,7 @@ class Square():
         
         self.squareverse_c.createSquareverseWindow(squareverse_p.squareverse_size, squareverse_p.squareverse_grid_spacing, self.body_color)
 
-        self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 4))
+        self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 8))
 
         # self.squareverse_c.createSquares(10)
 
@@ -635,9 +635,10 @@ class Square():
 
         if self.previous_direction == None:
 
+            print(f"\n\nSquare [{self.square_id}] hasn't moved so using child Squareverse") #debug
             self.child_squareverse_movement_cycles = 5
 
-            while self.remaining_directions != None or self.number_of_collisions < 4:
+            while len(self.directions_already_tried) != len(self.valid_directions):
 
                 self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
                 print(f"\n\nRemaining directions for Square [{self.square_id}] are [{self.remaining_directions}]") #debug
@@ -645,6 +646,8 @@ class Square():
                 self.selected_direction = self.squareverse_c.moveSquareChildren(self.child_squareverse_movement_cycles, self)
 
                 while self.selected_direction in self.directions_already_tried and len(self.directions_already_tried) <= len(self.valid_directions):
+
+                    self.child_squareverse_movement_cycles = 1
 
                     self.selected_direction = self.squareverse_c.moveSquareChildren(self.child_squareverse_movement_cycles, self)
                 
@@ -807,9 +810,9 @@ class Square():
         self.valid_directions = set(squareverse.valid_directions.keys())
         self.directions_already_tried = square_p.directions_already_tried.copy() #inherits directions tried from parent Square
         # print(f"\n\nDirections already tried by Square parent are [{self.directions_already_tried}]") #debug
-        self.remaining_directions = None
+        self.remaining_directions = set()
         self.selected_direction = None
-        # self.previous_direction = None #testing
+        self.previous_direction = None #testing
         
         self.number_of_collisions = copy(square_p.number_of_collisions) #inherits number of collisions from parent Square
         self.collision_detected = True
@@ -823,7 +826,7 @@ class Square():
 
             # self.squareverse_child.checkSquarePositions() #testing
             
-            while self.remaining_directions != None or self.number_of_collisions < 4:
+            while len(self.directions_already_tried) != len(self.valid_directions):
 
                 self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
                 print(f"\n\nRemaining directions for Square child [{self.square_id}] are {self.remaining_directions}") #debug
