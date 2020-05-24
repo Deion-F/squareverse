@@ -4,12 +4,14 @@ from god_script import createSquareverseSimulation, showSquareverseMenu
 
 
 
-def runSquareverseSimulation():
+def main():
     
     squareverse = createSquareverseSimulation()
 
     showSquareverseMenu(squareverse)
 
+
+
+if __name__ == "__main__":
     
- 
-runSquareverseSimulation()
+    main()
