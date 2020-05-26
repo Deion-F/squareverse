@@ -33,7 +33,8 @@ class Squareverse():
         
         
         self.window_background_color = color_rgb(97, 97, 97)
-        self.grid_color = color_rgb(255, 255, 255)
+        # self.grid_color = color_rgb(255, 255, 255)
+        self.grid_color =  self.window_background_color #testing
 
         self.squareverse_size = squareverse_size
         self.squareverse_grid_spacing = squareverse_grid_spacing
@@ -281,7 +282,8 @@ class Squareverse():
     def destroySquareverse(self):
         
         self.window.close()
-        print(f"Ending the Squareverse simulation for {self.squareverse_name}!")
+        
+        print(f"Ending the Squareverse simulation for {self.squareverse_name}!") #debug
 
 
 
@@ -333,17 +335,17 @@ class SquareverseChild(Squareverse):
 
 
         #everyting after this can be commented out if window isn't required for child Squareverse
-        self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
+        # self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
 
-        self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
+        # self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
         
-        self.window.setBackground(self.window_background_color)
+        # self.window.setBackground(self.window_background_color)
 
-        self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) #testing
-        self.center_point.setFill("Orange") #testing
+        # self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) #testing
+        # self.center_point.setFill("Orange") #testing
 
 
-        self.createSquareverseGrid()
+        # self.createSquareverseGrid()
 
 
 
@@ -397,7 +399,7 @@ class SquareverseChild(Squareverse):
 
         for i in range(number_of_cycles):
             
-            print(f"\n\nMoved all children for Square [{square_p.square_id}] {i} times") #debug
+            # print(f"\n\nMoved all children for Square [{square_p.square_id}] {i} times") #debug
             for square in self.created_squares:
 
                 square.moveSquareChild(self, square_p)
@@ -459,7 +461,7 @@ def createSquareverseSimulation():
 
     squareverse_id = randint(0, 100)
     squareverse_name = f"Squareverse [{squareverse_id}]"
-    squareverse_default_size = 8
+    squareverse_default_size = 5
     invalid_squareverse_size = True
 
 
@@ -501,12 +503,12 @@ def createSquareverseSimulation():
 
 def showSquareverseMenu(squareverse):
 
-    valid_options = ["s", "d", "a", "m", "e"]
+    # valid_options = ["s", "d", "a", "m", "e"]
 
     while True:
        
         user_selection = input("\n\nPlease select what you want to do:\nSpawn a Square (s)\nDelete a Square (d)\nDelete all Squares (a)\nMove Squares (m)\nEnd the Squareverse simulation (e)\n\nOption: ")
-        assert user_selection in valid_options, "E: that was not a valid option!"
+        # assert user_selection in valid_options, "E: that was not a valid option!"
 
         if user_selection == "s":
             
@@ -532,23 +534,21 @@ def showSquareverseMenu(squareverse):
             squareverse.createSquares(int(number_of_squares))
 
         elif user_selection == "d":
+            
             pass
+        
         elif user_selection == "a":
+            
             pass
+       
         elif user_selection == "m":
-            
-            # default_duration = 10
-            # duration = input(f"Enter a duration for movement (default {default_duration}): ")
-            
-            # if duration == "" or duration.isnumeric == False:
-            #     duration = default_duration
-
-            # print(f"Moving Squares...")
             
             squareverse.moveAllSquares()
 
         else:
+            
             squareverse.destroySquareverse()
+            
             break
 
 
@@ -573,7 +573,7 @@ class Square():
         self.previous_direction = None
         self.number_of_collisions = 0
         
-        self.squareverse_c = SquareverseChild(self.square_id, f"{squareverse_p.squareverse_name}-CHILD-{self.square_id}")
+        self.squareverse_c = SquareverseChild(self.square_id, f"{squareverse_p.squareverse_name} CHILD [{self.square_id}]")
 
         # create_window = False
         # draw_squares = False
@@ -594,7 +594,7 @@ class Square():
         
         self.squareverse_c.createSquareverseWindow(squareverse_p.squareverse_size, squareverse_p.squareverse_grid_spacing, self.body_color)
 
-        self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 8))
+        self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 6))
 
         # self.squareverse_c.createSquares(10)
 
@@ -635,13 +635,13 @@ class Square():
 
         if self.previous_direction == None:
 
-            print(f"\n\nSquare [{self.square_id}] hasn't moved so using child Squareverse") #debug
+            # print(f"\n\nSquare [{self.square_id}] hasn't moved so using child Squareverse") #debug
             self.child_squareverse_movement_cycles = 5
 
             while len(self.directions_already_tried) != len(self.valid_directions):
 
                 self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
-                print(f"\n\nRemaining directions for Square [{self.square_id}] are [{self.remaining_directions}]") #debug
+                # print(f"\n\nRemaining directions for Square [{self.square_id}] are [{self.remaining_directions}]") #debug
 
                 self.selected_direction = self.squareverse_c.moveSquareChildren(self.child_squareverse_movement_cycles, self)
 
@@ -660,9 +660,9 @@ class Square():
                     self.body.move(squareverse.valid_directions[self.selected_direction]['x'], squareverse.valid_directions[self.selected_direction]['y'])
                     # print(f"\n\nSquare [{self.square_id}] has moved [{self.selected_direction}]") #debug
                     
-                    # self.previous_direction = self.selected_direction
+                    self.previous_direction = self.selected_direction
 
-                    self.previous_direction = None #testing
+                    # self.previous_direction = None #testing
 
                     # updates global coordinates for Square
                     squareverse.square_positions.remove(self.current_coordinates)
@@ -683,7 +683,7 @@ class Square():
             else:
 
                 # print("There are no move valid directions remaining")
-                self.body.setFill("Red")
+                self.body.setOutline("White")
 
         elif self.previous_direction != None:
 
@@ -782,6 +782,7 @@ class Square():
 
                         if self.collision_check == False:
 
+                            
                             self.body.move(squareverse.valid_directions[self.selected_direction]['x'], squareverse.valid_directions[self.selected_direction]['y'])
                             # print(f"\n\nSquare [{self.square_id}] has moved [{selected_direction}]")
 
@@ -791,12 +792,12 @@ class Square():
                             self.current_coordinates = self.body.getCoordinates()
                             squareverse.square_positions.add(self.current_coordinates)
 
-                            self.squareverse_c.moveSquareChildren(1, self)
+                            # self.squareverse_c.moveSquareChildren(self.child_squareverse_movement_cycles, self)
 
                         elif self.collision_check == True:
 
                             # print("There are no move valid directions remaining")
-                            self.body.setFill("Red")
+                            self.body.setOutline("White")
     
     
     
@@ -812,7 +813,7 @@ class Square():
         # print(f"\n\nDirections already tried by Square parent are [{self.directions_already_tried}]") #debug
         self.remaining_directions = set()
         self.selected_direction = None
-        self.previous_direction = None #testing
+        # self.previous_direction = None #testing
         
         self.number_of_collisions = copy(square_p.number_of_collisions) #inherits number of collisions from parent Square
         self.collision_detected = True
@@ -829,7 +830,7 @@ class Square():
             while len(self.directions_already_tried) != len(self.valid_directions):
 
                 self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
-                print(f"\n\nRemaining directions for Square child [{self.square_id}] are {self.remaining_directions}") #debug
+                # print(f"\n\nRemaining directions for Square child [{self.square_id}] are {self.remaining_directions}") #debug
 
                 self.selected_direction = choice(list(self.remaining_directions))
 
@@ -909,7 +910,7 @@ class Square():
 
                     elif self.collision_detected == True:
 
-                        while self.remaining_directions != None or self.number_of_collisions < 4:
+                        while len(self.directions_already_tried) != len(self.valid_directions):
 
                             self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
                             # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
@@ -940,7 +941,7 @@ class Square():
 
                 else:
 
-                    while self.remaining_directions != None:
+                    while len(self.directions_already_tried) != len(self.valid_directions):
 
                         self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
                         # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
@@ -1016,7 +1017,7 @@ class Square():
                 # attempts to randomly move in any remaining direction
                 elif self.collision_detected == True:
 
-                    while self.number_of_collisions < 4:
+                    while len(self.directions_already_tried) != len(self.valid_directions):
 
                         self.remaining_directions = self.valid_directions.difference(self.directions_already_tried)
                         # print(f"\n\nRemaining directions for Square [{self.square_id}] are {remaining_directions}")
@@ -1157,8 +1158,8 @@ class SquareChild(Square):
         self.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
         
         #everything after this can be commented out
-        self.body.setFill(self.body_color)
+        # self.body.setFill(self.body_color)
 
-        self.body.setOutline(self.outline_color)
+        # self.body.setOutline(self.outline_color)
         
-        self.body.draw(squareverse_p.window)
+        # self.body.draw(squareverse_p.window)
