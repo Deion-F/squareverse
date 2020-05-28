@@ -1,1 +1,0 @@
-- create separate functions for parent and child Square/Squareverse

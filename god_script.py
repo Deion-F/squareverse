@@ -33,8 +33,8 @@ class Squareverse():
         
         
         self.window_background_color = color_rgb(97, 97, 97)
-        # self.grid_color = color_rgb(255, 255, 255)
-        self.grid_color =  self.window_background_color #testing
+        self.grid_color = color_rgb(0, 0, 0)
+        # self.grid_color =  self.window_background_color #testing
 
         self.squareverse_size = squareverse_size
         self.squareverse_grid_spacing = squareverse_grid_spacing
