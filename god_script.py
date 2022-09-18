@@ -2,6 +2,7 @@ from time import sleep
 from graphics import GraphWin, Point, Line, Rectangle, color_rgb
 from random import randint, randrange, choice
 from copy import copy
+from mongo import Mongo
 # import threading
 # end of imports
 
@@ -22,6 +23,8 @@ class Squareverse():
         
         self.created_squares = []
         self.square_positions = set()
+
+        self.mongo_client = Mongo()
        
         
 
@@ -29,6 +32,59 @@ class Squareverse():
 
     
 
+    def showSquareverseMenu(self):
+
+    # valid_options = ["s", "d", "a", "m", "e"]
+
+        while True:
+        
+            user_selection = input("\n\nPlease select what you want to do:\nSpawn a Square (s)\nDelete a Square (d)\nDelete all Squares (a)\nMove Squares (m)\nEnd the Squareverse simulation (e)\n\nOption: ")
+            # assert user_selection in valid_options, "E: that was not a valid option!"
+
+            if user_selection == "s":
+                
+                # draw_squares = True
+                number_of_squares = input("\n\nEnter the number of Squares to spawn (m = max allowed, h = half max, q = quarter max): ")
+
+                if number_of_squares == "m":
+                    
+                    number_of_squares = (self.max_number_of_squares - len(self.created_squares))
+                
+                elif number_of_squares == "h":
+                    
+                    number_of_squares = self.max_number_of_squares // 2
+                
+                elif number_of_squares == "q":
+                    
+                    number_of_squares = self.max_number_of_squares // 4
+                
+                else:
+                    
+                    pass
+
+                self.createSquares(int(number_of_squares))
+
+            elif user_selection == "d":
+                
+                pass
+            
+            elif user_selection == "a":
+                
+                pass
+        
+            elif user_selection == "m":
+                
+                self.moveAllSquares()
+
+            else:
+                
+                
+                self.mongo_client.delete_valid_directions()
+                self.destroySquareverse()
+                
+                break
+    
+    
     def createSquareverseWindow(self, squareverse_size, squareverse_grid_spacing):
         
         
@@ -67,7 +123,10 @@ class Squareverse():
             "y": 0,
             "i": "left"}}
 
+        
 
+        self.mongo_client.insert_valid_directions(squareverse_grid_spacing)
+        
         self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
         
         self.window.setBackground(self.window_background_color)
@@ -138,6 +197,8 @@ class Squareverse():
                        
             self.number_of_empty_grids = self.max_number_of_squares - len(self.created_squares)
 
+
+            # prevents too many Squares from being created
             if self.number_of_empty_grids == 0:
                  
                 print(f"\n\nThere are [{self.number_of_empty_grids}] empty grids remaining (no more grid space)") #debug
@@ -169,6 +230,7 @@ class Squareverse():
 
             # adds coordinates to Square positions set for tracking
             self.square_positions.add(square.current_coordinates)
+            self.mongo_client.insert_square_coordinates(square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
 
             # adds Square to created Squares array
             self.created_squares.append(square)
@@ -306,9 +368,10 @@ class SquareverseChild(Squareverse):
         self.window_background_color = window_background_color
         self.grid_color = color_rgb(255, 255, 255)
 
-        self.squareverse_size = 300
-        self.squareverse_grid_spacing = squareverse_grid_spacing
+        self.squareverse_size = squareverse_size # TESTING
+        self.squareverse_grid_spacing = squareverse_grid_spacing # TESTING
         self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
+        # self.max_number_of_squares = 5 # TESTING
         self.top_border = squareverse_grid_spacing
         self.bottom_border = 300 + squareverse_grid_spacing
         self.left_border = squareverse_grid_spacing
@@ -337,17 +400,17 @@ class SquareverseChild(Squareverse):
 
 
         # everything after this can be commented out if window isn't required for child Squareverse
-        self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
+        # self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
 
-        self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
+        # self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
         
-        self.window.setBackground(self.window_background_color)
+        # self.window.setBackground(self.window_background_color)
 
-        self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) #testing
-        self.center_point.setFill("Orange") #testing
+        # self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) #testing
+        # self.center_point.setFill("Orange") #testing
 
 
-        self.createSquareverseGrid()
+        # self.createSquareverseGrid()
 
 
 
@@ -487,100 +550,101 @@ class SquareverseChild(Squareverse):
 
 
 
-def createSquareverseSimulation():
+# def createSquareverseSimulation():
 
 
-    squareverse_id = randint(0, 100)
-    squareverse_name = f"Squareverse {squareverse_id}"
-    squareverse_default_size = 5
-    invalid_squareverse_size = True
+#     squareverse_id = randint(0, 100)
+#     squareverse_name = f"Squareverse {squareverse_id}"
+#     squareverse_default_size = 5
+#     invalid_squareverse_size = True
 
 
-    while invalid_squareverse_size == True:
+#     while invalid_squareverse_size == True:
 
-        squareverse_size = input("\n\nSelect size for Squareverse (1 - 10): ") #info
+#         squareverse_size = input("\n\nSelect size for Squareverse (1 - 10): ") #info
         
-        if len(squareverse_size) == 0:
+#         if len(squareverse_size) == 0:
 
-            squareverse_size = squareverse_default_size
-            invalid_squareverse_size = False
+#             squareverse_size = squareverse_default_size
+#             invalid_squareverse_size = False
 
-        elif float(squareverse_size) % 1 != 0:
+#         elif float(squareverse_size) % 1 != 0:
 
-            print("\n\nPlease choose a whole number for Squareverse size") #info
+#             print("\n\nPlease choose a whole number for Squareverse size") #info
 
-        elif int(squareverse_size) <= 10 and int(squareverse_size) >= 1:
+#         elif int(squareverse_size) <= 10 and int(squareverse_size) >= 1:
         
-            invalid_squareverse_size = False
+#             invalid_squareverse_size = False
 
-        else:
+#         else:
 
-            print("\n\nPlease choose a valid size for Squareverse") #info
+#             print("\n\nPlease choose a valid size for Squareverse") #info
 
-    squareverse_size = (int(squareverse_size) * 100) #calculates Squareverse window size in px
-    valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and (squareverse_size / i) % 2 == 0]
-    # print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]") #debug
-    squareverse_grid_spacing = choice(valid_grid_sizes)
-    # print(f"\n\nSelected grid spacing is [{squareverse_grid_spacing}]") #debug
-    squareverse = Squareverse(squareverse_id, squareverse_name)
-    squareverse.createSquareverseWindow(squareverse_size, squareverse_grid_spacing)
+#     squareverse_size = (int(squareverse_size) * 100) #calculates Squareverse window size in px
+#     valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and (squareverse_size / i) % 2 == 0]
+#     # print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]") #debug
+#     squareverse_grid_spacing = choice(valid_grid_sizes)
+#     # print(f"\n\nSelected grid spacing is [{squareverse_grid_spacing}]") #debug
+#     squareverse = Squareverse(squareverse_id, squareverse_name)
+#     squareverse.createSquareverseWindow(squareverse_size, squareverse_grid_spacing)
     
-    print(f"\n\n{squareverse.squareverse_name} has been successfully created") #debug
+#     print(f"\n\n{squareverse.squareverse_name} has been successfully created") #debug
 
 
-    return squareverse
+#     return squareverse
 
 
 
-def showSquareverseMenu(squareverse):
+# def showSquareverseMenu(squareverse):
 
-    # valid_options = ["s", "d", "a", "m", "e"]
+#     # valid_options = ["s", "d", "a", "m", "e"]
 
-    while True:
+#     while True:
        
-        user_selection = input("\n\nPlease select what you want to do:\nSpawn a Square (s)\nDelete a Square (d)\nDelete all Squares (a)\nMove Squares (m)\nEnd the Squareverse simulation (e)\n\nOption: ")
-        # assert user_selection in valid_options, "E: that was not a valid option!"
+#         user_selection = input("\n\nPlease select what you want to do:\nSpawn a Square (s)\nDelete a Square (d)\nDelete all Squares (a)\nMove Squares (m)\nEnd the Squareverse simulation (e)\n\nOption: ")
+#         # assert user_selection in valid_options, "E: that was not a valid option!"
 
-        if user_selection == "s":
+#         if user_selection == "s":
             
-            # draw_squares = True
-            number_of_squares = input("\n\nEnter the number of Squares to spawn (m = max allowed, h = half max, q = quarter max): ")
+#             # draw_squares = True
+#             number_of_squares = input("\n\nEnter the number of Squares to spawn (m = max allowed, h = half max, q = quarter max): ")
 
-            if number_of_squares == "m":
+#             if number_of_squares == "m":
                 
-                number_of_squares = (squareverse.max_number_of_squares - len(squareverse.created_squares))
+#                 number_of_squares = (squareverse.max_number_of_squares - len(squareverse.created_squares))
             
-            elif number_of_squares == "h":
+#             elif number_of_squares == "h":
                 
-                number_of_squares = squareverse.max_number_of_squares // 2
+#                 number_of_squares = squareverse.max_number_of_squares // 2
             
-            elif number_of_squares == "q":
+#             elif number_of_squares == "q":
                 
-                number_of_squares = squareverse.max_number_of_squares // 4
+#                 number_of_squares = squareverse.max_number_of_squares // 4
             
-            else:
+#             else:
                 
-                pass
+#                 pass
 
-            squareverse.createSquares(int(number_of_squares))
+#             squareverse.createSquares(int(number_of_squares))
 
-        elif user_selection == "d":
+#         elif user_selection == "d":
             
-            pass
+#             pass
         
-        elif user_selection == "a":
+#         elif user_selection == "a":
             
-            pass
+#             pass
        
-        elif user_selection == "m":
+#         elif user_selection == "m":
             
-            squareverse.moveAllSquares()
+#             squareverse.moveAllSquares()
 
-        else:
+#         else:
             
-            squareverse.destroySquareverse()
+#             mongo.delete_valid_directions()
+#             squareverse.destroySquareverse()
             
-            break
+#             break
 
 
 
@@ -1195,8 +1259,8 @@ class SquareChild(Square):
         self.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
         
         #everything after this can be commented out
-        self.body.setFill(self.body_color)
+        # self.body.setFill(self.body_color)
 
-        self.body.setOutline(self.outline_color)
+        # self.body.setOutline(self.outline_color)
         
-        self.body.draw(squareverse_p.window)
+        # self.body.draw(squareverse_p.window)

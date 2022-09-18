@@ -162,10 +162,10 @@ __version__ = "5.0"
 
 import time, os, sys
 
-try:  # import as appropriate for 2.x vs. 3.x
-   import tkinter as tk
-except:
-   import Tkinter as tk
+# try:  # import as appropriate for 2.x vs. 3.x
+import tkinter as tk
+# except:
+#    #import Tkinter as tk
 
 
 ##########################################################################
