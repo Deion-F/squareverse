@@ -3,6 +3,7 @@ from graphics import GraphWin, Point, Line, Rectangle, color_rgb
 from random import randint, randrange, choice
 from copy import copy
 from mongo import Mongo
+import pprint
 # import threading
 # end of imports
 
@@ -11,17 +12,15 @@ from mongo import Mongo
 class Squareverse():
 
 
-
-
     def __init__(self, squareverse_id, squareverse_name):
 
-        
         self.squareverse_id = squareverse_id
         self.squareverse_name = squareverse_name
         self.squareverse_size = None
         self.squareverse_grid_spacing = None
         
         self.created_squares = []
+        
         self.square_positions = set()
 
         self.mongo_client = Mongo()
@@ -88,13 +87,13 @@ class Squareverse():
     def createSquareverseWindow(self, squareverse_size, squareverse_grid_spacing):
         
         
-        self.window_background_color = color_rgb(97, 97, 97)
+        self.window_background_color = color_rgb(47, 47, 47)
         self.grid_color = color_rgb(0, 0, 0)
         # self.grid_color =  self.window_background_color #testing
-
         self.squareverse_size = squareverse_size
         self.squareverse_grid_spacing = squareverse_grid_spacing
         self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
+        # self.squareverse_window_size = self.squareverse_size # testing
         self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
         self.top_border = self.squareverse_grid_spacing
         self.bottom_border = self.squareverse_size + self.squareverse_grid_spacing
@@ -124,15 +123,14 @@ class Squareverse():
             "i": "left"}}
 
         
-
         self.mongo_client.insert_valid_directions(squareverse_grid_spacing)
         
         self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size)
         
         self.window.setBackground(self.window_background_color)
 
-        self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) #testing
-        self.center_point.setFill("Orange") #testing
+        # self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) #testing
+        # self.center_point.setFill("Orange") #testing
 
 
         self.createSquareverseGrid()
@@ -145,7 +143,7 @@ class Squareverse():
         self.vertical_starting_point = self.squareverse_grid_spacing
         self.horizontal_starting_point = self.squareverse_grid_spacing
         self.number_of_lines = int(round((self.squareverse_size // self.squareverse_grid_spacing), 0) + 1)
-        print(f"\n\n[{self.number_of_lines}] grid lines required") #debug
+        # print(f"\n\n[{self.number_of_lines}] grid lines required") #debug
         # self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
 
 
@@ -175,12 +173,15 @@ class Squareverse():
 
             self.horizontal_starting_point = self.horizontal_starting_point + self.squareverse_grid_spacing
 
-        self.vertical_center_line = Line(Point(self.center_point_coordinate, self.top_border), Point(self.center_point_coordinate, self.bottom_border)) #testing
-        
-        self.horizontal_center_line = Line(Point(self.left_border, self.center_point_coordinate), Point(self.right_border, self.center_point_coordinate)) #testing
+        # creates list of all possible Square coordinates in Mongo
+        self.mongo_client.create_valid_top_left_corner_xy(self.squareverse_grid_spacing, self.number_of_lines)
 
-        self.vertical_center_line.setFill("Cyan") #testing
-        self.horizontal_center_line.setFill("Cyan") #testing
+        # self.vertical_center_line = Line(Point(self.center_point_coordinate, self.top_border), Point(self.center_point_coordinate, self.bottom_border)) #testing
+        
+        # self.horizontal_center_line = Line(Point(self.left_border, self.center_point_coordinate), Point(self.right_border, self.center_point_coordinate)) #testing
+
+        # self.vertical_center_line.setFill("Cyan") #testing
+        # self.horizontal_center_line.setFill("Cyan") #testing
 
         # self.vertical_center_line.draw(self.window) #testing
         # self.horizontal_center_line.draw(self.window) #testing
@@ -190,63 +191,104 @@ class Squareverse():
 
     def createSquares(self, number_of_squares):
 
-        # sets limits for where Squares can spawn in the Squareverse
-        self.squareverse_max_xy = self.squareverse_size + self.squareverse_grid_spacing
+        # gets random list of unoccupied coordinates from Mongo (free_space is False if no coordinates available)
+        free_space, available_coordinates = self.mongo_client.get_available_coordinates(number_of_squares)
 
-        for _ in range(number_of_squares):
-                       
-            self.number_of_empty_grids = self.max_number_of_squares - len(self.created_squares)
-
-
-            # prevents too many Squares from being created
-            if self.number_of_empty_grids == 0:
+        if free_space == False:
                  
-                print(f"\n\nThere are [{self.number_of_empty_grids}] empty grids remaining (no more grid space)") #debug
+                print(f"\n\nWARN: There are no empty grids remaining") # debug
 
-                break
-                
-            else:
-            
-                square_id = len(self.created_squares)
+        else:
+
+            for coordinate in available_coordinates:
+
+                square_id = coordinate["_id"]
 
                 square = Square(square_id, self)
+
+                top_left_corner_x = coordinate["top_left_corner_x"]
+
+                top_left_corner_y = coordinate["top_left_corner_y"]
+
+                bottom_right_corner_x = coordinate["bottom_right_corner_x"]
+
+                bottom_right_corner_y = coordinate["bottom_right_corner_y"]
+
+                mongo_query = { "_id": square_id }
+                updated_value = { "$set": { "occupied": True } }
+
+                self.mongo_client.update_mongodb(mongo_query, updated_value)
+
+                # adds Square to created Squares array
+                #self.created_squares.append(square)
+
+                square.drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+
+
+        
+        # for coordinate in available_coordinates:
+
+        #     pprint.pprint(coordinate["bottom_right_corner_x"]) # debug
+        
+
+        # COMMENTED OUT TO TEST LOGIC ABOVE
+
+        # sets limits for where Squares can spawn in the Squareverse
+        # self.squareverse_max_xy = self.squareverse_size + self.squareverse_grid_spacing
+
+        # for _ in range(number_of_squares):
+                       
+        #     self.number_of_empty_grids = self.max_number_of_squares - len(self.created_squares)
+
+        #     # prevents too many Squares from being created
+        #     if self.number_of_empty_grids == 0:
+                 
+        #         print(f"\n\nThere are [{self.number_of_empty_grids}] empty grids remaining (no more grid space)") # debug
+
+        #         break
                 
-                self.duplicate_square_check = True
+        #     else:
+            
+        #         square_id = len(self.created_squares)
+
+        #         square = Square(square_id, self)
+                
+        #         self.duplicate_square_check = True
             
                 
-                # needs to be optimized so that it doesn't slow down as more Squares are spawned
-                while self.duplicate_square_check == True:
+        #         # needs to be optimized so that it doesn't slow down as more Squares are spawned
+        #         while self.duplicate_square_check == True:
                     
-                    top_left_corner_x = randrange(self.squareverse_grid_spacing, self.squareverse_max_xy, self.squareverse_grid_spacing)
+        #             top_left_corner_x = randrange(self.squareverse_grid_spacing, self.squareverse_max_xy, self.squareverse_grid_spacing)
                         
-                    top_left_corner_y = randrange(self.squareverse_grid_spacing, self.squareverse_max_xy, self.squareverse_grid_spacing)
+        #             top_left_corner_y = randrange(self.squareverse_grid_spacing, self.squareverse_max_xy, self.squareverse_grid_spacing)
 
-                    bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
+        #             bottom_right_corner_x = top_left_corner_x + self.squareverse_grid_spacing
                     
-                    bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
+        #             bottom_right_corner_y = top_left_corner_y + self.squareverse_grid_spacing
 
-                    # checks for duplicate Squares
-                    self.duplicate_square_check = self.duplicateSquareCheck(square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+        #             # checks for duplicate Squares
+        #             self.duplicate_square_check = self.duplicateSquareCheck(square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
 
-            # adds coordinates to Square positions set for tracking
-            self.square_positions.add(square.current_coordinates)
-            self.mongo_client.insert_square_coordinates(square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+        #     # adds coordinates to Square positions set for tracking
+        #     self.square_positions.add(square.current_coordinates)
+        #     self.mongo_client.insert_square_coordinates(square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
 
             # adds Square to created Squares array
-            self.created_squares.append(square)
+            # self.created_squares.append(square)
 
-            square.drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+            # square.drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
 
-            # else:
+            # # else:
 
-            #     square.createSquareChild(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+            # #     square.createSquareChild(top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
 
 
             # print(f"\n\nSquare {square.square_id} has been spawned at {square.coordinates}")
             # print(self.square_positions)
 
 
-
+    # no longer needed as available coordinates are stored in Mongo
     def duplicateSquareCheck(self, square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
 
         square_coordinates = f"{top_left_corner_x}:{top_left_corner_y}:{bottom_right_corner_x}:{bottom_right_corner_y}"
