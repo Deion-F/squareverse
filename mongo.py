@@ -74,9 +74,9 @@ class Mongo:
         starting_x = squareverse_grid_spacing
         starting_y = squareverse_grid_spacing
 
-        for _ in range(number_of_lines):
+        for _ in range(number_of_lines - 1):
 
-            for _ in range(number_of_lines):
+            for _ in range(number_of_lines -1):
 
                 top_left_corner_xy = {
                 
@@ -84,7 +84,8 @@ class Mongo:
                     "top_left_corner_y": starting_y,
                     "bottom_right_corner_x": starting_x + squareverse_grid_spacing,
                     "bottom_right_corner_y": starting_y + squareverse_grid_spacing,
-                    "occupied": False
+                    "occupied": False,
+                    "previous_direction": None
                     }
 
                 results = dbCollection.insert_one(top_left_corner_xy)
@@ -101,50 +102,64 @@ class Mongo:
         dbCollection = self.db.valid_top_left_corner_xy
         free_space = True
 
-        results = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": number_of_squares } }])
-        # .find({"occupied": "false"})
-        #.limit(number_of_squares)
-        # results = list(dbCollection.find({"occupied": "false"}).limit(number_of_squares))
-        # result_list = list(results)
-        list_length = len(list(results))
-        
-        if list_length != 0:
-
-            results = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": number_of_squares } }])
-
-            
-            
-            # for result in results:
-                
-            #     print(result)
-
-            return free_space, results
-        
-        else:
-            
-            free_space = False
-            
-            return free_space, results
-            print("No results found!")
-
-
-
-    def get_available_coordinates_testing(self):
-
-        dbCollection = self.db.valid_top_left_corner_xy
-        free_space = True
-
-        results = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": 5 }}])
+        totals = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": number_of_squares }}, { "$count": "total"}]) # gets total number of matching documents
         # .find({"occupied": "false"})
         #.limit(number_of_squares)
         # results = list(dbCollection.find({"occupied": "false"}).limit(number_of_squares))
         # result_list = list(results)
         
-        # print(results)
+        # pprint.pprint(totals[0])
+        
+        try:
 
-        for result in results:
+            if totals.next()["total"] != 0:
                 
-            pprint.pprint(result)
+                results = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": number_of_squares } }])
+
+                return free_space, results
+            
+            else:
+            
+                free_space = False
+                
+                print("No results found!")
+                return free_space, results
+                
+
+        except:
+
+            print("No next cursor")
+
+
+
+    # def get_available_coordinates_testing(self):
+
+    #     dbCollection = self.db.valid_top_left_corner_xy
+    #     free_space = True
+
+    #     totals = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": 5 }}, { "$count": "total"}])
+        
+    #     try:
+
+    #      pprint.pprint(totals.next()["total"])
+
+    #     except:
+
+    #         print("No next cursor")
+
+
+
+
+        # .find({"occupied": "false"})
+        #.limit(number_of_squares)
+        # results = list(dbCollection.find({"occupied": "false"}).limit(number_of_squares))
+        # result_list = list(results)
+        
+        # pprint.pprint(results.total)
+
+        # for result in results:
+                
+        #     pprint.pprint(result["total"])
         
         # list_length = len(list(results))
         
@@ -172,6 +187,74 @@ class Mongo:
         dbCollection = self.db.valid_top_left_corner_xy
 
         dbCollection.update_one(mongo_query, updated_value)
+
+
+
+    def collision_check(self, square, squareverse, selected_direction):
+
+        dbCollection = self.db.valid_top_left_corner_xy
+        collision_detected = False
+        top_left_corner_x_after_moving = square.top_left_corner_x + squareverse.valid_directions[selected_direction]['x']
+        top_left_corner_y_after_moving = square.top_left_corner_y + squareverse.valid_directions[selected_direction]['y']
+        results = dbCollection.aggregate([
+            { 
+                "$match": {
+                    "$and":[
+                        { "top_left_corner_x": top_left_corner_x_after_moving },
+                        { "top_left_corner_y": top_left_corner_y_after_moving },
+                        { "occupied": False }
+                    ]
+                }
+            },
+            { 
+                "$count": "total"
+            }
+        ])
+
+        # for result in results:
+
+        #     pprint.pprint(result)
+        # results = dbCollection.find_one({ "top_left_corner_x": top_left_corner_x_after_moving }, { "top_left_corner_y": top_left_corner_y_after_moving }, { "occupied": True })
+        # more_results = results.next()["total"]
+        # pprint.pprint(results)
+
+        # logic for detecting Squareverse borders
+        if top_left_corner_x_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > (squareverse.squareverse_size + squareverse.squareverse_grid_spacing) or top_left_corner_y_after_moving > (squareverse.squareverse_size + squareverse.squareverse_grid_spacing):
+
+            square.number_of_collisions = self.number_of_collisions + 1
+            collision_detected = True
+        
+        elif results != 0:
+        
+            square.number_of_collisions = self.number_of_collisions + 1
+            collision_detected = True
+
+
+        return collision_detected
+
+
+
+    def collision_check_testing(self, square, squareverse, selected_direction):
+
+        dbCollection = self.db.valid_top_left_corner_xy
+        collision_detected = False
+        top_left_corner_x_after_moving = square.top_left_corner_x + squareverse.valid_directions[selected_direction]['x']
+        top_left_corner_y_after_moving = square.top_left_corner_y + squareverse.valid_directions[selected_direction]['y']
+        results = dbCollection.find_one({ "top_left_corner_x": top_left_corner_x_after_moving }, { "top_left_corner_y": top_left_corner_y_after_moving }, { "occupied": True })
+        print(results)
+
+        # logic for detecting Squareverse borders
+        if top_left_corner_x_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > (squareverse.squareverse_size + squareverse.squareverse_grid_spacing) or top_left_corner_y_after_moving > (squareverse.squareverse_size + squareverse.squareverse_grid_spacing):
+
+            collision_detected = True
+        
+        elif len(results) != 0:
+        
+            collision_detected = True
+
+        return collision_detected
+
+
             
 
         
@@ -186,13 +269,13 @@ class Mongo:
 
 
 
-mongo = Mongo()
+# mongo = Mongo()
 
 
 
 
 # mongo.create_valid_top_left_corner_xy(10, 31)
-mongo.get_available_coordinates_testing()
+# mongo.get_available_coordinates_testing()
 
 # mongo.insert_valid_directions(5)
 

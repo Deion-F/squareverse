@@ -37,8 +37,20 @@ def createSquareverseSimulation():
     squareverse_size = (int(squareverse_size) * 100) # calculates Squareverse window size in px
     valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and (squareverse_size / i) % 2 == 0]
     
-    squareverse_grid_spacing = choice(valid_grid_sizes)
+    print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]")
     
+    squareverse_grid_spacing = input("\n\nSelect a Squareverse grid size: ")
+    
+    if len(squareverse_grid_spacing) == 0:
+
+        squareverse_grid_spacing = choice(valid_grid_sizes)
+    
+    else:
+
+        squareverse_grid_spacing = int(squareverse_grid_spacing)
+
+        
+
     squareverse = Squareverse(squareverse_id, squareverse_name)
     
     squareverse.createSquareverseWindow(squareverse_size, squareverse_grid_spacing)

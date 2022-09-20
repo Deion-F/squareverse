@@ -1,9 +1,11 @@
+import gc
 from time import sleep
 from graphics import GraphWin, Point, Line, Rectangle, color_rgb
 from random import randint, randrange, choice
 from copy import copy
 from mongo import Mongo
 import pprint
+import time
 # import threading
 # end of imports
 
@@ -94,7 +96,7 @@ class Squareverse():
         self.squareverse_grid_spacing = squareverse_grid_spacing
         self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
         # self.squareverse_window_size = self.squareverse_size # testing
-        self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
+        self.max_number_of_squares = int(round((self.squareverse_window_size / self.squareverse_grid_spacing)) ** 2)
         self.top_border = self.squareverse_grid_spacing
         self.bottom_border = self.squareverse_size + self.squareverse_grid_spacing
         self.left_border = self.squareverse_grid_spacing
@@ -156,8 +158,9 @@ class Squareverse():
             self.vertical_line = Line(first_point, second_point)
            
             self.vertical_line.setOutline(self.grid_color)
-            
+            self.vertical_line.shape = "line"
             self.vertical_line.draw(self.window)
+            
 
             self.vertical_starting_point = self.vertical_starting_point + self.squareverse_grid_spacing
 
@@ -168,8 +171,9 @@ class Squareverse():
             self.horizontal_line = Line(first_point, second_point)
             
             self.horizontal_line.setOutline(self.grid_color)
-            
+            self.horizontal_line.shape = "line"
             self.horizontal_line.draw(self.window)
+            
 
             self.horizontal_starting_point = self.horizontal_starting_point + self.squareverse_grid_spacing
 
@@ -191,6 +195,7 @@ class Squareverse():
 
     def createSquares(self, number_of_squares):
 
+        squares_to_create = () # testing
         # gets random list of unoccupied coordinates from Mongo (free_space is False if no coordinates available)
         free_space, available_coordinates = self.mongo_client.get_available_coordinates(number_of_squares)
 
@@ -200,29 +205,68 @@ class Squareverse():
 
         else:
 
+            start_time = time.time()
+            gc.disable()
+            
             for coordinate in available_coordinates:
 
                 square_id = coordinate["_id"]
-
                 square = Square(square_id, self)
+                square.top_left_corner_x = coordinate["top_left_corner_x"]
+                square.top_left_corner_y = coordinate["top_left_corner_y"]
+                square.bottom_right_corner_x = coordinate["bottom_right_corner_x"]
+                square.bottom_right_corner_y = coordinate["bottom_right_corner_y"]
+                # square.shape = "rectangle" # testing
+                
+                
+                
 
-                top_left_corner_x = coordinate["top_left_corner_x"]
-
-                top_left_corner_y = coordinate["top_left_corner_y"]
-
-                bottom_right_corner_x = coordinate["bottom_right_corner_x"]
-
-                bottom_right_corner_y = coordinate["bottom_right_corner_y"]
+                # draws Square object on Squareverse window
+                square.drawSquareBody(self, square.top_left_corner_x, square.top_left_corner_y, square.bottom_right_corner_x, square.bottom_right_corner_y)
 
                 mongo_query = { "_id": square_id }
-                updated_value = { "$set": { "occupied": True } }
+                mongo_updated_value = { "$set": { "occupied": True, "tkinter_id": square.tkinter_id } }
 
-                self.mongo_client.update_mongodb(mongo_query, updated_value)
+                self.mongo_client.update_mongodb(mongo_query, mongo_updated_value)
 
-                # adds Square to created Squares array
-                #self.created_squares.append(square)
+                # # adds Square to created Squares array - to be removed
+                # self.created_squares.append(square)
 
-                square.drawSquareBody(self, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y)
+                # adds coordinates to Square positions set for tracking - to be removed
+                square.current_coordinates = f"{square.top_left_corner_x}:{square.top_left_corner_y}:{square.bottom_right_corner_x}:{square.bottom_right_corner_y}"
+                self.square_positions.add(square.current_coordinates)
+                
+                # squares_to_create = squares_to_create + ((square.top_left_corner_x, square.top_left_corner_y, square.bottom_right_corner_x, square.bottom_right_corner_y),)
+            
+            total_time = time.time() - start_time
+            print(f"Total time to create Squares: {total_time}\n\n")
+            
+            gc.enable()
+            
+            
+            
+            # print(f"\n\nList of shapes:") # debug
+            # pprint.pprint(self.window.items)
+            
+            # print(f"\n\nList of shapes2:") # debug
+            # pprint.pprint(self.window.squares)
+
+            # for square in self.window.squares:
+
+            #     pprint.pprint(square.canvas)
+
+            # print(f"List of Squares:\n")
+            # filtered = filter(lambda item: type(item) is Rectangle, self.window.items) # filters for items with the class "Rectangle"
+            
+            # for f in filtered:
+
+            #     pprint.pprint(f)
+            
+            # for item in self.window.items:
+
+            #     # pprint.pprint(item.canvas)
+            #     pprint.pprint((type(item)))
+                
 
 
         
@@ -288,7 +332,24 @@ class Squareverse():
             # print(self.square_positions)
 
 
-    # no longer needed as available coordinates are stored in Mongo
+    # def createMultipleSquares(self, squares_to_create):
+
+    #     for square in squares_to_create:
+
+    #         self.square.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
+        
+    #         self.square.body.setFill(self.body_color)
+
+    #         self.square.body.setOutline(self.outline_color)
+            
+    #         self.square.body.draw(squareverse_p.window)
+            
+    #         self.square.squareverse_c.createSquareverseWindow(squareverse_p.squareverse_size, squareverse_p.squareverse_grid_spacing, self.body_color)
+
+    #         self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 6)) # controls how many child Squares are created
+    
+    
+    # # no longer needed as available coordinates are stored in Mongo
     def duplicateSquareCheck(self, square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
 
         square_coordinates = f"{top_left_corner_x}:{top_left_corner_y}:{bottom_right_corner_x}:{bottom_right_corner_y}"
@@ -310,14 +371,29 @@ class Squareverse():
             return duplicate_square
     
     
-    
+    # # commented to test new logic
+    # def moveAllSquares(self):
+
+    #     mouse_clicked = self.window.checkMouse()
+       
+    #     while mouse_clicked == None:
+
+    #         for square in self.created_squares:
+  
+    #             square.moveSquare(self)
+                    
+    #             # mouse_clicked = self.window.checkMouse()
+               
+    #         mouse_clicked = self.window.checkMouse()
+
+
     def moveAllSquares(self):
 
         mouse_clicked = self.window.checkMouse()
        
         while mouse_clicked == None:
 
-            for square in self.created_squares:
+            for square in self.window.squares:
   
                 square.moveSquare(self)
                     
@@ -366,11 +442,7 @@ class Squareverse():
         
     #     for square in self.created_squares:
 
-    #         square_center = square.body.getCenterCoordinates()
-    #         square_center_coordinates = square_center.split(':')
-
-    #         if int(square_center_coordinates[0]) < self.center_point_coordinate:
-    #             self.square_locations["left"] = self.square_locations["left"] + 1
+    #         square_center = square.body.getCecanvas = self.square_locations["left"] + 1
     #         else:
     #             self.square_locations["right"] = self.square_locations["right"] + 1
 
@@ -388,6 +460,7 @@ class Squareverse():
     def destroySquareverse(self):
         
         self.window.close()
+        gc.collect()
         
         print(f"Ending the Squareverse simulation for {self.squareverse_name}!") #debug
 
@@ -726,12 +799,14 @@ class Square():
         self.body.setFill(self.body_color)
 
         self.body.setOutline(self.outline_color)
+        self.body.shape = "rectangle"
         
-        self.body.draw(squareverse_p.window)
+        # self.tkinter_id = self.body.draw(squareverse_p.window)
+        self.tkinter_id = self.body.draw_square(squareverse_p.window, self) # testing
         
         self.squareverse_c.createSquareverseWindow(squareverse_p.squareverse_size, squareverse_p.squareverse_grid_spacing, self.body_color)
 
-        self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 6))
+        self.squareverse_c.createSquares((self.squareverse_c.max_number_of_squares // 6)) # controls how many child Squares are created
 
         # self.squareverse_c.createSquares(10)
 
@@ -791,10 +866,20 @@ class Square():
                 self.directions_already_tried.add(self.selected_direction)
 
                 self.collision_detected = self.collisionCheck(squareverse, self.selected_direction)
+                self.collision_detection_m = self.collision_detection_mongo(squareverse, self.selected_direction)
 
                 if self.collision_detected == False:
 
-                    self.body.move(squareverse.valid_directions[self.selected_direction]['x'], squareverse.valid_directions[self.selected_direction]['y'])
+                    # testing
+                    self.body.p1.x = self.body.p1.x + squareverse.valid_directions[self.selected_direction]['x']
+                    self.body.p1.y = self.body.p1.y + squareverse.valid_directions[self.selected_direction]['y']
+                    self.body.p2.x = self.body.p2.x + squareverse.valid_directions[self.selected_direction]['x']
+                    self.body.p2.y = self.body.p2.y  + squareverse.valid_directions[self.selected_direction]['y']
+
+                    squareverse.window.move_by_id(self.tkinter_id, squareverse.valid_directions[self.selected_direction]['x'], squareverse.valid_directions[self.selected_direction]['y']) # debug
+                    
+                    
+                    # self.body._move(squareverse.valid_directions[self.selected_direction]['x'], squareverse.valid_directions[self.selected_direction]['y'])
                     # print(f"\n\nSquare [{self.square_id}] has moved [{self.selected_direction}]") #debug
                     
                     self.previous_direction = self.selected_direction
@@ -1273,6 +1358,11 @@ class Square():
 
 
     # def updateSquareCoordinates(self):
+
+
+    def collision_detection_mongo(self, squareverse, selected_direction):
+
+        collision_detected_mongo = squareverse.mongo_client.collision_check(self, squareverse, selected_direction)
 
 
 

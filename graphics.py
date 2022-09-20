@@ -218,7 +218,8 @@ class GraphWin(tk.Canvas):
         self.pack()
         master.resizable(0,0)
         self.foreground = "black"
-        self.items = []
+        self.items = [] # list of shape objects in Canvas
+        self.squares = [] # list of Square in Canvas
         self.mouseX = None
         self.mouseY = None
         self.bind("<Button-1>", self._onClick)
@@ -389,6 +390,9 @@ class GraphWin(tk.Canvas):
     def addItem(self, item):
         self.items.append(item)
 
+    def addSquare(self, item):
+        self.squares.append(item)
+
     def delItem(self, item):
         self.items.remove(item)
 
@@ -397,6 +401,33 @@ class GraphWin(tk.Canvas):
             item.undraw()
             item.draw(self)
         self.update()
+
+    # testing method for moving shape by ID
+    def move_by_id(self, shape_id, dx, dy):
+
+        """move object dx units in x direction and dy units in y
+        direction"""
+        
+        # self._move(dx,dy)
+        # self.p1.x = self.p1.x + dx
+        # self.p1.y = self.p1.y + dy
+        # self.p2.x = self.p2.x + dx
+        # self.p2.y = self.p2.y  + dy
+        # canvas = self.canvas
+        if self and not self.isClosed():
+            trans = self.trans
+            if trans:
+                x = dx/ trans.xscale 
+                y = -dy / trans.yscale
+            else:
+                x = dx
+                y = dy
+            
+            self.move(shape_id, x, y)
+
+            if self.autoflush:
+                _root.update()
+        print(f"\nMoved using fancy new method!")
         
                       
 class Transform:
@@ -452,6 +483,7 @@ class GraphicsObject:
         #    drawn shape.
         self.canvas = None
         self.id = None
+        # self.shape = None
 
         # config is the dictionary of configuration options for the widget.
         config = {}
@@ -482,10 +514,35 @@ class GraphicsObject:
         if graphwin.isClosed(): raise GraphicsError("Can't draw to closed window")
         self.canvas = graphwin
         self.id = self._draw(graphwin, self.config)
-        graphwin.addItem(self)
+        
+        if self.shape == "rectangle":
+            graphwin.addSquare(self)
+        else:
+            graphwin.addItem(self)
+
         if graphwin.autoflush:
             _root.update()
-        return self
+        # return self
+        return self.id
+
+    def draw_square(self, graphwin, square):
+
+        """Draw the object in graphwin, which should be a GraphWin
+        object.  A GraphicsObject may only be drawn into one
+        window. Raises an error if attempt made to draw an object that
+        is already visible."""
+
+        if self.canvas and not self.canvas.isClosed(): raise GraphicsError(OBJ_ALREADY_DRAWN)
+        if graphwin.isClosed(): raise GraphicsError("Can't draw to closed window")
+        self.canvas = graphwin
+        self.id = self._draw(graphwin, self.config)
+        
+        graphwin.addSquare(square)
+
+        if graphwin.autoflush:
+            _root.update()
+        # return self
+        return self.id
 
             
     def undraw(self):
@@ -521,6 +578,28 @@ class GraphicsObject:
             self.canvas.move(self.id, x, y)
             if canvas.autoflush:
                 _root.update()
+
+
+    # # testing method for moving shape by ID
+    # def move_by_id(self, shape_id, canvas, dx, dy):
+
+    #     """move object dx units in x direction and dy units in y
+    #     direction"""
+        
+    #     self._move(dx,dy)
+    #     # canvas = self.canvas
+    #     if canvas and not canvas.isClosed():
+    #         trans = canvas.trans
+    #         if trans:
+    #             x = dx/ trans.xscale 
+    #             y = -dy / trans.yscale
+    #         else:
+    #             x = dx
+    #             y = dy
+    #         canvas.move(shape_id, x, y)
+    #         if canvas.autoflush:
+    #             _root.update()
+
            
     def _reconfig(self, option, setting):
         # Internal method for changing configuration of the object
@@ -587,6 +666,7 @@ class _BBox(GraphicsObject):
         self.p1.y = self.p1.y + dy
         self.p2.x = self.p2.x + dx
         self.p2.y = self.p2.y  + dy
+        # print(f"\nSquare moved!")
                 
     def getP1(self): return self.p1.clone()
 
