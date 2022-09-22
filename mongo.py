@@ -47,7 +47,7 @@ class Mongo:
         dbCollection = self.db.valid_directions
         dbCollection.delete_many({})
         self.db.square_coordinates.delete_many({})
-        self.db.valid_top_left_corner_xy.delete_many({})
+        self.db.square_coordinates.delete_many({})
 
 
     def insert_square_coordinates(self, square, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
@@ -67,9 +67,9 @@ class Mongo:
         results = dbCollection.insert_many(square_coordinates)
 
 
-    def create_valid_top_left_corner_xy(self, squareverse_grid_spacing, number_of_lines):
+    def create_square_coordinates(self, squareverse_grid_spacing, number_of_lines):
 
-        dbCollection = self.db.valid_top_left_corner_xy
+        dbCollection = self.db.square_coordinates
 
         starting_x = squareverse_grid_spacing
         starting_y = squareverse_grid_spacing
@@ -99,7 +99,7 @@ class Mongo:
     
     def get_available_coordinates(self, number_of_squares):
 
-        dbCollection = self.db.valid_top_left_corner_xy
+        dbCollection = self.db.square_coordinates
         free_space = True
 
         totals = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": number_of_squares }}, { "$count": "total"}]) # gets total number of matching documents
@@ -134,7 +134,7 @@ class Mongo:
 
     # def get_available_coordinates_testing(self):
 
-    #     dbCollection = self.db.valid_top_left_corner_xy
+    #     dbCollection = self.db.square_coordinates
     #     free_space = True
 
     #     totals = dbCollection.aggregate([{ "$match": { "occupied": False }}, { "$sample": { "size": 5 }}, { "$count": "total"}])
@@ -184,7 +184,7 @@ class Mongo:
 
     def update_mongodb(self, mongo_query, updated_value):
 
-        dbCollection = self.db.valid_top_left_corner_xy
+        dbCollection = self.db.square_coordinates
 
         dbCollection.update_one(mongo_query, updated_value)
 
@@ -192,25 +192,59 @@ class Mongo:
 
     def collision_check(self, square, squareverse, selected_direction):
 
-        dbCollection = self.db.valid_top_left_corner_xy
-        collision_detected = False
-        top_left_corner_x_after_moving = square.top_left_corner_x + squareverse.valid_directions[selected_direction]['x']
-        top_left_corner_y_after_moving = square.top_left_corner_y + squareverse.valid_directions[selected_direction]['y']
-        results = dbCollection.aggregate([
-            { 
-                "$match": {
-                    "$and":[
-                        { "top_left_corner_x": top_left_corner_x_after_moving },
-                        { "top_left_corner_y": top_left_corner_y_after_moving },
-                        { "occupied": False }
-                    ]
-                }
-            },
-            { 
-                "$count": "total"
-            }
-        ])
+        '''Accepts coordinates for selected direction, returns True if collision detected'''
 
+        dbCollection = self.db.square_coordinates
+
+        collision_detected = False
+        top_left_corner_x_after_moving = square.body.p1.x + squareverse.valid_directions[selected_direction]['x']
+        top_left_corner_y_after_moving = square.body.p1.y + squareverse.valid_directions[selected_direction]['y']
+        # top_left_corner_x_after_moving = square.top_left_corner_x + squareverse.valid_directions[selected_direction]['x']
+        # top_left_corner_y_after_moving = square.top_left_corner_y + squareverse.valid_directions[selected_direction]['y']
+        
+        
+        if top_left_corner_x_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > squareverse.squareverse_size or top_left_corner_y_after_moving > squareverse.squareverse_size:
+
+            square.number_of_collisions = square.number_of_collisions + 1
+            collision_detected = True
+
+            # print(f"Squareverse border detected!\n") # DEBUG
+        else:
+
+            collision_count = 0
+            collisions = dbCollection.aggregate([
+                { 
+                    "$match": {
+                        "$and":[
+                            { "top_left_corner_x": top_left_corner_x_after_moving },
+                            { "top_left_corner_y": top_left_corner_y_after_moving },
+                            { "occupied": True }
+                        ]
+                    }
+                },
+                { 
+                    "$count": "total"
+                }
+            ])
+            
+
+            for collision in collisions:
+
+                collision_count = collision["total"]
+
+            if collision_count >= 1:
+        
+                square.number_of_collisions = square.number_of_collisions + 1
+                collision_detected = True
+
+        return collision_detected
+
+
+
+
+
+            # print(f"Squares found in selected direction: {total_results}\n")
+            # print(result)
         # for result in results:
 
         #     pprint.pprint(result)
@@ -219,24 +253,19 @@ class Mongo:
         # pprint.pprint(results)
 
         # logic for detecting Squareverse borders
-        if top_left_corner_x_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > (squareverse.squareverse_size + squareverse.squareverse_grid_spacing) or top_left_corner_y_after_moving > (squareverse.squareverse_size + squareverse.squareverse_grid_spacing):
+        # print(f"\n{type(square)}") # debug
 
-            square.number_of_collisions = self.number_of_collisions + 1
-            collision_detected = True
+       
+            
         
-        elif results != 0:
+
         
-            square.number_of_collisions = self.number_of_collisions + 1
-            collision_detected = True
-
-
-        return collision_detected
 
 
 
     def collision_check_testing(self, square, squareverse, selected_direction):
 
-        dbCollection = self.db.valid_top_left_corner_xy
+        dbCollection = self.db.square_coordinates
         collision_detected = False
         top_left_corner_x_after_moving = square.top_left_corner_x + squareverse.valid_directions[selected_direction]['x']
         top_left_corner_y_after_moving = square.top_left_corner_y + squareverse.valid_directions[selected_direction]['y']
@@ -274,7 +303,7 @@ class Mongo:
 
 
 
-# mongo.create_valid_top_left_corner_xy(10, 31)
+# mongo.create_square_coordinates(10, 31)
 # mongo.get_available_coordinates_testing()
 
 # mongo.insert_valid_directions(5)

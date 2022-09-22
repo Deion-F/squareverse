@@ -286,6 +286,10 @@ class GraphWin(tk.Canvas):
         if self.autoflush:
             _root.update()
 
+    def manualUpdate(self):
+        _root.update()
+    
+
     
     def plot(self, x, y, color="black"):
         """Set pixel (x,y) to the given color"""
@@ -427,7 +431,7 @@ class GraphWin(tk.Canvas):
 
             if self.autoflush:
                 _root.update()
-        print(f"\nMoved using fancy new method!")
+        # print(f"\nMoved using fancy new method!") # DEBUG
         
                       
 class Transform:
@@ -515,10 +519,9 @@ class GraphicsObject:
         self.canvas = graphwin
         self.id = self._draw(graphwin, self.config)
         
-        if self.shape == "rectangle":
-            graphwin.addSquare(self)
-        else:
-            graphwin.addItem(self)
+        
+
+        graphwin.addItem(self)
 
         if graphwin.autoflush:
             _root.update()
