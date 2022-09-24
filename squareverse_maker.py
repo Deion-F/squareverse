@@ -9,22 +9,23 @@ def createSquareverseSimulation():
 
     squareverse_id = randint(0, 100)
     squareverse_name = f"Squareverse #{squareverse_id}"
-    squareverse_default_size = 5
+    squareverse_default_window_size = 5
+    squareverse_default_grid_size = 10
     invalid_squareverse_size = True
 
 
     while invalid_squareverse_size == True:
 
-        squareverse_size = input("\n\nSelect Squareverse size (1 - 10): ") #info
+        squareverse_size = input("\n\nSelect Squareverse size (1 - 10): ") # INPUT
         
         if len(squareverse_size) == 0:
 
-            squareverse_size = squareverse_default_size
+            squareverse_size = squareverse_default_window_size
             invalid_squareverse_size = False
 
         elif float(squareverse_size) % 1 != 0:
 
-            print("\n\nPlease choose a whole number for Squareverse size") #info
+            print("\n\nPlease choose a whole number for Squareverse size") # INFO
 
         elif int(squareverse_size) <= 10 and int(squareverse_size) >= 1:
         
@@ -32,32 +33,35 @@ def createSquareverseSimulation():
 
         else:
 
-            print("\n\nPlease choose a valid size for Squareverse") #info
+            print("\n\nPlease choose a valid size for Squareverse") # INFO
 
-    squareverse_size = (int(squareverse_size) * 100) # calculates Squareverse window size in px
-    valid_grid_sizes = [i for i in range(10, ((squareverse_size // 10) + 1)) if squareverse_size % i == 0 and (squareverse_size / i) % 2 == 0]
+    squareverse_size_px = (int(squareverse_size) * 100) # calculates Squareverse window size in px
+    valid_grid_sizes = [i for i in range(10, ((squareverse_size_px // 10) + 1)) if squareverse_size_px % i == 0 and (squareverse_size_px / i) % 2 == 0]
     
-    print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]")
+    print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]") # INFO
     
-    squareverse_grid_spacing = input("\n\nSelect a Squareverse grid size: ")
+    squareverse_grid_spacing = input("\n\nSelect a Squareverse grid size: ") # INPUT
     
-    if len(squareverse_grid_spacing) == 0:
+    if squareverse_size == squareverse_default_window_size and len(squareverse_grid_spacing) == 0:
+
+        squareverse_grid_spacing = squareverse_default_grid_size
+    
+    elif len(squareverse_grid_spacing) == 0:
 
         squareverse_grid_spacing = choice(valid_grid_sizes)
     
     else:
 
         squareverse_grid_spacing = int(squareverse_grid_spacing)
-
-        
-
+      
+    
     squareverse = Squareverse(squareverse_id, squareverse_name)
     
-    squareverse.createSquareverseWindow(squareverse_size, squareverse_grid_spacing)
+    squareverse.createSquareverseWindow(squareverse_size_px, squareverse_grid_spacing)
     
     # print(f"\n\nList of valid grid sizes are [{valid_grid_sizes}]") # debug
     # print(f"\n\nSelected grid spacing is [{squareverse_grid_spacing}]") # debug
-    print(f"\n\n{squareverse.squareverse_name} has been successfully created") # debug
+    print(f"\n\n{squareverse.squareverse_name} has been successfully created") # DEBUG
 
 
     return squareverse

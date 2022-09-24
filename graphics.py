@@ -525,8 +525,8 @@ class GraphicsObject:
 
         if graphwin.autoflush:
             _root.update()
-        # return self
-        return self.id
+        return self
+        # return self.id
 
     def draw_square(self, graphwin, square):
 
