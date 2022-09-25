@@ -9,8 +9,8 @@ def createSquareverseSimulation():
 
     squareverse_id = randint(0, 100)
     squareverse_name = f"Squareverse #{squareverse_id}"
-    squareverse_default_window_size = 5
-    squareverse_default_grid_size = 10
+    squareverse_default_window_size = 3
+    squareverse_default_grid_size = 25
     invalid_squareverse_size = True
 
 
