@@ -116,7 +116,8 @@ class Mongo:
 
                 # mongo_query = { "_id": parent_square_id } # need to pass parent Square ID when calling function
                 next_child_square_id = next_child_square_id + 1
-                child_square_id = next_child_square_id if next_child_square_id % 2 == 0 else None
+                # child_square_id = next_child_square_id if next_child_square_id % 3 == 0 else None # controls how many child Squares are spawned
+                child_square_id = next_child_square_id if next_child_square_id % 72 == 0 else None # TESTING
                 
                 child_squareverse_coordinate = {
                 
@@ -257,7 +258,15 @@ class Mongo:
 
     def get_child_square_coordinates(self, child_square_ids, parent_square_tkinter_id):
 
-        child_square_coordinates = self.db[f"squareverse_coordinates_{parent_square_tkinter_id}"].find({"child_square_id" : {" $in" :[child_square_ids]}})
+        # print(f"\nDEBUG: Child Square IDs: {child_square_ids}\n") # DEBUG
+        
+        child_square_coordinates = self.db[f"squareverse_coordinates_{parent_square_tkinter_id}"].find({ "child_square_id": { "$in": child_square_ids }})
+
+        # # DEBUG
+        # for c in child_square_coordinates:
+
+        #     print(f"\nChild Square coordinates\n")
+        #     pprint.pprint(c)
 
         return child_square_coordinates
 
@@ -270,36 +279,36 @@ class Mongo:
         child_square_coordinates_count = self.db[f"squareverse_coordinates_{parent_square_tkinter_id}"].aggregate([
             { "$facet": {
                 "up": [
-                    { "$match": { "top_left_corner_y": { "$lt": child_squareverse_center_point_coordinate } }},
-                    {"$count": "total"}
+                    { "$match": { "top_left_corner_y": { "$lt": child_squareverse_center_point_coordinate }, "child_square_id": { "$ne": None }}},
+                    { "$count": "total" }
                 ],
                 "down": [
-                    {"$match": {"top_left_corner_y": { "$gte": child_squareverse_center_point_coordinate} }},
+                    { "$match": { "top_left_corner_y": { "$gte": child_squareverse_center_point_coordinate }, "child_square_id": { "$ne": None }}},
                     # {"$match": {"$gte": ["top_left_corner_y", child_squareverse_center_point_coordinate]}},
-                    {"$count": "total"}
+                    { "$count": "total" }
                 ],
                 "left": [
-                    {"$match": {"top_left_corner_x": { "$lt": child_squareverse_center_point_coordinate} }},
+                    { "$match": { "top_left_corner_x": { "$lt": child_squareverse_center_point_coordinate }, "child_square_id": { "$ne": None }}},
                     # {"$match": {"$lt": ["top_left_corner_x", child_squareverse_center_point_coordinate]}},
-                    {"$count": "total"}
+                    { "$count": "total" }
                 ],
                 "right": [
-                    {"$match": {"top_left_corner_x": { "$gte": child_squareverse_center_point_coordinate} }},
+                    { "$match": { "top_left_corner_x": { "$gte": child_squareverse_center_point_coordinate }, "child_square_id": { "$ne": None }}},
                     # {"$match": {"$gte": ["top_left_corner_x", child_squareverse_center_point_coordinate]}},
-                    {"$count": "total"}
+                    { "$count": "total" }
                 ],
             }},
-            {"$project": {
-                "up": { "$arrayElemAt": ["$up.total", 0] },
-                "down": { "$arrayElemAt": ["$down.total", 0] },
-                "left": { "$arrayElemAt": ["$left.total", 0] },
-                "right": { "$arrayElemAt": ["$right.total", 0] },
+            { "$project": {
+                "up": { "$arrayElemAt": [ "$up.total", 0 ]},
+                "down": { "$arrayElemAt": [ "$down.total", 0 ]},
+                "left": { "$arrayElemAt": [ "$left.total", 0 ]},
+                "right": { "$arrayElemAt": [ "$right.total", 0 ]},
             }}
         ])
         
         for coordinate_count in child_square_coordinates_count:
 
-            # pprint.pprint(f"\nChild Square coordinates count:\n{coordinate_count}") # DEBUG
+            print(f"Child Squares coordinate count: {coordinate_count}\n") # DEBUG
             total_coordinate_count = coordinate_count
 
         return total_coordinate_count
@@ -368,8 +377,8 @@ class Mongo:
 
         dbCollection.bulk_write( [
 
-            UpdateOne({ 'tkinter_id': parent_square.tkinter_id }, { '$unset': {'tkinter_id': "" }}),
-            UpdateOne({ '_id': selected_direction_coordinates["_id"] }, { '$set': {'tkinter_id': parent_square.tkinter_id }})
+            UpdateOne({ 'tkinter_id': parent_square.tkinter_id }, { '$set': { 'tkinter_id': None, 'previous_direction': None }}),
+            UpdateOne({ '_id': selected_direction_coordinates["_id"] }, { '$set': {'tkinter_id': parent_square.tkinter_id , 'previous_direction': parent_square.selected_direction}})
 
         ])
 
@@ -403,33 +412,47 @@ class Mongo:
 
 
 
-    def collision_check_parent_squareverse(self, square, parent_squareverse, selected_direction):
+    def collision_check_parent_squareverse(self, parent_square, parent_squareverse, selected_direction):
 
-        '''Accepts coordinates for selected direction, returns True if collision detected'''
+        '''Accepts coordinates for selected direction, returns False and coordinates for selected direction if collision not detected'''
 
         dbCollection = self.db.squareverse_coordinates
+        
         selected_direction_coordinates = None
-
         collision_detected = False
-        top_left_corner_x_after_moving = square.body.p1.x + parent_squareverse.valid_directions[selected_direction]['x']
-        top_left_corner_y_after_moving = square.body.p1.y + parent_squareverse.valid_directions[selected_direction]['y']
+
+        # # DEBUG
+        # print(f"\nDEBUG: Current top-left corner coordinates for parent Square {parent_square.tkinter_id} before moving:\n")
+        # print(f"X: {parent_square.body.p1.x}\n")
+        # print(f"Y: {parent_square.body.p1.y}\n")
+        # #
+
+        top_left_corner_x_after_moving = parent_square.body.p1.x + parent_squareverse.valid_directions[selected_direction]['x']
+        top_left_corner_y_after_moving = parent_square.body.p1.y + parent_squareverse.valid_directions[selected_direction]['y']
         # top_left_corner_x_after_moving = square.top_left_corner_x + squareverse.valid_directions[selected_direction]['x']
         # top_left_corner_y_after_moving = square.top_left_corner_y + squareverse.valid_directions[selected_direction]['y']
         
-        
+        # # DEBUG
+        # print(f"\nDEBUG: Top-left corner coordinates after modifying parent Square current coordinates using selected direction:\n")
+        # print(f"X: {top_left_corner_x_after_moving}\n")
+        # print(f"Y: {top_left_corner_y_after_moving}\n")
+        # #
+
         if top_left_corner_x_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > parent_squareverse.squareverse_size or top_left_corner_y_after_moving > parent_squareverse.squareverse_size:
 
+            print(f"\nDEBUG: Squareverse border detected!\n") # DEBUG
+            
             # square.number_of_collisions = square.number_of_collisions + 1
             collision_detected = True
             return collision_detected, selected_direction_coordinates
 
-            # print(f"Squareverse border detected!\n") # DEBUG
+            
         else:
 
             # STOPPED HERE
             selected_direction_coordinates = dbCollection.find_one({ "$and": [{ "top_left_corner_x": top_left_corner_x_after_moving }, { "top_left_corner_y": top_left_corner_y_after_moving }]})
 
-            print(f"\nSelected direction coordinates: {selected_direction_coordinates}\n") # DEBUG
+            # print(f"\nDEBUG: Selected direction coordinates: {selected_direction_coordinates}\n") # DEBUG
             
             if selected_direction_coordinates["tkinter_id"] != None:
 
@@ -474,7 +497,7 @@ class Mongo:
 
         '''Accepts coordinates for selected direction, returns True if collision detected'''
 
-        # dbCollection = self.db.squareverse_coordinates
+        selected_direction_coordinates = None
 
         collision_detected = False
         top_left_corner_x_after_moving = child_square_coordinate["top_left_corner_x"] + child_squareverse.valid_directions[selected_direction]['x']
