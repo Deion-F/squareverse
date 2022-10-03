@@ -99,7 +99,7 @@ class Mongo:
             starting_x = starting_x + squareverse_grid_spacing
             starting_y = squareverse_grid_spacing
 
-    
+
     def create_child_squareverse_coordinates(self, child_squareverse_grid_spacing, child_squareverse_total_grid_lines, child_squareverse_child_square_ids, parent_square_tkinter_id):
 
         # dbString = f"self.db.squareverse_coordinates_{parent_square_id}"
@@ -109,6 +109,7 @@ class Mongo:
         starting_y = child_squareverse_grid_spacing
         child_square_id = None
         next_child_square_id = 0
+        mongo_bulk_insert_query = []
 
         for i in range(child_squareverse_total_grid_lines - 1):
 
@@ -117,7 +118,7 @@ class Mongo:
                 # mongo_query = { "_id": parent_square_id } # need to pass parent Square ID when calling function
                 next_child_square_id = next_child_square_id + 1
                 # child_square_id = next_child_square_id if next_child_square_id % 3 == 0 else None # controls how many child Squares are spawned
-                child_square_id = next_child_square_id if next_child_square_id % 72 == 0 else None # TESTING
+                child_square_id = next_child_square_id if next_child_square_id % 3 == 0 else None # TESTING
                 
                 child_squareverse_coordinate = {
                 
@@ -129,7 +130,10 @@ class Mongo:
                     "previous_direction": None
                     }
 
-                self.db[f"squareverse_coordinates_{parent_square_tkinter_id}"].insert_one(child_squareverse_coordinate)
+                mongo_query = InsertOne(child_squareverse_coordinate)
+                mongo_bulk_insert_query.append(mongo_query)
+                
+                # self.db[f"squareverse_coordinates_{parent_square_tkinter_id}"].insert_one(child_squareverse_coordinate)
                 
                 if child_square_id != None:
 
@@ -168,6 +172,9 @@ class Mongo:
 
             starting_x = starting_x + child_squareverse_grid_spacing
             starting_y = child_squareverse_grid_spacing
+
+        
+        self.db[f"squareverse_coordinates_{parent_square_tkinter_id}"].bulk_write(mongo_bulk_insert_query)
     
     
     def get_available_parent_squareverse_coordinates(self, number_of_squares):
@@ -308,7 +315,7 @@ class Mongo:
         
         for coordinate_count in child_square_coordinates_count:
 
-            print(f"Child Squares coordinate count: {coordinate_count}\n") # DEBUG
+            # print(f"Child Squares coordinate count: {coordinate_count}\n") # DEBUG
             total_coordinate_count = coordinate_count
 
         return total_coordinate_count
@@ -440,7 +447,7 @@ class Mongo:
 
         if top_left_corner_x_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > parent_squareverse.squareverse_size or top_left_corner_y_after_moving > parent_squareverse.squareverse_size:
 
-            print(f"\nDEBUG: Squareverse border detected!\n") # DEBUG
+            # print(f"\nDEBUG: Squareverse border detected!\n") # DEBUG
             
             # square.number_of_collisions = square.number_of_collisions + 1
             collision_detected = True

@@ -90,6 +90,7 @@ class Squareverse():
                 break
         
         # enable Garbage Collection before exiting
+        gc.collect(generation=2) # TESTING
         gc.enable() # TESTING
     
     
@@ -192,7 +193,7 @@ class Squareverse():
             # self.window.flush() # TESTING
 
         # updates parent squareverse window
-        time.sleep(2) # added artificial delay as a reminder that the window is now being manually updated
+        # time.sleep(2) # added artificial delay as a reminder that the window is now being manually updated
         # self.window.manualUpdate() # TESTING
         self.window.flush()
         
@@ -255,7 +256,7 @@ class Squareverse():
                 # updates parent squareverse window
                 # self.window.manualUpdate() # TESTING
                 self.window.flush()
-                time.sleep(0.001) # can be increased to lower CPU usage when spawning parent Squares
+                # time.sleep(0.001) # can be increased to lower CPU usage when spawning parent Squares
             
             total_time = time.time() - start_time # DEBUG
             print(f"\nINFO: Time to create parent Squares: {total_time}\n\n") # DEBUG
@@ -459,7 +460,7 @@ class Squareverse():
     def moveSquare(self, parent_square):
 
         # sets values used for selecting directions and checking for collisions
-        parent_square.valid_directions = set(self.valid_directions.keys())
+        # parent_square.valid_directions = set(self.valid_directions.keys())
         parent_square.directions_already_tried = set()
         parent_square.remaining_directions = set()
         parent_square.selected_direction = None
@@ -471,7 +472,7 @@ class Squareverse():
         parent_square.body.setOutline(parent_square.outline_color)
 
         # **may no longer be needed
-        parent_square.number_of_collisions = 0
+        # parent_square.number_of_collisions = 0
         
         if parent_square.previous_direction == None:
 
@@ -590,7 +591,7 @@ class Squareverse():
                 parent_square.selected_direction = parent_square.previous_direction
             #
 
-            parent_square.selected_direction = parent_square.previous_direction
+            # parent_square.selected_direction = parent_square.previous_direction
             parent_square.directions_already_tried.add(parent_square.selected_direction)
 
             # parent_square.collision_check = parent_square.collisionCheck(self, parent_square.selected_direction)
@@ -658,7 +659,7 @@ class Squareverse():
                 
                 parent_square.selected_direction = self.valid_directions[parent_square.selected_direction]['i']
 
-                print(f"\nDEBUG: Collision detected; trying inverse direction: {parent_square.selected_direction}\n") # DEBUG
+                # print(f"\nDEBUG: Collision detected; trying inverse direction: {parent_square.selected_direction}\n") # DEBUG
 
                 parent_square.directions_already_tried.add(parent_square.selected_direction)
 
@@ -1668,6 +1669,7 @@ class ParentSquare():
 
         # not sure if still needed
         self.square_id = square_id
+        self.valid_directions = set(parent_squareverse.valid_directions.keys())
         # self.current_coordinates = None
         # self.valid_directions = None
         # self.number_of_collisions = 0
