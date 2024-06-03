@@ -34,59 +34,37 @@ class Squareverse():
 
 
     def showSquareverseMenu(self):
-
     # valid_options = ["s", "d", "a", "m", "e"]
-
         while True:
-        
             user_selection = input("\n\nSelect an option:\nSpawn Squares (s)\nDelete Squares (d)\nDelete All Squares (a)\nMove Squares (m)\nEnd Squareverse Simulation (e)\n\nOption: ")
             # assert user_selection in valid_options, "E: that was not a valid option!"
-
             if user_selection == "s":
-                
                 # draw_squares = True
                 print(f"\nMax number of Squares: {self.max_number_of_squares}") # DEBUG
                 number_of_squares = input(f"\n\nEnter number of Squares to spawn (m = max, h = 1/2 max, q = 1/4 max)\nNumber of empty grids remaining: {self.max_number_of_squares - len(self.window.squares)}\n:")
-
                 if number_of_squares == "m":
-                    
                     number_of_squares = (self.max_number_of_squares - len(self.created_squares))
                 
                 elif number_of_squares == "h":
-                    
                     number_of_squares = self.max_number_of_squares // 2
                 
                 elif number_of_squares == "q":
-                    
                     number_of_squares = self.max_number_of_squares // 4
                 
                 else:
-                    
                     pass
-
                 self.createSquares(int(number_of_squares))
-
             elif user_selection == "d":
-                
                 pass
-            
             elif user_selection == "a":
-                
                 pass
-        
             elif user_selection == "m":
-                
                 self.moveAllSquares()
-
             else:
-                
                 start_time = time.time() # DEBUG
-                
                 self.destroySquareverse()
-
                 total_time = time.time() - start_time # DEBUG
                 print(f"\nTime to destroy Squareverse: {total_time}\n\n") # DEBUG
-                
                 break
         
         # enable Garbage Collection before exiting
