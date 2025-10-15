@@ -15,13 +15,13 @@ class Squareverse():
     def __init__(self, squareverse_id, squareverse_name):
         self.squareverse_id = squareverse_id
         self.squareverse_name = squareverse_name
-        self.squareverse_size = None
-        self.squareverse_grid_spacing = None       
+        self.squareverse_size = 0
+        self.squareverse_grid_spacing = 0       
         self.created_squares = []        
         self.square_positions = set()
-        # one or both of the items below were leading to high CPU and memory usage
-        # self.mongo_client = Mongo()
-        # gc.disable() # TESTING
+        # Cache for square positions and collision checks
+        self._position_cache = {}
+        self._collision_cache = {}
         # -----------------------------------------------------
         # self.mongo_client = Mongo()
         # gc.collect(generation=2) # TESTING
@@ -74,6 +74,9 @@ class Squareverse():
         # if debugging == True:
             # gc.disable() # disables Garbage Collection to speed up creation of Squares
         self.square_objects = {}
+        # Initialize update batching containers
+        self._pending_updates = []
+        self._geometry_updates = []
         # connects to MongoDB
         self.mongo_client = Mongo()   
         # sets parent Squareverse window configuration
@@ -116,27 +119,7 @@ class Squareverse():
             "x": self.squareverse_grid_spacing, 
             "y": 0,
             "i": "left"
-            },
-        "d_left_up": {
-            "x": (self.squareverse_grid_spacing * - 1), 
-            "y": (self.squareverse_grid_spacing * - 1),
-            "i": "d_right_down"
-            },
-        "d_left_down":{
-            "x": (self.squareverse_grid_spacing * - 1), 
-            "y": self.squareverse_grid_spacing,
-            "i": "d_right_up"
-            },
-        "d_right_up": {
-            "x": self.squareverse_grid_spacing, 
-            "y": (self.squareverse_grid_spacing * - 1),
-            "i": "d_left_down"
-            },
-        "d_right_down":{
-            "x": self.squareverse_grid_spacing, 
-            "y": self.squareverse_grid_spacing,
-            "i": "d_left_down"
-        }}
+            }}
         
         # print(f"\n\n***Squareverse Values***\nSquareverse ID: [{self.squareverse_id}]\nSquareverse Name: [{self.squareverse_name}]\nSquareverse Size: [{self.squareverse_size}px]\nSquareverse Grid Spacing: [{self.squareverse_grid_spacing}px]\nSquareverse Window Size: [{self.squareverse_window_size}px]") # DEBUG
         # self.mongo_client.insert_valid_directions(squareverse_grid_spacing) # TESTING
@@ -208,11 +191,16 @@ class Squareverse():
 
     def createSquares(self, number_of_squares):
         # Fetches list of unoccupied parent Squareverse coordinates from MongoDB (free_space is False if no coordinates available)
-        free_space, available_coordinates = self.mongo_client.get_available_parent_squareverse_coordinates(number_of_squares)
+        result = self.mongo_client.get_available_parent_squareverse_coordinates(number_of_squares)
+        if result is None:
+            print(f"\nINFO: Failed to get coordinates from database")
+            return
+            
+        free_space, available_coordinates = result
         mongo_bulk_insert_query = []
         debugging = True
 
-        if free_space == False:
+        if free_space == False or not available_coordinates:
                 print(f"\nINFO: There are not enough empty grids remaining")
         else:
             if debugging == True:
@@ -306,13 +294,40 @@ class Squareverse():
 
 
     def moveAllSquares(self):
+        """Move all squares with parallel processing and batch updates."""
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        
         debugging = True
         mouse_clicked = self.window.checkMouse()
-       
+        
+        def process_square_movement(square):
+            """Process movement for a single square."""
+            square.moveSquare(self)
+            
         while mouse_clicked == None:
+            # Reset move batch data
+            self._pending_updates = []
+            self._geometry_updates = []
+            
+            # Pre-fetch all positions and cache them
+            all_positions = self.mongo_client.get_all_parent_squares_coordinates()
+            self._position_cache = {str(pos["_id"]): pos for pos in all_positions}
+            
             if debugging == True:
                 start_time = time.time()
-                # print(f"\nList of Square objects: {self.window.squares}\n")
+                
+            # Process movements in parallel
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(process_square_movement, self.created_squares))
+                
+            # Batch apply all geometry updates
+            if self._geometry_updates:
+                self.window.batch_update_squares(self._geometry_updates)
+                
+            # Perform bulk MongoDB update
+            if self._pending_updates:
+                self.mongo_client.bulk_update_coordinates(self._pending_updates)
             for square in self.window.squares:
                 if mouse_clicked == None:
                     if square.tkinter_id in self.square_objects:
@@ -342,22 +357,70 @@ class Squareverse():
         debugging = True
 
 
+    def _try_movement(self, square, direction):
+        """Helper to attempt movement in a specific direction."""
+        cache_key = f"{square.tkinter_id}:{direction}"
+        if cache_key in self._collision_cache:
+            return self._collision_cache[cache_key]
+            
+        collision_detected, selected_direction_coordinates = self.mongo_client.collision_check_parent_squareverse(
+            square, self, direction)
+            
+        self._collision_cache[cache_key] = (collision_detected, selected_direction_coordinates)
+        
+        if selected_direction_coordinates is None:
+            return False, None
+            
+        return not collision_detected, selected_direction_coordinates
+
+    def _handle_movement(self, square, direction, selected_direction_coordinates=None):
+        """Execute movement and collect updates for batch processing."""
+        square.selected_direction = direction
+        
+        # Get updates but don't apply them yet
+        geometry_updates, coord_updates = self.moveSquareBody(square, selected_direction_coordinates)
+        
+        # Add to pending updates
+        if geometry_updates:
+            self._geometry_updates.append(geometry_updates)
+        if coord_updates:
+            self._pending_updates.append({
+                'square': square,
+                'coordinates': coord_updates
+            })
+        
+        return True
+
     def moveSquare(self, parent_square):
-        # Sets values used for selecting directions and checking for collisions
+        """Main square movement function.
+        
+        Handles movement logic including:
+        - Initial state setup
+        - Direction selection
+        - Collision detection and resolution
+        - Movement execution
+        """
+        debugging = False
+        if debugging:
+            print(f"\nDEBUG: Starting move for Square [{parent_square.square_id}]")
+            
+        # Initialize movement state
         parent_square.valid_directions = set(self.valid_directions.keys())
         parent_square.directions_already_tried = set()
         parent_square.remaining_directions = set()
         parent_square.selected_direction = None
-        # parent_square.child_squareverse_movement_cycles = None # to be removed when removing child squareverse logic
-        # parent_square.collision_detection_m = None
-        #--
-        # Resets color and outline of parent Square
+        
+        # Reset square appearance
         parent_square.body.setFill(parent_square.body_color)
         parent_square.body.setOutline(parent_square.outline_color)
-        #--
+        
+        # Initialize collision tracking
         collision_chain = []
         colission_chain_coordinates = []
-        debugging = False
+        
+        if debugging:
+            print(f"DEBUG: Square [{parent_square.square_id}] previous direction: {parent_square.previous_direction}")
+        
         '''
         TO-DO:
         Add logic to have larger mass Square "eat" smaller mass Squares
@@ -413,11 +476,11 @@ class Squareverse():
                     
                     count = 0
                     while True:  
-                        collision_detected, colission_chain_coordinates_temp = self.mongo_client.collision_check_parent_squareverse(collision_chain[count], self, parent_square.selected_direction) # checks for chain collision in selected direction
+                        collision_detected, colission_chain_coordinates_temp = self.mongo_client.collision_check_parent_squareverse(parent_square, self, parent_square.selected_direction) # checks for chain collision in selected direction
                         colission_chain_coordinates.append(colission_chain_coordinates_temp)
                         if debugging == True:
                             print(f"\nDEBUG: Length of collision chain: {len(collision_chain)}")
-                            print(f"\nDEBUG: Square being checked for collision: {collision_chain[count]}")
+                            print(f"\nDEBUG: Square being checked for collision: {parent_square}")
                             print(f"\nDEBUG: Collision chain coordinates temp: {colission_chain_coordinates_temp}")
                             print(f"\nDEBUG: Collision chain coordinates: {colission_chain_coordinates}\n")
                         
@@ -2213,18 +2276,34 @@ class Squareverse():
                         
                             
     def moveSquareBody(self, square, selected_direction_coordinates):
-        # Updates Point 1 and Point 2 coordinates for Square (used for drawing Square to window)
-        square.body.p1.x = square.body.p1.x + self.valid_directions[square.selected_direction]['x']
-        square.body.p1.y = square.body.p1.y + self.valid_directions[square.selected_direction]['y']
-        square.body.p2.x = square.body.p2.x + self.valid_directions[square.selected_direction]['x']
-        square.body.p2.y = square.body.p2.y + self.valid_directions[square.selected_direction]['y']
-        #--
-        self.window.move_by_id(square.tkinter_id, self.valid_directions[square.selected_direction]['x'], self.valid_directions[square.selected_direction]['y'])                    
-        square.previous_direction = square.selected_direction                    
-        self.mongo_client.update_parent_square_coordinates(square, selected_direction_coordinates) # updates global coordinates for Square in MongoDB
+        """Execute movement updates in batch."""
+        debugging = False
+        if debugging:
+            print(f"\nDEBUG: Moving Square {square.tkinter_id}!\n")
+            
+        # Get movement deltas from the selected direction
+        dx = self.valid_directions[square.selected_direction]['x']
+        dy = self.valid_directions[square.selected_direction]['y']
+        
+        # Update square corner coordinates
+        square.body.p1.x += dx
+        square.body.p1.y += dy
+        square.body.p2.x += dx
+        square.body.p2.y += dy
+        
+        # Move the square in the window
+        self.window.move_by_id(square.tkinter_id, dx, dy)
+        
+        # Update movement state and appearance
+        square.previous_direction = square.selected_direction
         square.body.setOutline(square.outline_color)
-        # if debugging == True: 
-            # print(f"\nDEBUG: Square [{parent_square.square_id}] has moved [{parent_square.selected_direction}]")
+        
+        # Update coordinates in database
+        self.mongo_client.update_parent_square_coordinates(square, selected_direction_coordinates)
+        
+        if debugging:
+            print(f"DEBUG: Square [{square.square_id}] moved {square.selected_direction}")
+            print(f"DEBUG: New position - P1({square.body.p1.x}, {square.body.p1.y}), P2({square.body.p2.x}, {square.body.p2.y})")
 
     def moveRandomDirection(self, square):
         debugging = False
@@ -2262,19 +2341,25 @@ class Squareverse():
             # square.body.setOutline(square.outline_color)
             if debugging == True:
                 print(f"\nDEBUG: There are no more valid directions remaining for Square {square.square_id}")
-        debugging = True
 
 
     def squareChainCollisionCheck(self, square, selected_direction_coordinates):
         debugging = False
+        if debugging:
+            print(f"\nDEBUG: Checking collision chain for Square [{square.square_id}]")
+            
+        # Initialize collision tracking
         collision_chain = []
         colission_chain_coordinates = []
-
+        
+        # Only process collision if square has greater mass than target
         if square.mass > selected_direction_coordinates['mass']:
+            if debugging:
+                print(f"DEBUG: Square [{square.square_id}] (mass: {square.mass}) colliding with Square (mass: {selected_direction_coordinates['mass']})")
             collision_chain.append(self.square_objects[selected_direction_coordinates['tkinter_id']])
             count = 0
             while True:
-                collision_detected, colission_chain_coordinates_temp = self.mongo_client.collision_check_squareverse(collision_chain[count], self, square.selected_direction) # checks for collision in selected direction
+                collision_detected, colission_chain_coordinates_temp = self.mongo_client.collision_check_parent_squareverse(collision_chain[count], self, square.selected_direction) # checks for collision in selected direction
                 colission_chain_coordinates.append(colission_chain_coordinates_temp)
                 # if debugging == True:
                 #     print(f"\nDEBUG: Length of collision chain: {len(collision_chain)}")
@@ -2355,7 +2440,7 @@ class Squareverse():
             #
             self.window.move_by_id(square.tkinter_id, self.valid_directions[square.selected_direction]['x'], self.valid_directions[square.selected_direction]['y'])                    
             square.previous_direction = square.selected_direction                    
-            self.mongo_client.update_square_coordinates(square, selected_direction_coordinates) # updates global coordinates for Square in MongoDB
+            self.mongo_client.update_parent_square_coordinates(square, selected_direction_coordinates) # updates global coordinates for Square in MongoDB
             square.body.setOutline(square.outline_color)
             if debugging == True: 
                 # print(f"\nDEBUG: Square [{square.square_id}] has moved [{square.selected_direction}]")
@@ -2410,6 +2495,33 @@ class Squareverse():
 
     #     # print(f"\n\nSquares left: {self.square_locations['left']}\n\nSquares right: {self.square_locations['right']}\n\nSquares up: {self.square_locations['up']}\n\nSquares down: {self.square_locations['down']}") #debug
     #     # print(max(self.square_locations, key=lambda key: self.square_locations[key]))
+
+    def _process_move_batch(self):
+        """Process a batch of queued square movements."""
+        if not self._move_batch:
+            return
+            
+        # Execute all visual movements
+        for move in self._move_batch:
+            square = move['square']
+            dx, dy = move['dx'], move['dy']
+            
+            # Update visual position
+            square.body.p1.x += dx
+            square.body.p1.y += dy
+            square.body.p2.x += dx
+            square.body.p2.y += dy
+            self.window.move_by_id(square.tkinter_id, dx, dy)
+            
+            # Update square state
+            square.previous_direction = square.selected_direction
+            square.body.setOutline(square.outline_color)
+            
+        # Bulk update MongoDB coordinates
+        self.mongo_client.bulk_update_coordinates(self._move_batch)
+        
+        # Clear the batch
+        self._move_batch = []
 
     def destroySquare(self, square):
         '''
@@ -3206,6 +3318,11 @@ class ParentSquare():
         # self.current_coordinates = None
         # self.valid_directions = None
         # self.number_of_collisions = 0
+
+        self.top_left_corner_x = 0
+        self.top_left_corner_y = 0
+        self.bottom_right_corner_x = 0
+        self.bottom_right_corner_y = 0  
         
    
 

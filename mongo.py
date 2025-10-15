@@ -1,15 +1,18 @@
 #!/usr/bin/env python3.7
-from pymongo import *
+from pymongo import MongoClient, UpdateOne, UpdateMany, InsertOne
+from typing import List, Dict, Optional, Tuple, Any
 import pprint
 
 
-
 class Mongo:
+    """MongoDB interface for Squareverse with caching capabilities."""
 
     def __init__(self):
-        
         self.client = MongoClient('localhost', 27017)
         self.db = self.client.squareverse
+        # Add caching
+        self._coordinate_cache = {}
+        self._collision_cache = {}
 
 
     def insert_valid_directions(self, grid_spacing):
@@ -42,11 +45,46 @@ class Mongo:
         # print(results.inserted_ids)
 
 
-    def delete_squareverse_db(self):
-
-        self.client.drop_database('squareverse')
+    def bulk_update_coordinates(self, move_batch: List[Dict]):
+        """
+        Perform bulk update of square coordinates in MongoDB.
         
-        # dbCollection = self.db.valid_directions
+        Args:
+            move_batch: List of move operations containing squares and new coordinates
+        """
+        operations = []
+        for move in move_batch:
+            square = move['square']
+            new_coords = move['coordinates']
+            
+            if not new_coords:
+                continue
+                
+            # Create update operation
+            operation = UpdateOne(
+                {'tkinter_id': square.tkinter_id},
+                {'$set': {
+                    'coordinates': new_coords['coordinates'],
+                    'previous_direction': square.selected_direction,
+                }},
+                upsert=False
+            )
+            operations.append(operation)
+            
+            # Update cache
+            cache_key = str(square.tkinter_id)
+            self._coordinate_cache[cache_key] = new_coords
+        
+        # Execute bulk update if we have operations
+        if operations:
+            self.db.squares.bulk_write(operations, ordered=False)
+
+    def delete_squareverse_db(self):
+        """Clean up database and caches."""
+        self.client.drop_database('squareverse')
+        # Clear caches
+        self._coordinate_cache = {}
+        self._collision_cache = {}
         
         # self.db.valid_directions.delete_many({})
         # self.db.squareverse_coordinates.delete_many({})
@@ -384,11 +422,45 @@ class Mongo:
         #     print("No results found!")
 
 
+    def get_all_parent_squares_coordinates(self) -> List[Dict[str, Any]]:
+        """
+        Get all square coordinates with caching.
+        
+        Returns:
+            List of dictionaries containing square coordinates and metadata
+        """
+        # Check if we have cached coordinates
+        if self._coordinate_cache:
+            return list(self._coordinate_cache.values())
+            
+        # If not in cache, fetch from database
+        coordinates = list(self.db.squareverse_coordinates.find({
+            'tkinter_id': {'$ne': None}
+        }))
+        
+        # Update cache
+        self._coordinate_cache = {
+            str(coord['_id']): coord 
+            for coord in coordinates
+        }
+        
+        return coordinates
+
     def update_parent_square_coordinates(self, parent_square, selected_direction_coordinates):
-
+        """
+        Update square coordinates with cache invalidation.
+        
+        Args:
+            parent_square: Square object to update
+            selected_direction_coordinates: New coordinates data
+        """
+        if not selected_direction_coordinates:
+            return
+            
         dbCollection = self.db.squareverse_coordinates
-
-        dbCollection.bulk_write( [
+        
+        # Update in database
+        dbCollection.bulk_write([
 
             UpdateOne({ 'tkinter_id': parent_square.tkinter_id }, { '$set': { 'tkinter_id': None, 'previous_direction': None, 'mass': None }}),
             UpdateOne({ '_id': selected_direction_coordinates["_id"] }, { '$set': {'tkinter_id': parent_square.tkinter_id , 'previous_direction': parent_square.previous_direction, 'mass': parent_square.mass}})
@@ -433,11 +505,17 @@ class Mongo:
 
 
     def collision_check_parent_squareverse(self, parent_square, parent_squareverse, selected_direction):
-        '''
-        Accepts selected direction
-        Returns True and None if collision detected
-        Returns False and coordinates for selected direction if collision not detected
-        '''
+        """
+        Check for collisions with caching.
+        
+        Returns:
+            Tuple[bool, dict]: (collision detected, coordinates for selected direction)
+        """
+        cache_key = f"{parent_square.tkinter_id}:{selected_direction}"
+        
+        # Check cache first
+        if cache_key in self._collision_cache:
+            return self._collision_cache[cache_key]
         debugging = False
         dbCollection = self.db.squareverse_coordinates
         selected_direction_coordinates = None
@@ -466,12 +544,11 @@ class Mongo:
             selected_direction_coordinates = dbCollection.find_one({ "$and": [{ "top_left_corner_x": top_left_corner_x_after_moving }, { "top_left_corner_y": top_left_corner_y_after_moving }]})
             if debugging == True:
                 print(f"\nDEBUG: Selected direction coordinates: {selected_direction_coordinates}\n")
-            if selected_direction_coordinates["tkinter_id"] != None:
+            if selected_direction_coordinates and selected_direction_coordinates.get("tkinter_id") is not None:
                 collision_detected = True
                 return collision_detected, selected_direction_coordinates
-
-            else:
-                return collision_detected, selected_direction_coordinates
+            
+            return collision_detected, selected_direction_coordinates
             
             
         #     collision_count = 0
@@ -526,12 +603,9 @@ class Mongo:
 
             selected_direction_coordinates = self.db[f"squareverse_coordinates_{parent_square.tkinter_id}"].find_one({ "$and": [{ "top_left_corner_x": top_left_corner_x_after_moving }, { "top_left_corner_y": top_left_corner_y_after_moving }]})
 
-            if selected_direction_coordinates["child_square_id"] != None:
-
-                 collision_detected = True
-                 return collision_detected, selected_direction_coordinates
-
-            else:
+            if selected_direction_coordinates and selected_direction_coordinates.get("child_square_id") is not None:
+                collision_detected = True
+                return collision_detected, selected_direction_coordinates
 
                 return collision_detected, selected_direction_coordinates
 
@@ -605,8 +679,7 @@ class Mongo:
 
             collision_detected = True
         
-        elif len(results) != 0:
-        
+        elif results and len(results) != 0:
             collision_detected = True
 
         return collision_detected
