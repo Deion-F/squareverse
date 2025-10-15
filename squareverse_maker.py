@@ -8,7 +8,7 @@ from god_script import Squareverse
 def createSquareverseSimulation():
     squareverse_id = randint(0, 100)
     squareverse_name = f"Squareverse #{squareverse_id}"
-    squareverse_default_window_size = 3
+    squareverse_default_window_size = 8
     squareverse_default_grid_size = 25
     invalid_squareverse_size = True
 
@@ -32,7 +32,9 @@ def createSquareverseSimulation():
     if squareverse_size == squareverse_default_window_size and len(squareverse_grid_spacing) == 0:
         squareverse_grid_spacing = squareverse_default_grid_size
     elif len(squareverse_grid_spacing) == 0:
-        squareverse_grid_spacing = choice(valid_grid_spacing)
+        squareverse_grid_spacing = squareverse_default_grid_size
+        
+        # squareverse_grid_spacing = choice(valid_grid_spacing)
     else:
         squareverse_grid_spacing = int(squareverse_grid_spacing)
     squareverse = Squareverse(squareverse_id, squareverse_name)

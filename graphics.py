@@ -400,6 +400,9 @@ class GraphWin(tk.Canvas):
     def delItem(self, item):
         self.items.remove(item)
 
+    def delSquare(self, item):
+        self.squares.remove(item)
+
     def redraw(self):
         for item in self.items[:]:
             item.undraw()
@@ -557,12 +560,28 @@ class GraphicsObject:
         if not self.canvas.isClosed():
             self.canvas.delete(self.id)
             self.canvas.delItem(self)
+            # self.canvas.delSquare(self)
             if self.canvas.autoflush:
                 _root.update()
         self.canvas = None
         self.id = None
 
 
+    def undraw_square(self, square):
+
+        """Undraw the object (i.e. hide it). Returns silently if the
+        object is not currently drawn."""
+        
+        if not self.canvas: return
+        if not self.canvas.isClosed():
+            self.canvas.delete(self.id)
+            # self.canvas.delItem(self)
+            self.canvas.delSquare(square)
+            if self.canvas.autoflush:
+                _root.update()
+        self.canvas = None
+        self.id = None
+    
     def move(self, dx, dy):
 
         """move object dx units in x direction and dy units in y

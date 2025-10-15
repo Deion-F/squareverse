@@ -71,31 +71,24 @@ class Mongo:
 
 
     def create_parent_squareverse_coordinates(self, squareverse_grid_spacing, number_of_lines):
-
         dbCollection = self.db.squareverse_coordinates
-
         starting_x = squareverse_grid_spacing
         starting_y = squareverse_grid_spacing
 
         for _ in range(number_of_lines - 1):
-
             for _ in range(number_of_lines -1):
-
-                square_coordinate = {
-                
+                square_coordinate = {         
                     "top_left_corner_x": starting_x,
                     "top_left_corner_y": starting_y,
                     "bottom_right_corner_x": starting_x + squareverse_grid_spacing,
                     "bottom_right_corner_y": starting_y + squareverse_grid_spacing,
                     # "occupied": False,
                     "tkinter_id": None,
-                    "previous_direction": None
+                    "previous_direction": None,
+                    "mass": None
                     }
-
                 dbCollection.insert_one(square_coordinate)
-
                 starting_y = starting_y + squareverse_grid_spacing
-
             starting_x = starting_x + squareverse_grid_spacing
             starting_y = squareverse_grid_spacing
 
@@ -178,37 +171,50 @@ class Mongo:
     
     
     def get_available_parent_squareverse_coordinates(self, number_of_squares):
-
         dbCollection = self.db.squareverse_coordinates
-        free_space = True
+        free_space = False
+        available_coordinates = dbCollection.aggregate([{ "$match": { "tkinter_id": None }}, { "$sample": { "size": number_of_squares }}, { "$count": "total" }]) # returns total number of parent Squareverse coordinates that don't have a tkinter ID (not occupied)
+        available_coordinates_count = list(available_coordinates)
+        debugging = True
+        if debugging == True:
+        #     # print(f"\nLength of MongoDB cursor: {len(list(available_coordinates))}\n") # DEBUG
+            print(f"\nNumber of available coordinates: {available_coordinates_count}")
+            # print(f"\nNumber of available coordinates: {available_coordinates_count[0]['total']}")
+        #     available_coordinates = dbCollection.aggregate([{ "$match": { "tkinter_id": None }}, { "$sample": { "size": number_of_squares }}, { "$count": "total"}])
 
-        available_coordinates = dbCollection.aggregate([{ "$match": { "tkinter_id": None }}, { "$sample": { "size": number_of_squares }}, { "$count": "total"}]) # returns total number of parent Squareverse coordinates that don't have a tkinter ID (not occupied)
         # .find({"occupied": "false"})
         #.limit(number_of_squares)
         # results = list(dbCollection.find({"occupied": "false"}).limit(number_of_squares))
         # result_list = list(results)
         
         # pprint.pprint(totals[0])
+        # print(f"\nAvailable coordinates info: {list(available_coordinates)}\n") # DEBUG
+        if available_coordinates_count == []:
+            return free_space, available_coordinates
+        elif available_coordinates_count[0]['total'] < number_of_squares or available_coordinates_count[0]['total'] == 0:
+            return free_space, available_coordinates
+        elif available_coordinates_count[0]['total'] >= number_of_squares:
+            available_coordinates = dbCollection.aggregate([{ "$match": { "tkinter_id": None }}, { "$sample": { "size": number_of_squares }}])
+            # print(f"\nLength of available coordinates in MongoDB: {len(available_coordinates)}\n") # DEBUG
+            free_space = True
+            return free_space, available_coordinates
         
-        try:
-
-            if available_coordinates.next()["total"] != 0:
-                
-                available_coordinates = dbCollection.aggregate([{ "$match": { "tkinter_id": None }}, { "$sample": { "size": number_of_squares }}])
-
-                return free_space, available_coordinates
-            
-            else:
-            
-                free_space = False
-                
-                print("No results found!")
-                return free_space, available_coordinates
-                
-
-        except:
-
-            print("No next cursor")
+        # try:
+        #     # if available_coordinates.next()["total"] < number_of_squares:
+        #     #     available_coordinates = dbCollection.aggregate([{ "$match": { "tkinter_id": None }}, { "$sample": { "size": number_of_squares }}])
+        #     #     return free_space, available_coordinates
+        #     if available_coordinates.next()["total"] != 0:
+        #     # if len(list(available_coordinates)) > 0: # TESTING           
+        #         available_coordinates = dbCollection.aggregate([{ "$match": { "tkinter_id": None }}, { "$sample": { "size": number_of_squares }}])
+        #         # print(f"\nLength of available coordinates in MongoDB: {len(available_coordinates)}\n") # DEBUG
+        #         free_space = True
+        #         return free_space, available_coordinates          
+        #     else:     
+        #         # print("No results found!") # DEBUG
+        #         return free_space, available_coordinates
+        # except:
+        #     print("No next cursor")
+        debugging = True
 
 
     def get_available_child_squareverse_coordinates(self, number_of_squares, parent_square_tkinter_id):
@@ -384,8 +390,9 @@ class Mongo:
 
         dbCollection.bulk_write( [
 
-            UpdateOne({ 'tkinter_id': parent_square.tkinter_id }, { '$set': { 'tkinter_id': None, 'previous_direction': None }}),
-            UpdateOne({ '_id': selected_direction_coordinates["_id"] }, { '$set': {'tkinter_id': parent_square.tkinter_id , 'previous_direction': parent_square.selected_direction}})
+            UpdateOne({ 'tkinter_id': parent_square.tkinter_id }, { '$set': { 'tkinter_id': None, 'previous_direction': None, 'mass': None }}),
+            UpdateOne({ '_id': selected_direction_coordinates["_id"] }, { '$set': {'tkinter_id': parent_square.tkinter_id , 'previous_direction': parent_square.previous_direction, 'mass': parent_square.mass}})
+            # UpdateOne({ '_id': selected_direction_coordinates["_id"] }, { '$set': {'tkinter_id': parent_square.tkinter_id , 'previous_direction': parent_square.selected_direction, 'mass': parent_square.mass}})
 
         ])
 
@@ -410,6 +417,12 @@ class Mongo:
 
         dbCollection.update_one(mongo_query, updated_value)
 
+    # WORK IN PROGRESS
+    def update_mongodb_bulk(self, mongo_bulk_query):
+        dbCollection = self.db.squareverse_coordinates
+
+        dbCollection.bulk_write(mongo_bulk_query)
+
 
     def update_mongodb_child_squareverse(self, mongo_query, updated_value, parent_square_id):
 
@@ -420,54 +433,44 @@ class Mongo:
 
 
     def collision_check_parent_squareverse(self, parent_square, parent_squareverse, selected_direction):
-
-        '''Accepts coordinates for selected direction, returns False and coordinates for selected direction if collision not detected'''
-
+        '''
+        Accepts selected direction
+        Returns True and None if collision detected
+        Returns False and coordinates for selected direction if collision not detected
+        '''
+        debugging = False
         dbCollection = self.db.squareverse_coordinates
-        
         selected_direction_coordinates = None
         collision_detected = False
+        collision_mass = None
 
-        # # DEBUG
-        # print(f"\nDEBUG: Current top-left corner coordinates for parent Square {parent_square.tkinter_id} before moving:\n")
-        # print(f"X: {parent_square.body.p1.x}\n")
-        # print(f"Y: {parent_square.body.p1.y}\n")
-        # #
-
-        top_left_corner_x_after_moving = parent_square.body.p1.x + parent_squareverse.valid_directions[selected_direction]['x']
-        top_left_corner_y_after_moving = parent_square.body.p1.y + parent_squareverse.valid_directions[selected_direction]['y']
+        # if debugging == True:
+        #     print(f"\nDEBUG: Current top-left corner coordinates for parent Square {parent_square.tkinter_id} before moving:\n")
+        #     print(f"X: {parent_square.body.p1.x}\n")
+        #     print(f"Y: {parent_square.body.p1.y}\n")
+        top_left_corner_x_after_moving = parent_square.body.p1.x + parent_squareverse.valid_directions[selected_direction]['x']# - (parent_square.outline_width / 2)
+        top_left_corner_y_after_moving = parent_square.body.p1.y + parent_squareverse.valid_directions[selected_direction]['y']# - (parent_square.outline_width / 2)
         # top_left_corner_x_after_moving = square.top_left_corner_x + squareverse.valid_directions[selected_direction]['x']
         # top_left_corner_y_after_moving = square.top_left_corner_y + squareverse.valid_directions[selected_direction]['y']
-        
-        # # DEBUG
-        # print(f"\nDEBUG: Top-left corner coordinates after modifying parent Square current coordinates using selected direction:\n")
-        # print(f"X: {top_left_corner_x_after_moving}\n")
-        # print(f"Y: {top_left_corner_y_after_moving}\n")
-        # #
-
-        if top_left_corner_x_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > parent_squareverse.squareverse_size or top_left_corner_y_after_moving > parent_squareverse.squareverse_size:
-
-            # print(f"\nDEBUG: Squareverse border detected!\n") # DEBUG
-            
+        # if debugging == True:
+        #     print(f"\nDEBUG: Top-left corner coordinates after modifying parent Square current coordinates using selected direction:\n")
+        #     print(f"X: {top_left_corner_x_after_moving}\n")
+        #     print(f"Y: {top_left_corner_y_after_moving}\n")
+        if top_left_corner_x_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_y_after_moving < parent_squareverse.squareverse_grid_spacing or top_left_corner_x_after_moving > parent_squareverse.squareverse_size or top_left_corner_y_after_moving > parent_squareverse.squareverse_size: # checks for collission with Squareverse window borders
+            # if debugging == True:
+                # print(f"\nDEBUG: Squareverse border detected!\n")
             # square.number_of_collisions = square.number_of_collisions + 1
             collision_detected = True
             return collision_detected, selected_direction_coordinates
-
-            
         else:
-
-            # STOPPED HERE
             selected_direction_coordinates = dbCollection.find_one({ "$and": [{ "top_left_corner_x": top_left_corner_x_after_moving }, { "top_left_corner_y": top_left_corner_y_after_moving }]})
-
-            # print(f"\nDEBUG: Selected direction coordinates: {selected_direction_coordinates}\n") # DEBUG
-            
+            if debugging == True:
+                print(f"\nDEBUG: Selected direction coordinates: {selected_direction_coordinates}\n")
             if selected_direction_coordinates["tkinter_id"] != None:
-
-                 collision_detected = True
-                 return collision_detected, selected_direction_coordinates
+                collision_detected = True
+                return collision_detected, selected_direction_coordinates
 
             else:
-
                 return collision_detected, selected_direction_coordinates
             
             
