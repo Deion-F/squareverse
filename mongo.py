@@ -446,6 +446,30 @@ class Mongo:
         
         return coordinates
 
+    def update_square_coordinates(self, square, coordinates):
+        """
+        Update coordinates for any square type.
+        
+        Args:
+            square: Square object to update
+            coordinates: New coordinate data
+        """
+        if not coordinates:
+            return
+            
+        self.db.squares.update_one(
+            {'tkinter_id': square.tkinter_id},
+            {'$set': {
+                'coordinates': coordinates['coordinates'],
+                'previous_direction': square.selected_direction
+            }}
+        )
+        
+        # Invalidate cache
+        cache_key = str(square.tkinter_id)
+        if cache_key in self._coordinate_cache:
+            del self._coordinate_cache[cache_key]
+    
     def update_parent_square_coordinates(self, parent_square, selected_direction_coordinates):
         """
         Update square coordinates with cache invalidation.

@@ -1,10 +1,12 @@
 import gc
 from time import sleep
-from graphics import GraphWin, Point, Line, Rectangle, color_rgb
+import pygame
+from graphics_pygame import GraphWin, Point, Rectangle, color_rgb, Line
 from random import randint, randrange, choice
 from copy import copy
 from mongo import Mongo
 from pymongo import UpdateOne
+from typing import Tuple, Optional
 import pprint
 import time
 
@@ -29,21 +31,25 @@ class Squareverse():
 
 
     def showSquareverseMenu(self):
-    # valid_options = ["s", "d", "a", "m", "e"]
-        debugging = True
+        valid_options = ["s", "d", "a", "m", "e"]
+        debugging = False
         while True:
-            user_selection = input("\n\nSelect an option:\n(s) Spawn Squares\n(d) Delete Squares\n(a) Delete All Squares\n(m) Move Squares\n(e) End Squareverse Simulation\n\nOption: ")
-            # assert user_selection in valid_options, "E: that was not a valid option!"
+            user_selection = input("\n\nSelect an option:\n(s) Spawn Squares\n(d) Delete # of Squares\n(a) Delete All Squares\n(m) Move Squares\n(e) End Squareverse Simulation\n\nOption: ")
+            try:
+                if user_selection.lower() not in valid_options:
+                    raise ValueError("E: that was not a valid option!")
+            except ValueError as e:
+                print(e)
+                continue
             if user_selection == "s":
-                # draw_squares = True
-                print(f"\nMax number of Squares: {self.max_number_of_squares}") # DEBUG
-                number_of_squares = input(f"\n\nEnter number of Squares to spawn (m = max, h = 1/2 max, q = 1/4 max)\nNumber of empty grids remaining: {self.max_number_of_squares - len(self.window.squares)}\n:")
+                print(f"\nMax # of Squares that can be spawned: {self.max_number_of_squares}") # INFO
+                number_of_squares = input(f"\n\nEnter number of Squares to spawn (m = max, h = 50%, q = 25%)\nNumber of empty grids remaining: {self.max_number_of_squares - len(self.window.squares)}\n:")
                 if number_of_squares == "m":
                     number_of_squares = (self.max_number_of_squares - len(self.window.squares))              
                 elif number_of_squares == "h":
-                    number_of_squares = self.max_number_of_squares // 2 
+                    number_of_squares = (self.max_number_of_squares - len(self.window.squares)) // 2 
                 elif number_of_squares == "q":
-                    number_of_squares = self.max_number_of_squares // 4
+                    number_of_squares = (self.max_number_of_squares - len(self.window.squares)) // 4
                 else:
                     pass
                 self.createSquares(int(number_of_squares))
@@ -52,18 +58,23 @@ class Squareverse():
             elif user_selection == "a":
                 if debugging == True:
                     print(f"\nDEBUG: Length of Square objects array: {len(self.window.squares)}\n")
+                
                 for square in self.window.squares[:]:
                     self.destroySquare(square)
                 # for sq
             elif user_selection == "m":
                 self.moveAllSquares()
             else:
-                start_time = time.time() # DEBUG
+                if debugging:
+                    start_time = time.time()
+                
                 self.destroySquareverse()
-                total_time = time.time() - start_time # DEBUG
-                print(f"\nTime to destroy Squareverse: {total_time}\n\n") # DEBUG
+                
+                if debugging:
+                    total_time = time.time() - start_time # DEBUG
+                    print(f"\nTime to destroy Squareverse: {total_time}\n\n") # DEBUG
+                
                 break
-        debugging = True
         # enable Garbage Collection before exiting
         gc.collect(generation=2) # TESTING
         gc.enable() # TESTING
@@ -71,14 +82,17 @@ class Squareverse():
     
     def createSquareverseWindow(self, squareverse_size, squareverse_grid_spacing):   
         debugging = False
-        # if debugging == True:
+        # if debugging:
             # gc.disable() # disables Garbage Collection to speed up creation of Squares
         self.square_objects = {}
+        
         # Initialize update batching containers
         self._pending_updates = []
         self._geometry_updates = []
+        
         # connects to MongoDB
         self.mongo_client = Mongo()   
+        
         # sets parent Squareverse window configuration
         # self.window_background_color = color_rgb(47, 47, 47)
         self.window_background_color = color_rgb(82, 69, 56)
@@ -87,13 +101,14 @@ class Squareverse():
         self.squareverse_grid_spacing = squareverse_grid_spacing
         self.squareverse_window_size = self.squareverse_size + (self.squareverse_grid_spacing * 2)
         self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
+        
         # records coordinates for parent Squareverse border and center point (if needed later)
         self.top_border = self.squareverse_grid_spacing
         self.bottom_border = self.squareverse_size + self.squareverse_grid_spacing
         self.left_border = self.squareverse_grid_spacing
         self.right_border = self.squareverse_size + self.squareverse_grid_spacing
         self.center_point_coordinate = ((self.squareverse_size + self.squareverse_grid_spacing) + self.squareverse_grid_spacing) // 2
-        self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) #testing
+        self.center_point = Point(self.center_point_coordinate, self.center_point_coordinate) # TESTING
         # self.center_point.setFill("Orange") #testing
         # self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size, autoflush=False) # creates parent Squareverse window with auto-update disabled
         self.window = GraphWin(title = self.squareverse_name, width = self.squareverse_window_size, height = self.squareverse_window_size) # creates parent Squareverse window with auto-update enabled
@@ -134,35 +149,66 @@ class Squareverse():
 
 
     def createSquareverseGrid(self):
+        """Create grid using pygame drawing."""
         debugging = True
         self.vertical_starting_point = self.squareverse_grid_spacing
         self.horizontal_starting_point = self.squareverse_grid_spacing
         self.number_of_lines = int(round((self.squareverse_size // self.squareverse_grid_spacing), 0) + 1)
+        
+        # Handle any pending events
+        self.window._handle_events()
+        
+        # First clear the screen with background color
+        self.window.screen.fill(self.window_background_color)
+        
+        # Create and store grid lines
+        self.grid_lines = []
+        
+        # Draw vertical lines
+        for x in range(self.number_of_lines):
+            start_pos = (self.horizontal_starting_point + (x * self.squareverse_grid_spacing), self.vertical_starting_point)
+            end_pos = (self.horizontal_starting_point + (x * self.squareverse_grid_spacing), self.squareverse_size + self.vertical_starting_point)
+            line = Line(Point(*start_pos), Point(*end_pos))
+            line.setOutline(self.grid_color)
+            line.draw(self.window)
+            self.grid_lines.append(line)
+            
+        # Draw horizontal lines
+        for y in range(self.number_of_lines):
+            start_pos = (self.horizontal_starting_point, self.vertical_starting_point + (y * self.squareverse_grid_spacing))
+            end_pos = (self.squareverse_size + self.horizontal_starting_point, self.vertical_starting_point + (y * self.squareverse_grid_spacing))
+            line = Line(Point(*start_pos), Point(*end_pos))
+            line.setOutline(self.grid_color)
+            line.draw(self.window)
+            self.grid_lines.append(line)
+            
+        # Force display update
+        self.window.update()
         # print(f"\n\n[{self.number_of_lines}] grid lines required") # DEBUG
         # self.max_number_of_squares = int(round((self.squareverse_size / self.squareverse_grid_spacing)) ** 2)
 
 
-        for _ in range(self.number_of_lines):
+        # for _ in range(self.number_of_lines):
 
-            # draws vertical line
-            first_point = Point(self.vertical_starting_point, self.squareverse_grid_spacing)
-            second_point = Point(self.vertical_starting_point, (self.squareverse_size + self.squareverse_grid_spacing))
-            self.vertical_line = Line(first_point, second_point)
+        #     # draws vertical line
+        #     first_point = Point(self.vertical_starting_point, self.squareverse_grid_spacing)
+        #     second_point = Point(self.vertical_starting_point, (self.squareverse_size + self.squareverse_grid_spacing))
+        #     self.vertical_line = Line(first_point, second_point)
            
-            self.vertical_line.setOutline(self.grid_color)
-            self.vertical_line.draw(self.window)
+        #     self.vertical_line.setOutline(self.grid_color)
+        #     self.vertical_line.draw(self.window)
             
-            self.vertical_starting_point = self.vertical_starting_point + self.squareverse_grid_spacing
+        #     self.vertical_starting_point = self.vertical_starting_point + self.squareverse_grid_spacing
 
-            # draws horizontal line
-            first_point = Point(self.squareverse_grid_spacing, self.horizontal_starting_point)
-            second_point = Point((self.squareverse_size + self.squareverse_grid_spacing), self.horizontal_starting_point)
-            self.horizontal_line = Line(first_point, second_point)
+        #     # draws horizontal line
+        #     first_point = Point(self.squareverse_grid_spacing, self.horizontal_starting_point)
+        #     second_point = Point((self.squareverse_size + self.squareverse_grid_spacing), self.horizontal_starting_point)
+        #     self.horizontal_line = Line(first_point, second_point)
             
-            self.horizontal_line.setOutline(self.grid_color)
-            self.horizontal_line.draw(self.window)
+        #     self.horizontal_line.setOutline(self.grid_color)
+        #     self.horizontal_line.draw(self.window)
             
-            self.horizontal_starting_point = self.horizontal_starting_point + self.squareverse_grid_spacing
+        #     self.horizontal_starting_point = self.horizontal_starting_point + self.squareverse_grid_spacing
 
             # # manual window update
             # time.sleep(1)
@@ -173,7 +219,7 @@ class Squareverse():
         # self.window.manualUpdate() # TESTING
         # self.window.flush()
         
-        # creates list of all valid Square coordinates in Mongo
+        # Creates list of all valid Square coordinates in Mongo
         self.mongo_client.create_parent_squareverse_coordinates(self.squareverse_grid_spacing, self.number_of_lines)
 
         # self.vertical_center_line = Line(Point(self.center_point_coordinate, self.top_border), Point(self.center_point_coordinate, self.bottom_border)) #testing
@@ -186,10 +232,10 @@ class Squareverse():
         # self.vertical_center_line.draw(self.window) #testing
         # self.horizontal_center_line.draw(self.window) #testing
         # self.center_point.draw(self.window) #testing
-        debugging = True
 
 
     def createSquares(self, number_of_squares):
+        debugging = True
         # Fetches list of unoccupied parent Squareverse coordinates from MongoDB (free_space is False if no coordinates available)
         result = self.mongo_client.get_available_parent_squareverse_coordinates(number_of_squares)
         if result is None:
@@ -198,7 +244,7 @@ class Squareverse():
             
         free_space, available_coordinates = result
         mongo_bulk_insert_query = []
-        debugging = True
+        
 
         if free_space == False or not available_coordinates:
                 print(f"\nINFO: There are not enough empty grids remaining")
@@ -294,67 +340,33 @@ class Squareverse():
 
 
     def moveAllSquares(self):
-        """Move all squares with parallel processing and batch updates."""
-        from concurrent.futures import ThreadPoolExecutor
+        """Move all squares with batch updates using pygame."""
         import time
         
         debugging = True
-        mouse_clicked = self.window.checkMouse()
         
-        def process_square_movement(square):
-            """Process movement for a single square."""
-            square.moveSquare(self)
-            
-        while mouse_clicked == None:
-            # Reset move batch data
-            self._pending_updates = []
-            self._geometry_updates = []
-            
-            # Pre-fetch all positions and cache them
-            all_positions = self.mongo_client.get_all_parent_squares_coordinates()
-            self._position_cache = {str(pos["_id"]): pos for pos in all_positions}
-            
-            if debugging == True:
+        while True:
+            # Process events and update display
+            mouse_clicked = self.window.checkMouse()
+            if not self.window.running:
+                break
+            if mouse_clicked:
+                return
+                
+            if debugging:
                 start_time = time.time()
                 
-            # Process movements in parallel
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                list(executor.map(process_square_movement, self.created_squares))
+            # Move each square
+            for square in self.created_squares:
+                self.moveSquare(square)
+                self.window.update()  # Update display after each square moves
                 
-            # Batch apply all geometry updates
-            if self._geometry_updates:
-                self.window.batch_update_squares(self._geometry_updates)
-                
-            # Perform bulk MongoDB update
-            if self._pending_updates:
-                self.mongo_client.bulk_update_coordinates(self._pending_updates)
-            for square in self.window.squares:
-                if mouse_clicked == None:
-                    if square.tkinter_id in self.square_objects:
-                    # if debugging == True:
-                    #     print(f"\nSquare object: {square}\n")
-                        self.moveSquare(square)
-                    else:
-                        pass
-                    # try:
-                    #     square_tkinter_id = self.square_objects[square.tkinter_id]
-                    # except:
-                    #     pass
-                    # self.moveSquare(square)
-                else:
-                    break
-                # if debugging == True:
-                    # print(f"Mouse clicked: {mouse_clicked}\n") # DEBUG 
-                # self.window.flush() # manually updates window
-                mouse_clicked = self.window.checkMouse()
-            if debugging == True:
+            if debugging:
                 total_time = time.time() - start_time
                 print(f"\nDEBUG: Time for all Squares to move: {total_time}")
-                # time.sleep(0.01)
-            # print(f"Autoflush: {self.window.autoflush}")
-            # self.window.manualUpdate()
-            # self.window.flush()
-        debugging = True
+                
+            # Small delay to control movement speed
+            time.sleep(0.05)
 
 
     def _try_movement(self, square, direction):
@@ -2275,23 +2287,41 @@ class Squareverse():
         debugging = True
                         
                             
-    def moveSquareBody(self, square, selected_direction_coordinates):
-        """Execute movement updates in batch."""
+    def moveSquareBody(self, square, selected_direction_coordinates) -> bool:
+        """
+        Execute movement and update square state.
+        Returns:
+            bool: True if movement was successful
+        """
+        if not square.selected_direction or not selected_direction_coordinates:
+            return False
+            
         debugging = False
         if debugging:
-            print(f"\nDEBUG: Moving Square {square.tkinter_id}!\n")
+            print(f"\nDEBUG: Moving Square {square.tkinter_id} in direction {square.selected_direction}")
             
-        # Get movement deltas from the selected direction
+        # Get movement deltas
         dx = self.valid_directions[square.selected_direction]['x']
         dy = self.valid_directions[square.selected_direction]['y']
         
-        # Update square corner coordinates
+        # Update square coordinates
         square.body.p1.x += dx
         square.body.p1.y += dy
         square.body.p2.x += dx
         square.body.p2.y += dy
         
-        # Move the square in the window
+        # Move the square in the window and update its state
+        self.window.move_by_id(square.tkinter_id, dx, dy)
+        square.previous_direction = square.selected_direction
+        
+        # Update MongoDB coordinates
+        self.mongo_client.update_parent_square_coordinates(square, selected_direction_coordinates)
+        
+        # Update appearance
+        square.body.setOutline(square.outline_color)
+        
+        # Ensure the window updates
+        self.window.update()
         self.window.move_by_id(square.tkinter_id, dx, dy)
         
         # Update movement state and appearance
@@ -2301,46 +2331,60 @@ class Squareverse():
         # Update coordinates in database
         self.mongo_client.update_parent_square_coordinates(square, selected_direction_coordinates)
         
+        # Ensure we return both updates
+        return geometry_updates, selected_direction_coordinates
+        
         if debugging:
             print(f"DEBUG: Square [{square.square_id}] moved {square.selected_direction}")
             print(f"DEBUG: New position - P1({square.body.p1.x}, {square.body.p1.y}), P2({square.body.p2.x}, {square.body.p2.y})")
 
     def moveRandomDirection(self, square):
+        """Move square in a random valid direction."""
         debugging = False
-        while len(square.directions_already_tried) != len(square.valid_directions):
+        
+        # Ensure valid_directions is properly initialized
+        if not hasattr(square, 'valid_directions') or not square.valid_directions:
+            square.valid_directions = set(self.valid_directions.keys())
+            
+        # Initialize or reset directions_already_tried
+        if not hasattr(square, 'directions_already_tried'):
+            square.directions_already_tried = set()
+            
+        # Try each direction until one works or all have been tried
+        while len(square.directions_already_tried) < len(square.valid_directions):
+            # Get remaining untried directions
             remaining_directions = square.valid_directions.difference(square.directions_already_tried)
+            if not remaining_directions:
+                break
+                
+            # Choose a random direction
             square.selected_direction = choice(list(remaining_directions))
             square.directions_already_tried.add(square.selected_direction)
-            collision_detected, selected_direction_coordinates = self.mongo_client.collision_check_parent_squareverse(square, self, square.selected_direction) # Checks for collision in selected direction
-            # if debugging == True:
-            #     # print(f"\nDEBUG: List of valid directions: {self.valid_directions}")
-            #     print(f"\nDEBUG: Selected direction: {square.selected_direction}")
-            #     print(f"\nDEBUG: Collision detected: {collision_detected}")
-            #     print(f"\nDEBUG: Selected direction coordiantes: {selected_direction_coordinates}")
-            if collision_detected == False:
+            
+            # Check for collisions
+            collision_detected, selected_direction_coordinates = self.mongo_client.collision_check_parent_squareverse(
+                square, self, square.selected_direction
+            )
+            
+            if debugging:
+                print(f"\nDEBUG: Square [{square.square_id}] trying direction: {square.selected_direction}")
+                print(f"DEBUG: Collision detected: {collision_detected}")
+                
+            if not collision_detected and selected_direction_coordinates:
+                # Move the square
                 self.moveSquareBody(square, selected_direction_coordinates)
-                # # Updates Point 1 and Point 2 coordinates for parent Square (used for drawing parent Square to window)
-                # square.body.p1.x = square.body.p1.x + self.valid_directions[square.selected_direction]['x']
-                # square.body.p1.y = square.body.p1.y + self.valid_directions[square.selected_direction]['y']
-                # square.body.p2.x = square.body.p2.x + self.valid_directions[square.selected_direction]['x']
-                # square.body.p2.y = square.body.p2.y + self.valid_directions[square.selected_direction]['y']
-                # #--
-                # self.window.move_by_id(square.tkinter_id, self.valid_directions[square.selected_direction]['x'], self.valid_directions[square.selected_direction]['y'])                    
-                # square.previous_direction = square.selected_direction                    
-                # self.mongo_client.update_square_coordinates(square, selected_direction_coordinates) # Updates global coordinates for Square in MongoDB
-                # square.body.setOutline(square.outline_color)
-                # # if debugging == True: 
-                # #     print(f"\nDEBUG: Square [{square.square_id}] has moved [{square.selected_direction}]")
-                break
-            elif collision_detected == True:
-                square.body.setOutline("White")
-                pass
-        else:
-            self.destroySquare(square)
-            # square.previous_direction = None
-            # square.body.setOutline(square.outline_color)
-            if debugging == True:
-                print(f"\nDEBUG: There are no more valid directions remaining for Square {square.square_id}")
+                square.body.setOutline(square.outline_color)
+                self.window.update()  # Ensure the movement is displayed
+                return True
+                
+        # If we get here, no valid moves were found
+        if debugging:
+            print(f"\nDEBUG: No valid moves found for Square [{square.square_id}]")
+        square.body.setOutline("Red")  # Visual indicator of stuck square
+        self.window.update()
+        return False
+            # if debugging == True:
+            #     print(f"\nDEBUG: There are no more valid directions remaining for Square {square.square_id}")
 
 
     def squareChainCollisionCheck(self, square, selected_direction_coordinates):
@@ -2526,22 +2570,31 @@ class Squareverse():
     def destroySquare(self, square):
         '''
         Logic for deleting Square:
-        - Undraw object
-        - Delete Square info fro MongoDB
+        - Undraw object from pygame window
+        - Delete Square info from MongoDB
         - Delete Square object in Squareverse square_objects
-        - Delete Square object from Squareverse window
+        - Clean up object references
         '''
         debugging = True
         
         square_id = square.tkinter_id
+        
+        # Update MongoDB
         mongo_query = { "tkinter_id": square.tkinter_id }
         mongo_updated_value = { "$set": { "tkinter_id": None, "previous_direction": None, "mass": None }}
         self.mongo_client.update_mongodb(mongo_query, mongo_updated_value)
-        square.body.undraw_square(square)
-        # self.window.delItem(square)
-        # self.window.delSquare(square)
-        del self.square_objects[square.tkinter_id]
-
+        
+        # Remove from window tracking
+        if square.tkinter_id in self.window.shapes:
+            self.window.delItem(square)
+            
+        # Clean up object references
+        if square.tkinter_id in self.square_objects:
+            del self.square_objects[square.tkinter_id]
+            
+        # Force window update
+        self.window.update()
+        
         del square
         
         # if debugging == True:
@@ -3335,13 +3388,18 @@ class ParentSquare():
 
     # **look into moving this function into the parent Squareverse class
     def drawSquareBody(self, parent_squareverse, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
-        self.mass = randrange(0, 256) # add mass to Square
+        self.mass = randrange(0, 255)  # add mass to Square (0-255 for valid RGB)
         # sets color schemes allowed for parent Square
-        self.body_color = color_rgb((256 - self.mass), (256 - self.mass), (256 - self.mass))
-        # self.body_color = color_rgb(randrange(0, 256), randrange(0, 256), randrange(0, 256))
-        # self.outline_color = self.body_color
-        self.outline_color = color_rgb(randrange(0, 256), randrange(0, 256), randrange(0, 256))
-        # self.outline_color = color_rgb((256 - self.mass), (256 - self.mass), (256 - self.mass))
+        self.body_color = color_rgb(
+            max(0, min(255, 255 - self.mass)),
+            max(0, min(255, 255 - self.mass)),
+            max(0, min(255, 255 - self.mass))
+        )
+        self.outline_color = color_rgb(
+            max(0, min(255, randrange(0, 255))),
+            max(0, min(255, randrange(0, 255))),
+            max(0, min(255, randrange(0, 255)))
+        )
         # self.outline_width = 4
         # self.outline_width = (parent_squareverse.squareverse_grid_spacing / 10)
         self.outline_width = 1
@@ -3349,14 +3407,17 @@ class ParentSquare():
         
         # self.body = Rectangle(Point((top_left_corner_x + (self.outline_width / 2)), (top_left_corner_y + (self.outline_width / 2))), Point((bottom_right_corner_x - (self.outline_width / 2)), (bottom_right_corner_y - (self.outline_width / 2))))
         # self.body = Rectangle(Point((top_left_corner_x + (self.outline_width / 2)), (top_left_corner_y + (self.outline_width / 2))), Point((bottom_right_corner_x - (self.outline_width / 2)), (bottom_right_corner_y - (self.outline_width / 2))))
+        # Create pygame-compatible Rectangle
         self.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
         
+        # Set appearance properties
         self.body.setFill(self.body_color)
         self.body.setOutline(self.outline_color)
         self.body.setWidth(self.outline_width)
         
-        # self.tkinter_id = self.body.draw(squareverse_p.window)
+        # Draw and get ID, then update display
         self.tkinter_id = self.body.draw_square(parent_squareverse.window, self)
+        parent_squareverse.window.update()
         
 
         # self.child_squareverse = ChildSquareverse(self.tkinter_id, f"{parent_squareverse.squareverse_name} CHILD [{self.tkinter_id}]")
@@ -3938,7 +3999,11 @@ class SquareChild(ParentSquare):
 
 
         self.square_id = square_id
-        self.body_color = color_rgb(randrange(0, 256), randrange(0, 256), randrange(0, 256))
+        self.body_color = color_rgb(
+            max(0, min(255, randrange(0, 255))),
+            max(0, min(255, randrange(0, 255))),
+            max(0, min(255, randrange(0, 255)))
+        )
         self.outline_color = self.body_color
         
         self.current_coordinates = None
@@ -3949,15 +4014,16 @@ class SquareChild(ParentSquare):
 
 
     def drawSquareBody(self, squareverse_p, top_left_corner_x, top_left_corner_y, bottom_right_corner_x, bottom_right_corner_y):
-
+        """Draw child square body with pygame."""
         self.body = Rectangle(Point(top_left_corner_x, top_left_corner_y), Point(bottom_right_corner_x, bottom_right_corner_y))
         
-        #everything after this can be commented out
-        # self.body.setFill(self.body_color)
-
-        # self.body.setOutline(self.outline_color)
+        # Set appearance for child squares
+        self.body.setFill(self.body_color)
+        self.body.setOutline(self.outline_color)
         
-        # self.body.draw(squareverse_p.window)
+        # Draw and get ID, then update display
+        self.tkinter_id = self.body.draw_square(squareverse_p.window, self)
+        squareverse_p.window.update()
 
     def collision_detection_mongo_child(self, squareverse, selected_direction):
 
