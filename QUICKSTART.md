@@ -49,8 +49,10 @@ Starts immediately with preset configuration (600px window, 20x20 grid)
 
 ### Controls
 - **⏸ Stop Movement**: Pause the simulation
+- **🔍 Track Movement**: Select squares to track their paths
 - **❌ Delete Square**: Remove a square by ID
 - **🗑️ Delete All**: Clear all squares
+- **⚙️ Return to Setup**: Go back to setup window to change configuration
 - **⏹️ End Simulation**: Exit the program
 
 ## 4. Tips for Best Results
@@ -89,9 +91,11 @@ Make sure grid size divides evenly into window size:
 
 ### Physics in Action ⚛️
 - Watch a heavy square (red) slam into a light one (blue)
-- The light square gets pushed away!
-- The heavy square barely slows down
-- Multiple light squares can block a heavy one together
+- The light square gets pushed away in the direction of the heavy square!
+- The heavy square continues its path without bouncing
+- Squares show an "X" when they're unable to move in any direction
+- Use "Track Movement" to see the path squares have taken
+- Squares try alternative directions when blocked (opposite first, then random)
 
 ## 6. Troubleshooting
 
@@ -124,14 +128,26 @@ python main.py
 #    - Click "Spawn Square", enter mass: 5.0 (dark red)
 #    - Click "Spawn Square", enter mass: 1.0 (medium)
 #    - Repeat until you have 10-15 squares
+#    - Adjust FPS slider to desired speed (1-120)
 #    - Click "Start Movement"
 #    - Watch the simulation!
 
-# 4. Observe:
+# 4. Try tracking:
+#    - Click "Track Movement" to pause simulation
+#    - Click on squares you want to track
+#    - Click "Track Movement" again to resume with visible paths
+#    - Watch colored lines showing recent movement history
+
+# 5. Observe:
 #    - Heavy squares push light ones
-#    - Squares bounce off walls
-#    - Collisions transfer momentum
+#    - Squares try to avoid getting stuck
+#    - "X" appears on squares that can't move
+#    - Light squares follow heavy squares' direction
 #    - Patterns emerge over time
+    
+# 6. Try different configurations:
+#    - Click "Return to Setup" to change window/grid size
+#    - No need to restart the program!
 ```
 
 ## That's It!

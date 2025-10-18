@@ -12,15 +12,16 @@ class SetupWindow:
         """Initialize the setup window."""
         self.root = tk.Tk()
         self.root.title("SquareVerse - Simulation Setup")
-        self.root.geometry("500x400")
+        self.root.geometry("500x450")
         self.root.resizable(False, False)
         
         # Configure modern styling
         self.root.configure(bg='#2b2b2b')
         
         self.window_size = tk.IntVar(value=600)
-        self.grid_size = tk.IntVar()  # Initially empty
+        self.grid_size = tk.IntVar(value=20)
         self.valid_grid_sizes = []  # Will be populated based on window size
+        self.grid_size_dropdown = None  # Will be created in _create_grid_size_section
         
         self.result: Optional[Tuple[int, int]] = None
         
@@ -64,50 +65,35 @@ class SetupWindow:
         content_frame = tk.Frame(self.root, bg='#2b2b2b')
         content_frame.pack(pady=20, padx=40, fill='both', expand=True)
         
-        # Window Size Section with 50px increments
-        self._create_section(
-            content_frame,
+        # Create a section frame for window size
+        window_size_section = tk.LabelFrame(content_frame, text="Window Size", bg='#2b2b2b', fg='#ffffff', font=('Helvetica', 11, 'bold'))
+        window_size_section.grid(row=0, column=0, columnspan=2, sticky='ew', padx=5, pady=10)
+        
+        # Create the Window Size Section
+        self._create_window_size_section(
+            window_size_section,
             "Window Size (pixels)",
             self.window_size,
-            list(range(100, 1050, 50)),  # 100 to 1000 in 50px increments
-            0
+            list(range(100, 1050, 50)),  # 50px increments from 100 to 1000
+            0  # Row in the window size section
         )
         
-        # Grid Size Section - Will be updated after window size is selected
-        self.grid_section_frame = tk.Frame(content_frame, bg='#2b2b2b')
-        self.grid_section_frame.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(10, 0))
+        # Create a section frame for grid size
+        grid_size_section = tk.LabelFrame(content_frame, text="Grid Size", bg='#2b2b2b', fg='#ffffff', font=('Helvetica', 11, 'bold'))
+        grid_size_section.grid(row=1, column=0, columnspan=2, sticky='ew', padx=5, pady=10)
         
-        # Grid Size Label
-        self.grid_label = tk.Label(
-            self.grid_section_frame,
-            text="Grid Size (cells per side)",
-            font=('Helvetica', 11, 'bold'),
-            bg='#2b2b2b',
-            fg='#ffffff'
+        # First create the Grid Size Section
+        self.grid_size_frame = grid_size_section
+        self._create_grid_size_section(
+            self.grid_size_frame,
+            "Cells per side",
+            self.grid_size,
+            0  # Row in the grid size section
         )
-        self.grid_label.grid(row=0, column=0, sticky='w', pady=(10, 5))
-        
-        # Grid Size Value Label
-        self.grid_value_label = tk.Label(
-            self.grid_section_frame,
-            text="Select window size first",
-            font=('Helvetica', 11, 'bold'),
-            bg='#2b2b2b',
-            fg='#aaaaaa',
-            width=20
-        )
-        self.grid_value_label.grid(row=0, column=1, sticky='e', pady=(10, 5))
-        
-        # Grid Size Dropdown Frame
-        self.grid_dropdown_frame = tk.Frame(self.grid_section_frame, bg='#2b2b2b')
-        self.grid_dropdown_frame.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 10))
-        
-        # Initially create empty dropdown
-        self._update_grid_sizes()
         
         # Info label
         info_frame = tk.Frame(content_frame, bg='#3a3a3a', relief='flat', bd=0)
-        info_frame.grid(row=2, column=0, columnspan=2, pady=20, sticky='ew')
+        info_frame.grid(row=2, column=0, columnspan=2, pady=15, sticky='ew')
         
         info_label = tk.Label(
             info_frame,
@@ -115,13 +101,16 @@ class SetupWindow:
             font=('Helvetica', 9),
             bg='#3a3a3a',
             fg='#ffaa00',
-            pady=10
+            pady=8
         )
         info_label.pack()
         
         # Start Button
+        button_frame = tk.Frame(content_frame, bg='#2b2b2b')
+        button_frame.grid(row=3, column=0, columnspan=2, pady=15)
+        
         start_button = tk.Button(
-            content_frame,
+            button_frame,
             text="Start Simulation",
             command=self._start_simulation,
             font=('Helvetica', 12, 'bold'),
@@ -131,150 +120,161 @@ class SetupWindow:
             activeforeground='white',
             relief='flat',
             bd=0,
-            padx=20,
+            padx=30,
             pady=10,
             cursor='hand2'
         )
-        start_button.grid(row=3, column=0, columnspan=2, pady=10)
+        start_button.pack()
         
-        # Bind validation to changes
-        self.window_size.trace('w', self._validate_input)
-        self.grid_size.trace('w', self._validate_input)
+        # No need for additional validation bindings as
+        # validation is handled in the window_size update and grid size dropdown
     
-    def _create_section(self, parent, label_text, variable, values, row):
-        """Create a configuration section with label and slider."""
-        # Label
-        label = tk.Label(
-            parent,
-            text=label_text,
-            font=('Helvetica', 11, 'bold'),
-            bg='#2b2b2b',
-            fg='#ffffff'
-        )
-        label.grid(row=row, column=0, sticky='w', pady=(10, 5))
+    def _create_window_size_section(self, parent, label_text, variable, values, row):
+        """Create a window size configuration section with 50px increment slider."""
+        # Main container for this section
+        main_frame = tk.Frame(parent, bg='#2b2b2b')
+        main_frame.pack(fill='x', padx=10, pady=5)
         
-        # Value display
+        # Value display and controls row
+        controls_frame = tk.Frame(main_frame, bg='#2b2b2b')
+        controls_frame.pack(fill='x')
+        
+        # Current value display
         value_label = tk.Label(
-            parent,
+            controls_frame,
             text=str(variable.get()),
-            font=('Helvetica', 11, 'bold'),
+            font=('Helvetica', 12, 'bold'),
             bg='#2b2b2b',
             fg='#00d4ff',
             width=6
         )
-        value_label.grid(row=row, column=1, sticky='e', pady=(10, 5))
+        value_label.pack(side='right', padx=5)
+        
+        # "px" label
+        px_label = tk.Label(
+            controls_frame,
+            text="px",
+            font=('Helvetica', 11),
+            bg='#2b2b2b',
+            fg='#ffffff'
+        )
+        px_label.pack(side='right', padx=(0, 5))
         
         # Slider frame
-        slider_frame = tk.Frame(parent, bg='#2b2b2b')
-        slider_frame.grid(row=row+1, column=0, columnspan=2, sticky='ew', pady=(0, 10))
+        slider_frame = tk.Frame(main_frame, bg='#2b2b2b')
+        slider_frame.pack(fill='x', pady=10)
         
-        # Create custom scale
+        # Create custom scale with snapping behavior
         scale = tk.Scale(
             slider_frame,
             from_=min(values),
             to=max(values),
             orient='horizontal',
             variable=variable,
-            showvalue=False,
+            showvalue=False,  # No need to show value as we have a dedicated label
             bg='#3a3a3a',
             fg='#ffffff',
             troughcolor='#1a1a1a',
             activebackground='#00d4ff',
-            highlightthickness=0,
-            relief='flat',
+            highlightthickness=0,  # Remove highlight 
+            relief='flat',  # Clean appearance
             bd=0,
-            length=400
+            length=350,  # Slightly smaller to fit better
+            resolution=50  # Snap to 50px increments
         )
         scale.pack(fill='x')
         
-        # Update value label when slider changes
-        def update_label(*args):
-            value_label.config(text=str(variable.get()))
-        
-        variable.trace('w', update_label)
-    
-    def _get_valid_grid_sizes(self, window_size):
-        """Get list of valid grid sizes for a given window size."""
-        valid_sizes = []
-        
-        # Check all possible factors from 2 to 100
-        for size in [2, 4, 5, 8, 10, 20, 25, 40, 50, 100]:
-            if size <= 100 and window_size % size == 0:
-                valid_sizes.append(size)
-        
-        return valid_sizes
-    
-    def _update_grid_sizes(self, *args):
-        """Update grid size dropdown with valid options based on window size."""
-        window_size = self.window_size.get()
-        self.valid_grid_sizes = self._get_valid_grid_sizes(window_size)
-        
-        # Clear previous dropdown if it exists
-        for widget in self.grid_dropdown_frame.winfo_children():
-            widget.destroy()
+        # Update value label when slider changes and update grid size options
+        def update_window_size(*args):
+            current_size = variable.get()
+            # Ensure it's a multiple of 50
+            rounded_size = round(current_size / 50) * 50
+            if current_size != rounded_size:
+                variable.set(rounded_size)
             
-        if not self.valid_grid_sizes:
-            # No valid grid sizes
-            self.grid_value_label.config(
-                text="No valid grid sizes",
-                fg='#ff5555'
-            )
-            return
+            value_label.config(text=str(rounded_size))
             
-        # Create new dropdown
-        self.grid_value_label.config(
-            text="Select grid size:",
-            fg='#00d4ff'
+            # Update valid grid sizes
+            self._update_valid_grid_sizes(rounded_size)
+        
+        variable.trace('w', update_window_size)
+        # Initialize valid grid sizes
+        self._update_valid_grid_sizes(variable.get())
+        
+    def _create_grid_size_section(self, parent, label_text, variable, row):
+        """Create a grid size configuration section with dropdown based on window size."""
+        # Main container for this section
+        main_frame = tk.Frame(parent, bg='#2b2b2b')
+        main_frame.pack(fill='x', padx=10, pady=10)
+        
+        # Controls layout
+        controls_frame = tk.Frame(main_frame, bg='#2b2b2b')
+        controls_frame.pack(fill='x')
+        
+        # Label
+        label = tk.Label(
+            controls_frame,
+            text=label_text,
+            font=('Helvetica', 11),
+            bg='#2b2b2b',
+            fg='#ffffff'
         )
+        label.pack(side='left', padx=(0, 10))
         
-        # Create dropdown menu for grid size selection
-        self.grid_dropdown = ttk.Combobox(
-            self.grid_dropdown_frame, 
-            values=self.valid_grid_sizes,
-            state="readonly",
-            width=10,
+        # Create dropdown for grid size selection
+        self.grid_size_dropdown = ttk.Combobox(
+            controls_frame,
+            textvariable=variable,
+            state='readonly',
+            width=5,
             font=('Helvetica', 10)
         )
         
-        # Default to the middle option
-        middle_index = len(self.valid_grid_sizes) // 2
-        self.grid_dropdown.current(middle_index)
-        self.grid_size.set(self.valid_grid_sizes[middle_index])
+        # Style the combobox
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure('TCombobox', 
+                        background='#3a3a3a',
+                        fieldbackground='#3a3a3a',
+                        foreground='#00d4ff',
+                        arrowcolor='#00d4ff')
         
-        # Bind selection event
-        def on_grid_select(event):
-            selected = int(self.grid_dropdown.get())
-            self.grid_size.set(selected)
+        self.grid_size_dropdown.pack(side='right')
         
-        self.grid_dropdown.bind("<<ComboboxSelected>>", on_grid_select)
-        self.grid_dropdown.pack(fill='x', padx=5, pady=10)
+    def _update_valid_grid_sizes(self, window_size):
+        """Update the valid grid sizes based on the window size."""
+        self.valid_grid_sizes = []
+        
+        # Find all possible divisors of the window size
+        for i in range(1, window_size + 1):
+            if window_size % i == 0 and i <= 100:  # Limit to maximum 100 cells per side
+                self.valid_grid_sizes.append(i)
+        
+        # Update the dropdown menu with valid options if it exists
+        if self.grid_size_dropdown is not None:
+            self.grid_size_dropdown['values'] = self.valid_grid_sizes
+            
+            # Select the first valid grid size if the current one isn't valid
+            if self.grid_size.get() not in self.valid_grid_sizes and self.valid_grid_sizes:
+                self.grid_size.set(self.valid_grid_sizes[0])
     
     def _validate_input(self, *args):
-        """Update grid size options when window size changes."""
-        # Always update grid sizes when any value changes
-        # This will be called when window_size changes
-        self._update_grid_sizes()
+        """Validate the grid size selection."""
+        # This is now handled automatically by the dropdown
+        # which only shows valid grid sizes for the selected window size
+        pass
     
     def _start_simulation(self):
         """Validate and start the simulation."""
         window = self.window_size.get()
+        grid = self.grid_size.get()
         
-        # Make sure a grid size is selected
-        if not hasattr(self, 'grid_dropdown') or not self.grid_dropdown.get():
-            messagebox.showerror(
-                "Invalid Configuration",
-                "Please select a grid size."
-            )
-            return
-            
-        grid = int(self.grid_dropdown.get())
-        
-        # Double-check that the grid size is valid
         if window % grid != 0:
             messagebox.showerror(
                 "Invalid Configuration",
                 f"Grid size ({grid}) must divide evenly into window size ({window}).\n\n"
-                f"Please select a valid grid size."
+                f"Window size {window} ÷ Grid size {grid} = {window/grid:.2f}\n\n"
+                f"Please adjust your settings."
             )
             return
         

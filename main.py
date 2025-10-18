@@ -37,13 +37,35 @@ def main():
     print(f"  Grid Size: {grid_size} cells")
     print(f"  Cell Size: {window_size // grid_size}px")
     print(f"  Total Grid Cells: {grid_size * grid_size}")
-    print("\nLaunching simulation...")
-    
-    # Start simulation
-    simulation = SimulationWindow(window_size, grid_size)
-    simulation.run()
-    
-    print("\nSimulation ended. Goodbye!")
+    # Loop for returning to setup if needed
+    while True:
+        print("\nLaunching simulation...")
+        
+        # Start simulation
+        simulation = SimulationWindow(window_size, grid_size)
+        should_return_to_setup = simulation.run()
+        
+        if should_return_to_setup:
+            print("\nReturning to setup...")
+            # Show setup window again
+            setup = SetupWindow()
+            result = setup.show()
+            
+            if result is None:
+                print("\nSetup cancelled. Exiting.")
+                break
+            
+            # Update configuration
+            window_size, grid_size = result
+            print(f"\nNew Configuration:")
+            print(f"  Window Size: {window_size}px")
+            print(f"  Grid Size: {grid_size} cells")
+            print(f"  Cell Size: {window_size // grid_size}px")
+            print(f"  Total Grid Cells: {grid_size * grid_size}")
+        else:
+            # Normal exit
+            print("\nSimulation ended. Goodbye!")
+            break
 
 
 if __name__ == '__main__':

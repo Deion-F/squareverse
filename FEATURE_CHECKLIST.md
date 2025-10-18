@@ -65,6 +65,16 @@ This checklist confirms all requested features have been implemented.
 
 ### 3. Control Panel Buttons
 
+#### Track Movement Button
+- [x] "Track Movement" toggle button exists
+- [x] Pauses simulation when activated
+- [x] Allows selecting squares to track
+- [x] Shows visual highlight for tracked squares
+- [x] Draws path lines showing square's movement history
+- [x] Tracks up to 10 previous positions for each square
+- [x] Can resume simulation with tracks visible
+- [x] Clears tracks when toggled off
+
 #### Spawn Square Button
 - [x] "Spawn Square" button exists
 - [x] Opens mass input dialog
@@ -97,6 +107,14 @@ This checklist confirms all requested features have been implemented.
 - [x] Resets ID counter
 - [x] Updates display immediately
 
+#### Return to Setup Button
+- [x] "Return to Setup" button exists
+- [x] Stops simulation
+- [x] Cleans up threads and resources
+- [x] Returns to setup window without restarting program
+- [x] Preserves program state
+- [x] Allows reconfiguring window/grid size
+
 #### End Simulation Button
 - [x] "End Simulation" button exists
 - [x] Closes window
@@ -118,10 +136,11 @@ This checklist confirms all requested features have been implemented.
 
 ### Mass-Based Physics
 - [x] Heavier squares displace lighter ones
-- [x] Momentum is conserved
-- [x] Energy calculation includes elasticity
-- [x] Proper force calculations
-- [x] Velocity updates based on mass ratios
+- [x] Heavier squares continue their movement path without bouncing
+- [x] Lighter squares are pushed in heavy's direction of movement
+- [x] Fallback movement logic when blocked (opposite then random)
+- [x] "Stalled" state for squares that cannot move
+- [x] Two-way swap prevention stops teleporting through each other
 
 ### Grid-Based Movement
 - [x] Movement is one cell at a time
@@ -196,8 +215,10 @@ This checklist confirms all requested features have been implemented.
 - [x] Blue = light (low mass)
 - [x] Red = heavy (high mass)
 - [x] Smooth gradient (HSV)
-- [x] Mass value displayed
-- [x] White outline for visibility
+- [x] Mass value displayed when space permits
+- [x] No contrasting borders for cleaner look
+- [x] "X" displayed on stalled squares when unable to move
+- [x] Yellow outline for tracked squares
 
 ### Statistics Display
 - [x] Number of squares shown

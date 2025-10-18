@@ -27,20 +27,22 @@ class Square:
         self.y = y
         self.mass = max(0.1, mass)  # Minimum mass to prevent division by zero
         
-        # Velocity in grid cells per step (only orthogonal: up, down, left, right)
-        # Choose one of four directions: left, right, up, down
+        # Velocity in grid cells per step - only up, down, left, right (no diagonals)
+        # We'll pick a random direction: 0=right, 1=up, 2=left, 3=down
         direction = np.random.randint(0, 4)
-        if direction == 0:    # Left
-            self.vx, self.vy = -1, 0
-        elif direction == 1:  # Right
+        if direction == 0:   # Right
             self.vx, self.vy = 1, 0
-        elif direction == 2:  # Up
+        elif direction == 1: # Up
             self.vx, self.vy = 0, -1
-        else:                # Down
+        elif direction == 2: # Left
+            self.vx, self.vy = -1, 0
+        else:               # Down
             self.vx, self.vy = 0, 1
         
         # Color based on mass (heavier = darker/redder)
         self.color = self._calculate_color()
+        # Whether the square was unable to move last update
+        self.stalled = False
         
     def _calculate_color(self) -> str:
         """Calculate color based on mass (visual differentiation)."""

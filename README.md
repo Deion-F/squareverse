@@ -37,9 +37,11 @@ A real-time physics simulation where squares with different masses interact on a
 
 ### Visual Features
 - **Mass-based coloring**: Light blue (low mass) to dark red (high mass)
-- **Mass labels**: Each square displays its mass value
+- **Mass labels**: Each square displays its mass value when space permits
+- **Stalled indicator**: Squares show an "X" when unable to move due to blockage
 - **Grid visualization**: Clear cell boundaries for easy tracking
 - **Smooth animation**: Real-time movement at 20 physics updates per second
+- **Movement tracking**: Select and track squares to visualize their recent paths
 
 ## Installation
 
@@ -108,10 +110,25 @@ chmod +x main.py
 
 5. **Interact with simulation**
    - Pause/resume with "⏸ Stop Movement"
+   - Adjust simulation speed with the FPS slider (1-120 FPS)
    - Delete specific squares by ID
    - Clear all squares with "Delete All"
 
-6. **End simulation**
+6. **Track square movement**
+   - Click "🔍 Track Movement" to pause simulation and enter tracking mode
+   - Click on specific squares to track their movement
+   - Selected squares get highlighted with a yellow border
+   - Click "🔍 Track Movement" again to resume simulation
+   - Observe colored paths showing recent movement history (up to 10 positions)
+   - Toggle the button again to clear tracked paths
+
+7. **Return to setup**
+   - Click "⚙️ Return to Setup" to go back to the setup window
+   - Adjust window size and grid size
+   - Launch simulation with new settings
+   - No need to restart the application
+
+8. **End simulation**
    - Click "⏹️ End Simulation"
    - Confirm exit if simulation is running
 
@@ -146,17 +163,24 @@ chmod +x main.py
 ### Collision Detection
 - Grid-based spatial hashing for O(1) collision detection
 - Detects when multiple squares occupy the same cell
+- Prevents squares from "passing through" each other with movement planning
 
 ### Collision Resolution
-1. **Momentum Exchange**: Based on conservation of momentum
-   - `m₁v₁ + m₂v₂ = m₁v₁' + m₂v₂'`
-2. **Position Separation**: Lighter square is pushed away
-3. **Velocity Update**: Based on mass ratios and elasticity (0.8)
+1. **Movement Planning**: Heavy squares get priority for their desired positions
+   - Heavier squares always push lighter squares out of the way
+   - Lighter squares are pushed in the direction of the heavier square's movement
+2. **Position Separation**: Lighter square is pushed away by heavier square
+3. **Fallback Movement**: When blocked, squares attempt:
+   - Original desired direction
+   - Opposite direction
+   - Other cardinal directions randomly
+   - Mark as "stalled" with "X" only when all directions blocked
 
 ### Movement
 - Squares move one grid cell per physics update
 - Random initial velocities (-1, 0, or 1) in x and y directions
 - Bounces off walls by reversing velocity
+- No diagonal movement - only cardinal directions (up, down, left, right)
 
 ## Project Structure
 
@@ -206,6 +230,9 @@ Watch for these interesting behaviors:
 3. **Collision Cascades**: Chain reactions from single collisions
 4. **Density Patterns**: Natural formation of dense and sparse regions
 5. **Momentum Transfer**: Energy propagation through the system
+6. **Path Formation**: Using the tracking feature, observe how squares find paths through congestion
+7. **Stalling Patterns**: Squares displaying "X" when blocked from all directions
+8. **Direction Preference**: Observe how squares attempt alternative directions when blocked
 
 ## Tips for Best Experience
 
@@ -254,9 +281,10 @@ Watch for these interesting behaviors:
 - **Communication**: Shared data structures with careful synchronization
 
 ### Physics Update Rate
-- 20 updates per second (50ms per update)
+- Adjustable from 1-120 updates per second via FPS slider
+- Default: 20 updates per second (50ms per update)
 - Balances accuracy with performance
-- Independent of rendering FPS
+- Independent of rendering FPS (60 FPS)
 
 ### Rendering Rate
 - Target 60 FPS for smooth visualization

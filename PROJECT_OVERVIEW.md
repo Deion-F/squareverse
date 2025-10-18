@@ -107,6 +107,8 @@ squareverse/
 - Color calculation based on mass
 - Position update with wall collision
 - Automatic velocity assignment
+- "Stalled" state tracking when square cannot move
+- Track history for movement visualization
 
 **Key Methods**:
 - `update_position()`: Move based on velocity
@@ -118,11 +120,12 @@ squareverse/
 
 **Features**:
 - O(1) collision detection using position hashing
-- Mass-based collision resolution
-- Conservation of momentum
-- Energy elasticity (0.8 factor)
-- Separation of colliding squares
+- Mass-based collision resolution with movement priorities
+- Position planning to prevent square overlaps and pass-through behavior
+- Intelligent fallback movement: try desired direction, then opposite, then others
+- "Stalled" state tracking for squares unable to move
 - Wall bounce mechanics
+- Two-way swap detection to prevent squares passing through each other
 
 **Key Methods**:
 - `detect_collisions()`: Find all square pairs at same position
@@ -176,10 +179,13 @@ v₂' = (v₂(m₂ - m₁) + 2m₁v₁) / (m₁ + m₂) × elasticity
 **Features**:
 - Canvas-based grid rendering
 - Real-time square display (60 FPS)
-- Control panel with 5 buttons
+- Control panel with multiple buttons including Track Movement and Return to Setup
+- FPS slider control (1-120 FPS range)
 - Statistics display (FPS, count, status)
-- Multi-threaded physics loop (20 Hz)
-- Proper thread cleanup on exit
+- Multi-threaded physics loop (configurable Hz)
+- Movement tracking with path visualization 
+- "X" display for stalled squares
+- Proper thread cleanup on exit and return to setup
 
 **Threading Model**:
 - **Main Thread**: UI rendering and event handling
