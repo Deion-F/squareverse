@@ -418,16 +418,37 @@ class SimulationWindow:
         spawned_squares = []
         failed_spawns = 0
         
-        for _ in range(num_squares):
+        # Show a progress dialog when spawning many squares
+        progress_win = tk.Toplevel(self.root)
+        progress_win.title("Spawning Squares...")
+        progress_win.transient(self.root)
+        progress_win.grab_set()
+        progress_label = tk.Label(progress_win, text="Spawning squares, please wait...", padx=10, pady=8)
+        progress_label.pack()
+        progress_bar = ttk.Progressbar(progress_win, length=300, mode='determinate', maximum=num_squares)
+        progress_bar.pack(padx=10, pady=(0, 10))
+
+        for i in range(num_squares):
             # Generate random mass between 0.1 and 10.0
             random_mass = 0.1 + 9.9 * np.random.random()  # Random between 0.1 and 10.0
-            
+
             square = self.grid_world.add_square_random(random_mass)
             if square:
                 spawned_squares.append(square)
             else:
                 failed_spawns += 1
                 break  # Stop if we can't spawn more
+
+            # Update progress
+            progress_bar['value'] = i + 1
+            progress_win.update_idletasks()
+
+        # Close progress window
+        try:
+            progress_win.grab_release()
+            progress_win.destroy()
+        except Exception:
+            pass
 
         # Initialize histories for newly spawned squares
         for s in spawned_squares:
