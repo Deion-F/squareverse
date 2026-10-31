@@ -23,37 +23,61 @@ Press **H** in the app for the controls. F1–F4 load the presets (rain, disk, c
   well has a mass: its circle's area × the pour mass × `WELL_DENSITY` (64). It pulls with the same constant `G` as
   particles, so a well poured at mass 64 holds its own in a heavy scene. Wells attract each other and, with
   self-gravity on, are pulled by the particles. The heavier a well is, the more slowly it accelerates and moves.
-  Colliding planets bounce apart and shed debris from the point of contact, the smaller losing more; each shrinks to
-  keep its density (`PLANET_*` settings). Repulsors stay put and ignore the global
+  Colliding planets bounce apart elastically (`PLANET_RESTITUTION` 1.0) and shed debris from the point of contact,
+  the smaller losing more; each shrinks to keep its density (`PLANET_*` settings). A planet smaller than
+  `PLANET_SHATTER_RADIUS` (10 cells) shatters instead: it breaks into particles of random masses adding up to its
+  mass, which fly apart. A planet that touches a super well's core dissolves into particles in a wave that spreads
+  from the point of contact (`PLANET_DISSOLVE_*`), and the core swallows them as they reach it. Repulsors stay put and ignore the global
   gravity direction. Shift+drag moves any well, X deletes the nearest one, and `,` / `.` make the nearest well lighter
   or heavier. Hover a well to see its mass, speed and reach.
+* **Planet formation:** every 30 ticks, a clump of touching particles with space round it becomes a planet holding
+  its total mass, momentum and spin when it is layered like one: a heavy core, a lighter mantle and a lighter crust
+  still, each layer's typical mass at least 2× the next one out's, with a sharp divide between them (a smooth gradient
+  doesn't count) and most of each layer's particles in its own mass band. It must also be round (at most 1.5× as long
+  as it is wide, filling the disc of its area, solid in the middle) and between 4 and 30 cells in radius (about 50 to
+  2,800 particles). See `PLANET_FORM_*`. To make one, pour a small heavy blob, then a lighter ring round it, then a
+  lighter ring still, with self-gravity on to hold it together.
 * **Super wells:** B places one (as heavy as a brush-sized well, and never lighter than the collapse threshold). It
-  is a tiny black core that deletes every particle and well touching it and adds their mass to its own. Its pull
+  is a tiny black core that deletes every particle and super well touching it and adds their mass to its own. Its pull
   grows with that mass and follows the same law as every other mass, at any distance. Inside its dotted circle it
-  whirls everything round the way it spins (`SUPER_SWIRL_*`): gently at the edge, so hard beside the core that
-  nothing can stay still, and matter spirals in over several turns. Its spiral arms show which way it spins, turning faster and brighter the faster it
-  spins. When two super wells' dotted circles overlap, they are hauled
+  whirls everything round the way it spins (`SUPER_SWIRL_*`), at full strength right out to the circle (it fades in
+  only over the outer 15%). Nothing inside sleeps or rests on friction, so matter keeps circling unless other
+  matter blocks its way, and spirals in over several turns. Its spiral arms show which way it spins, turning faster and brighter the faster it
+  spins. `;` / `'` spin the nearest super well slower / faster (up to `SUPER_SPIN_MAX`, 7). One placed with B starts at spin 5
+  (`SUPER_SPIN_PLACED`); one formed by collapse spins at 5
+  (`SUPER_SPIN_NATURAL`) the way the collapsing matter was turning. Above spin 1 it whirls
+  matter faster than it would orbit and flings it out into a ring instead of drawing it in. When two super wells' dotted circles overlap, they are hauled
   together and merge within about a second. The merged well spits out 1–10% of their combined mass as particles, taken mostly from the smaller of the two
-  (`MERGE_LOSS_BIAS`).
+  (`MERGE_LOSS_BIAS`). A super well that reaches `SUPER_EXPLODE_MASS` (5,000,000) explodes: all of its mass comes
+  back out as about 20,000 particles of random masses, in a disc flying outwards at up to 5 cells/tick. Collapse is
+  paused for 180 ticks (`SUPER_EXPLODE_CALM`) so the debris can spread before dense parts of it collapse again.
 * **Collapse** (Shift+B, on by default): every 8 ticks, the heaviest 20×20-cell window collapses into a super well
   (or feeds one close by) once it holds `COLLAPSE_MASS` (5,000). The new super well keeps the matter's momentum and
   spits out 10–30% of it. Ejected particles have random masses (`EJECT_MASS`) and leave at 1.2× the speed needed to
   escape its range, so they get out unless something stops them.
-* **Spawners:** F places a particle spawner the size of the brush circle, pouring particles at the current pour
-  mass (or random range). Bigger circles pour more: `SPAWNER_RATE` particles per tick per cell of area, about 2 per
+* **Spawners:** F places a particle spawner the size of the brush circle, pouring ghost particles (see Ghosts;
+  `SPAWNER_GHOSTS`) at the current pour mass (or random range), so they don't pile up and collapse at the spawner. Bigger circles pour more: `SPAWNER_RATE` particles per tick per cell of area, about 2 per
   tick for the default brush. A spawner has no collisions, so it passes through particles and planets. It falls under
   every kind of gravity like a particle, and a super well's core deletes it. Shift+F places a locked spawner that
   stays exactly where it is put and ignores gravity. Shift+drag moves spawners, and X deletes the nearest.
 * **Continuous borders:** W makes the edges wrap: a particle leaving one side enters from the opposite one. Gravity
   reaches across the seam too (wells pull the shortest way round, and self-gravity becomes periodic), and wells and
   spawners wrap as well.
-* **Global orbit:** O cycles off / clockwise / counterclockwise, and K / L make it slower / faster. Everything,
+* **Global orbit:** O cycles off / clockwise / counterclockwise, and K / L make it slower / faster. It starts
+  turning the edge of the universe at 3 cells/tick (`ORBIT_EDGE_SPEED`) whatever the window size, and resizing
+  keeps the edge speed. Everything,
   wells included, is brought round the centre of the universe, faster the further out it is and never slower than
   `ORBIT_MIN_SPEED`, so nothing comes to rest. Each thing gets exactly the inward pull its own circling needs, so
   nothing slow is dragged to the middle, plus a nudge towards the orbiting speed (`ORBIT_GRIP`). Particles are
   processed front-first along the flow so moving groups don't jam.
 * **Gravity strength:** `<` / `>` scale all gravity (global direction, wells, super wells, self-gravity). The
   collapse threshold is divided by the same factor, so stronger gravity collapses sooner.
+* **Ghosts:** Shift+click pours ghost particles (Shift+click on a well or spawner still drags it). For
+  `GHOST_TICKS` (180, 3 seconds) they feel every kind of gravity except each other's, but collide with nothing,
+  passing through particles, planets and each other. They aren't counted in self-gravity or collapse, so a big pour
+  can't turn straight into a super well. Then each lands as an ordinary particle in a random free cell of the nearest ring of cells round it that has
+  room, so a crowd landing together spreads out evenly. A super
+  well's core still swallows them. They are drawn see-through.
 * **Particles:** S toggles self-gravity, and M / P toggle merging / splitting (both on by default). Keys 1–5 pour a
   fixed mass, and 6 pours particles with a random mass between the min and max of `RANDOM_MASS` in `sv/config.py`.
 
@@ -90,9 +114,11 @@ A settled world costs almost nothing, because only moving particles are simulate
 * **Forces:** cached field from wells and global gravity, plus self-gravity (particle-mesh: mass is binned into
   4×4 blocks, the potential comes from an FFT convolution, refreshed every 4 ticks), plus optional children lean (J).
 * **Contacts**, applied in this order:
-  1. Split, on high impact energy.
+  1. Split: the particle that is hit breaks in two, only in collisions at least `SPLIT_SPEED` (2) fast that also
+     carry more than `BIND` impact energy per unit of its mass.
   2. 1D momentum exchange, for impacts above the resting threshold.
-  3. Merge, for slow contacts (momentum and children are conserved).
+  3. Merge: the two become one with chance `MERGE_CHANCE` (5%), only in collisions at least `MERGE_SPEED` (1) fast
+     that didn't split anything (momentum and children are conserved). Slow and resting contacts never merge.
   4. Sink: a heavier particle pushes through a lighter one, only when the force presses it in.
   5. Slide or topple, as in sand.py.
   6. Blocked: lose the approach velocity, with static friction when pressed.

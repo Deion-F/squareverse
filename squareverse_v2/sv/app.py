@@ -1,5 +1,6 @@
 """pygame event loop and controls (modelled on sand.py's main())."""
 
+import math
 import time
 
 import pygame
@@ -68,8 +69,11 @@ class App:
             buttons = pygame.mouse.get_pressed()
             mx, my = pygame.mouse.get_pos()
             shift = pygame.key.get_mods() & pygame.KMOD_SHIFT
-            if buttons[0] and self.dragging is None and not shift:   # shift+click drags wells instead
-                world.brush(mx, my, self.brush_px, self.pour_mass)
+            if buttons[0] and self.dragging is None:   # shift+click on a well or spawner drags it instead
+                if shift:
+                    world.pour_ghosts(mx, my, self.brush_px, self.pour_mass)
+                else:
+                    world.brush(mx, my, self.brush_px, self.pour_mass)
             elif buttons[2]:
                 world.brush(mx, my, self.brush_px, 0)
 
@@ -155,6 +159,11 @@ class App:
             nearest = w.nearest_well(mx, my, normal_only=True)
             if nearest is not None:
                 w.scale_well(nearest, 1.25 if k == pygame.K_PERIOD else 0.8)
+        elif k in (pygame.K_SEMICOLON, pygame.K_QUOTE):
+            supers = [wl for wl in w.wells if wl.is_super]
+            if supers:
+                nearest = min(supers, key=lambda wl: math.hypot(wl.x * w.cell - mx, wl.y * w.cell - my))
+                w.scale_spin(nearest, config.SUPER_SPIN_STEP if k == pygame.K_QUOTE else 1 / config.SUPER_SPIN_STEP)
         elif k == pygame.K_s:
             w.set_self_gravity(not w.sg_on)
         elif k == pygame.K_f:

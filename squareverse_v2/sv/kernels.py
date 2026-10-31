@@ -18,10 +18,10 @@ from numba import njit
 
 # indices into the float64 params array handed to step()
 (P_VMAX, P_MAX_STEPS, P_WALL_E, P_E, P_IMPACT_MIN, P_SLIDE_DAMP, P_SINK, P_DRAG, P_SLEEP_EPS,
- P_CHILD_MOVES, P_SLOSH, P_LEAN, P_MERGE_ON, P_STICK, P_MERGE_CHANCE, P_MAX_MASS,
+ P_CHILD_MOVES, P_SLOSH, P_LEAN, P_MERGE_ON, P_MERGE_SPEED, P_MERGE_CHANCE, P_MAX_MASS,
  P_SPLIT_ON, P_BIND, P_KICK, P_SG_ON, P_CHILD_EVERY, P_ORBIT_W, P_ORBIT_GRIP, P_ORBIT_CX, P_ORBIT_CY,
- P_SLEEP_ACCEL, P_WRAP, P_ORBIT_VMIN, P_WHIRL_SPEED, P_WHIRL_GRIP, P_WHIRL_INFALL) = range(31)
-N_PARAMS = 31
+ P_SLEEP_ACCEL, P_WRAP, P_ORBIT_VMIN, P_WHIRL_SPEED, P_WHIRL_GRIP, P_WHIRL_INFALL, P_WHIRL_EDGE, P_SPLIT_SPEED) = range(33)
+N_PARAMS = 33
 
 # indices into the int64 stats array filled by step()
 S_MOVED, S_COLLISIONS, S_MERGES, S_SPLITS, S_SINKS, S_ABSORBED = range(6)
@@ -387,11 +387,12 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
     slosh = P[P_SLOSH]
     lean = P[P_LEAN]
     merge_on = P[P_MERGE_ON] != 0.0
-    stick = P[P_STICK]
+    merge_speed = P[P_MERGE_SPEED]
     merge_chance = P[P_MERGE_CHANCE]
     max_mass = int(P[P_MAX_MASS])
     split_on = P[P_SPLIT_ON] != 0.0
     bind = P[P_BIND]
+    split_speed = P[P_SPLIT_SPEED]
     kick = P[P_KICK]
     sg_on = P[P_SG_ON] != 0.0
     orbit_w = P[P_ORBIT_W]
@@ -400,6 +401,7 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
     whirl_speed = P[P_WHIRL_SPEED]
     whirl_grip = P[P_WHIRL_GRIP]
     whirl_infall = P[P_WHIRL_INFALL]
+    whirl_edge = P[P_WHIRL_EDGE]
     ocx, ocy = P[P_ORBIT_CX], P[P_ORBIT_CY]
     wrap = P[P_WRAP] != 0.0
 
@@ -431,12 +433,14 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
             ox_, oy_ = orbit_accel(x - ocx, y - ocy, kin[i0, 0], kin[i0, 1], orbit_w, orbit_grip, orbit_vmin)
             ax += ox_
             ay += oy_
+        whirled = False                                  # inside a whirlpool: never sleeps or sticks
         for k in range(whirls.shape[0]):
-            wx_, wy_ = whirl(_axis(x, whirls[k, 0], w, wrap), _axis(y, whirls[k, 1], h, wrap), kin[i0, 0], kin[i0, 1],
-                             whirls[k, 2], whirls[k, 3], whirls[k, 4], whirls[k, 5], whirl_speed, whirl_grip,
-                             whirl_infall)
+            wx_, wy_, inside = whirl(_axis(x, whirls[k, 0], w, wrap), _axis(y, whirls[k, 1], h, wrap), kin[i0, 0],
+                                     kin[i0, 1], whirls[k, 2], whirls[k, 3], whirls[k, 4], whirls[k, 5], whirl_speed,
+                                     whirl_grip, whirl_infall, whirl_edge)
             ax += wx_
             ay += wy_
+            whirled = whirled or (inside and whirls[k, 3] != 0.0)
 
         vx = kin[i0, 0] + ax
         vy = kin[i0, 1] + ay
@@ -531,10 +535,15 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
                 if press > 0.0 and m > mk:
                     stay = True                          # a heavier particle keeps trying to sink (sand.py)
 
+                # merging and splitting only happen in collisions at least merge_speed / split_speed fast;
+                # resting and slow contacts just push. A collision that breaks a particle doesn't also merge.
+                split = False
                 if u > impact:
-                    if split_on and mk >= 2 and 0.5 * (m * mk / total) * u * u > bind * mk:
+                    if (split_on and u >= split_speed and mk >= 2
+                            and 0.5 * (m * mk / total) * u * u > bind * mk):
                         if _split(j, kick * u, w, h, tick, mass, kin, quad, shade, stamp, flag, solid, wrap):
                             stats[S_SPLITS] += 1
+                            split = True
                             mk = np.int64(mass[j])
                             total = m + mk
                     # 1D collision along the step direction with restitution e (momentum conserved)
@@ -547,7 +556,8 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
                     wake(j, mass, flag)
                     stats[S_COLLISIONS] += 1
 
-                if merge_on and u < stick and total <= max_mass and np.random.random() < merge_chance:
+                if (merge_on and not split and u >= merge_speed and u > impact and total <= max_mass
+                        and np.random.random() < merge_chance):
                     kin[j, 0] = (m * vx + mk * kin[j, 0]) / total
                     kin[j, 1] = (m * vy + mk * kin[j, 1]) / total
                     mass[j] = total
@@ -606,7 +616,7 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
                 vx -= vn * nxn
                 vy -= vn * nyn
             rx, ry = vx - kvx, vy - kvy
-            if press > 0.0 and rx * rx + ry * ry < impact * impact:
+            if press > 0.0 and rx * rx + ry * ry < impact * impact and not whirled:
                 vx, vy = kvx, kvy                        # static friction: resting contact holds still
             blocked = True
             break
@@ -632,9 +642,168 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
         quad[i, 3] = q3
         shade[i] = sh
         stamp[i] = 2 * tick + (1 if blocked else 0)
-        if moved or stay or vx * vx + vy * vy > eps2 or (not blocked and ax * ax + ay * ay > accel_eps2):
+        if moved or stay or whirled or vx * vx + vy * vy > eps2 or (not blocked and ax * ax + ay * ay > accel_eps2):
             wake(i, mass, flag)
     return n
+
+
+# --- clumps -----------------------------------------------------------------------------------------
+
+@njit(cache=True)
+def label_clumps(mass, w, h, labels, stack):
+    """Number each clump of touching particles (8-neighbours, not across a wrapped border): labels[i] = 1, 2, ...
+    for occupied cells, 0 for empty ones. Returns how many clumps there are."""
+    labels[:] = 0
+    n = 0
+    for s in range(mass.size):
+        if mass[s] == 0 or labels[s] != 0:
+            continue
+        n += 1
+        labels[s] = n
+        top = 0
+        stack[top] = s
+        top += 1
+        while top > 0:
+            top -= 1
+            i = stack[top]
+            x, y = i % w, i // w
+            for dy in range(-1, 2):
+                yy = y + dy
+                if yy < 0 or yy >= h:
+                    continue
+                for dx in range(-1, 2):
+                    xx = x + dx
+                    if xx < 0 or xx >= w:
+                        continue
+                    j = yy * w + xx
+                    if mass[j] != 0 and labels[j] == 0:
+                        labels[j] = n
+                        stack[top] = j
+                        top += 1
+    return n
+
+
+# --- ghosts ----------------------------------------------------------------------------------------
+# Particles poured with shift+click live off the grid for a while: free points that feel gravity (wells, global
+# gravity, the orbit, whirlpools and the self-gravity of the grid's particles, not of each other) but collide with
+# nothing, so a fresh pour can't pile up and collapse. Then they land in the nearest free cell.
+
+@njit(cache=True)
+def _ghost_cell(gx, gy, w, h):
+    x = min(max(int(np.floor(gx + 0.5)), 0), w - 1)
+    y = min(max(int(np.floor(gy + 0.5)), 0), h - 1)
+    return y * w + x
+
+
+@njit(cache=True)
+def step_ghosts(gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, sg_block, sg_w, hole, absorbed, whirls):
+    """Move the ghosts one tick. One that crosses a super well's core is swallowed (its mass goes to absorbed[k]
+    and gm becomes 0); at a solid border a ghost bounces off the edge. Returns how many were swallowed."""
+    vmax = P[P_VMAX]
+    drag = P[P_DRAG]
+    wall_e = P[P_WALL_E]
+    wrap = P[P_WRAP] != 0.0
+    sg_on = P[P_SG_ON] != 0.0
+    orbit_w = P[P_ORBIT_W]
+    ocx, ocy = P[P_ORBIT_CX], P[P_ORBIT_CY]
+    swallowed = 0
+    for k in range(gm.size):
+        if gm[k] == 0:
+            continue
+        i = _ghost_cell(gx[k], gy[k], w, h)
+        ax = np.float64(fx[i])
+        ay = np.float64(fy[i])
+        if sg_on:
+            b = ((i // w) // sg_block) * sg_w + (i % w) // sg_block
+            ax += sgx[b]
+            ay += sgy[b]
+        if orbit_w != 0.0:
+            ox_, oy_ = orbit_accel(gx[k] - ocx, gy[k] - ocy, gvx[k], gvy[k], orbit_w, P[P_ORBIT_GRIP],
+                                   P[P_ORBIT_VMIN])
+            ax += ox_
+            ay += oy_
+        for j in range(whirls.shape[0]):
+            wx_, wy_, _ = whirl(_axis(gx[k], whirls[j, 0], w, wrap), _axis(gy[k], whirls[j, 1], h, wrap), gvx[k],
+                                gvy[k], whirls[j, 2], whirls[j, 3], whirls[j, 4], whirls[j, 5], P[P_WHIRL_SPEED],
+                                P[P_WHIRL_GRIP], P[P_WHIRL_INFALL], P[P_WHIRL_EDGE])
+            ax += wx_
+            ay += wy_
+        vx = (gvx[k] + ax) * (1.0 - drag)
+        vy = (gvy[k] + ay) * (1.0 - drag)
+        v = np.sqrt(vx * vx + vy * vy)
+        if v > vmax:
+            vx *= vmax / v
+            vy *= vmax / v
+            v = vmax
+        # move in steps of at most one cell, so a fast ghost can't jump over a small core
+        n = max(1, int(np.ceil(v)))
+        for _ in range(n):
+            x = gx[k] + vx / n
+            y = gy[k] + vy / n
+            if wrap:
+                x %= w
+                y %= h
+            else:
+                if x < 0.0 or x > w - 1.0:
+                    x = min(max(x, 0.0), w - 1.0)
+                    vx = -vx * wall_e
+                if y < 0.0 or y > h - 1.0:
+                    y = min(max(y, 0.0), h - 1.0)
+                    vy = -vy * wall_e
+            gx[k], gy[k] = x, y
+            c = _ghost_cell(x, y, w, h)
+            if hole[c]:
+                absorbed[hole[c] - 1] += gm[k]
+                gm[k] = 0
+                swallowed += 1
+                break
+        gvx[k], gvy[k] = vx, vy
+        gage[k] += 1
+    return swallowed
+
+
+@njit(cache=True)
+def land_ghosts(gx, gy, gvx, gvy, gm, gage, life, reach, w, h, mass, kin, quad, shade, stamp, flag, solid, hole,
+                wrap):
+    """Ghosts at least `life` ticks old become ordinary particles in a free cell of the nearest ring of cells round
+    them that has one, picked at random so a crowd landing together spreads evenly (searching out to reach cells;
+    one that finds none tries again next tick). Returns how many landed."""
+    landed = 0
+    for k in range(gm.size):
+        if gm[k] == 0 or gage[k] < life:
+            continue
+        c = _ghost_cell(gx[k], gy[k], w, h)
+        cx, cy = c % w, c // w
+        for d in range(reach + 1):
+            found = -1
+            seen = 0
+            for dy in range(-d, d + 1):
+                step = 1 if abs(dy) == d else 2 * d          # inner rows: only the ring's two edge cells
+                for dx in range(-d, d + 1, max(1, step)):
+                    j = _cell(cx + dx, cy + dy, w, h, wrap)
+                    if j >= 0 and mass[j] == 0 and not solid[j] and not hole[j]:
+                        seen += 1
+                        if np.random.randint(0, seen) == 0:  # reservoir sampling: each free cell equally likely
+                            found = j
+            if found >= 0:
+                place(found, gm[k], gvx[k], gvy[k], mass, kin, quad, shade, stamp)
+                wake(found, mass, flag)
+                gm[k] = 0
+                landed += 1
+                break
+    return landed
+
+
+@njit(cache=True)
+def render_ghosts(gx, gy, gm, w, h, mass_lut, tint, rgb):
+    """Draw the ghosts see-through: their mass colour washed towards tint, blended half over what is there."""
+    for k in range(gm.size):
+        if gm[k] == 0:
+            continue
+        i = _ghost_cell(gx[k], gy[k], w, h)
+        for c in range(3):
+            col = (mass_lut[gm[k], c] + tint[c]) >> 1
+            rgb[i, c] = (np.int32(rgb[i, c]) + col) >> 1
 
 
 # --- super wells -------------------------------------------------------------------------------------
@@ -691,19 +860,21 @@ def mark_holes(cores, w, h, hole, mass, kin, quad, flag, absorbed, wrap):
 
 @njit(cache=True)
 def mark_solid(bodies, w, h, solid, gvx, gvy, mass, kin, quad, shade, stamp, flag, wrap):
-    """Mark every normal well's body (rows of x, y, radius, spin, vx, vy) as solid ground moving with it - its own
-    velocity plus its spin (rad/tick, > 0 clockwise on screen) - and push any particle inside it straight out, away
-    from that well's centre, into the first free cell beyond the surface."""
+    """Mark every normal well's body (rows of x, y, radius, spin, vx, vy, eaten dx, eaten dy, eaten radius) as solid
+    ground moving with it - its own velocity plus its spin (rad/tick, > 0 clockwise on screen) - and push any
+    particle inside it straight out, away from that well's centre, into the first free cell beyond the surface. A
+    dissolving planet has lost the part within the eaten radius of (its centre + eaten offset); < 0 = none."""
     solid[:] = 0
     for k in range(bodies.shape[0]):
         cx, cy, r, om, bvx, bvy = bodies[k, 0], bodies[k, 1], bodies[k, 2], bodies[k, 3], bodies[k, 4], bodies[k, 5]
+        ex, ey, er = bodies[k, 6], bodies[k, 7], bodies[k, 8]
         x0, x1, xmin = _span(cx, r, w, wrap)
         y0, y1, ymin = _span(cy, r, h, wrap)
         for yy in range(y0, y1):
             ry = _axis(yy, cy, h, ymin)
             for xx in range(x0, x1):
                 rx = _axis(xx, cx, w, xmin)
-                if rx * rx + ry * ry <= r * r:
+                if rx * rx + ry * ry <= r * r and (er < 0 or (rx - ex) ** 2 + (ry - ey) ** 2 > er * er):
                     i = (yy % h) * w + xx % w
                     solid[i] = 1
                     gvx[i] = bvx - om * ry
@@ -754,22 +925,25 @@ def _pull(dx, dy, strength, soft):
 
 
 @njit(cache=True)
-def whirl(rx, ry, vx, vy, reach, spin, strength, soft, speed, grip, infall):
+def whirl(rx, ry, vx, vy, reach, spin, strength, soft, speed, grip, infall, edge):
     """A spinning super well's whirlpool on something at (rx, ry) from it moving at (vx, vy): inside its range
-    (reach) its sideways motion is driven towards spin x speed x closeness - but never past `infall` of the speed
-    that would hold it in orbit there, so it still spirals in - gripped grip x closeness^2 times as hard, where
-    closeness runs from 0 at the edge to 1 at the centre. It starts turning gently on entering and can hardly stay
-    still next to the core. spin > 0 turns clockwise on screen; motion in or out is left alone."""
+    (reach) its sideways motion is driven towards spin x speed - but never past `infall` of the speed that would hold
+    it in orbit there, so it still spirals in - gripped `grip` hard. Both fade in over the outer `edge` share of the
+    range, so it is at full strength through nearly all of it. Spun past 1 the cap rises with the spin, flinging
+    matter out into a ring. spin > 0 turns clockwise on screen; motion in or out is left alone. Returns the
+    acceleration and whether it is inside the range."""
     d2 = rx * rx + ry * ry
-    if d2 >= reach * reach or d2 < 1e-6:
-        return 0.0, 0.0
+    if d2 >= reach * reach:
+        return 0.0, 0.0, False
+    if d2 < 1e-6:
+        return 0.0, 0.0, True
     d = np.sqrt(d2)
-    close = 1.0 - d / reach
+    fade = min(1.0, (1.0 - d / reach) / max(edge, 1e-9))
     orbital = np.sqrt(strength * d2 / (d2 + soft * soft) ** 1.5)
-    target = min(abs(spin) * speed * close, infall * orbital) * (1.0 if spin >= 0 else -1.0)
+    target = min(abs(spin) * speed, infall * orbital * max(1.0, abs(spin))) * fade * (1.0 if spin >= 0 else -1.0)
     tx, ty = -ry / d, rx / d
-    a = grip * close * close * (target - (vx * tx + vy * ty))
-    return a * tx, a * ty
+    a = grip * fade * (target - (vx * tx + vy * ty))
+    return a * tx, a * ty, True
 
 
 @njit(cache=True)

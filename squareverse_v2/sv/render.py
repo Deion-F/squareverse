@@ -9,15 +9,17 @@ from .world import DIR_NAMES, DIRS, VIEW_MODES, Well
 
 HELP = [
     ("LMB / RMB / wheel", "pour / erase / brush size"),
+    ("shift+LMB", f"pour ghosts: feel gravity but pass through everything for {config.GHOST_TICKS} ticks"),
     ("1-5 / 6", "pour mass " + " / ".join(str(m) for m in config.POUR_MASSES)
      + " / random {}-{}".format(*config.RANDOM_MASS)),
     ("G / shift+G", "place planet well / repulsor: brush size, solid, weighs its area x pour mass"),
     ("F / shift+F", "place particle spawner: brush size sets the rate; shift locks it in place"),
     ("B", "place super well (swallows what touches its core; overlapping ones merge)"),
     ("shift+B", "collapse: dense mass becomes a super well, on/off"),
-    ("shift+drag", "move a well or spawner (wells attract each other; heavy ones are slow)"),
+    ("shift+drag on a body", "move a well or spawner (wells attract each other; heavy ones are slow)"),
     ("X", "delete nearest well or spawner"),
     (", / .", "lighter / heavier nearest well"),
+    ("; / '", "nearest super well spins slower / faster"),
     ("< / >", "all gravity weaker / stronger (collapse threshold follows)"),
     ("arrows, Q/E, 0", "global gravity direction, rotate, off"),
     ("S", "self-gravity on/off"),
@@ -119,16 +121,36 @@ class Renderer:
             self._draw_spin_arms(wl, center, radius)
             pygame.draw.circle(screen, (0, 0, 0), center, radius)
             pygame.draw.circle(screen, config.SUPER_RIM_COLOR, center, radius + 1, 1)
+        elif wl.wave >= 0:
+            # dissolving: drawn on its own surface with the swept part cut out and the wave front glowing
+            surf = pygame.Surface((2 * radius + 2, 2 * radius + 2), pygame.SRCALPHA)
+            local = (radius + 1, radius + 1)
+            self._draw_planet(surf, wl, local, radius)
+            cell = world.cell
+            ex, ey = local[0] + wl.wave_dx * cell, local[1] + wl.wave_dy * cell
+            er = wl.wave * cell
+            pygame.draw.circle(surf, (0, 0, 0, 0), (ex, ey), er)
+            steps = max(24, int(er))
+            for s in range(steps):
+                a0, a1 = 2 * math.pi * s / steps, 2 * math.pi * (s + 1) / steps
+                p0 = (ex + er * math.cos(a0), ey + er * math.sin(a0))
+                p1 = (ex + er * math.cos(a1), ey + er * math.sin(a1))
+                if all(math.hypot(px - local[0], py - local[1]) <= radius for px, py in (p0, p1)):
+                    pygame.draw.line(surf, config.DISSOLVE_COLOR, p0, p1, 2)
+            screen.blit(surf, (center[0] - local[0], center[1] - local[1]))
         else:
-            # a solid planet: filled body with craters turning with its spin, rim coloured by attract / repel
-            color = config.WELL_COLOR if wl.sign > 0 else config.REPULSOR_COLOR
-            pygame.draw.circle(screen, config.PLANET_COLOR, center, radius)
-            if radius >= 5:
-                for k, (dist, size) in enumerate(((0.55, 0.16), (0.6, 0.11), (0.3, 0.12), (0.72, 0.08))):
-                    a = wl.phase + k * 2.1
-                    pos = (center[0] + radius * dist * math.cos(a), center[1] + radius * dist * math.sin(a))
-                    pygame.draw.circle(screen, config.CRATER_COLOR, pos, max(1, int(radius * size)))
-            pygame.draw.circle(screen, color, center, radius, 1)
+            self._draw_planet(screen, wl, center, radius)
+
+    def _draw_planet(self, surf, wl, center, radius):
+        """A solid planet: filled body with craters turning with its spin, rim coloured by attract / repel."""
+        color = config.WELL_COLOR if wl.sign > 0 else config.REPULSOR_COLOR
+        pygame.draw.circle(surf, config.PLANET_COLOR, center, radius)
+        if radius >= 5:
+            for k, (dist, size) in enumerate(((0.55, 0.16), (0.6, 0.11), (0.3, 0.12), (0.72, 0.08))):
+                a = wl.phase + k * 2.1
+                pos = (center[0] + radius * dist * math.cos(a), center[1] + radius * dist * math.sin(a))
+                pygame.draw.circle(surf, config.CRATER_COLOR, pos, max(1, int(radius * size)))
+        pygame.draw.circle(surf, color, center, radius, 1)
 
     def _draw_spin_arms(self, wl, center, core):
         """Three spiral arms round a super well's core, trailing like a whirlpool and turning with its spin, each
@@ -206,9 +228,11 @@ class Renderer:
              f"   merge {on(world.merge_on)}   split {on(world.split_on)}   lean {on(world.lean_on)}"
              f"   pour mass {pour_label(app.pour_mass)}", config.FG),
             (f"wells {sum(not wl.is_super for wl in world.wells)}   spawners {len(world.spawners)}"
+             f"   ghosts {world.ghost_count():,} (mass {world.ghost_mass():,})"
              f"   super wells {supers}"
              f" holding {world.super_mass():,}   collapse {on(world.collapse_on)}"
-             f" at {world.collapse_threshold():,.0f} mass", config.FG),
+             f" at {world.collapse_threshold():,.0f} mass   explode at {config.SUPER_EXPLODE_MASS:,}"
+             f" ({world.explosions} so far)   planets formed {world.planets_formed}", config.FG),
             (f"last tick: moved {s[0]:,}  collisions {s[1]:,}  merges {s[2]:,}  splits {s[3]:,}  sinks {s[4]:,}"
              f"  absorbed {s[5]:,}", config.DIM),
         ]
@@ -246,7 +270,7 @@ class Renderer:
         lines = [
             (f"{kind}   mass {wl.mass:,.0f}   cell ({wl.x:.0f}, {wl.y:.0f})", config.FG),
             (f"v ({wl.vx:+.3f}, {wl.vy:+.3f})   mobility {wl.mobility():.3f}", config.FG),
-            (f"range {world.well_range(wl):.0f} cells   spin {abs(wl.spin):.2f} "
+            (f"range {world.well_range(wl):.0f} cells   spin {abs(wl.spin):.2f} (; / ') "
              f"{'clockwise' if wl.spin > 0 else 'counterclockwise'}" if wl.is_super else
              f"spin {abs(wl.omega) * config.FPS:.2f} rad/s {'clockwise' if wl.omega > 0 else 'counterclockwise'}   "
              f"reach {world.reach(wl):.0f} cells", config.DIM),

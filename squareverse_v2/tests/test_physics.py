@@ -262,10 +262,11 @@ def test_super_well_swallows_wells():
     w = make_world(pw=400, ph=200)
     sw = w.add_super_well(200, 100, 100000)
     w.add_well(160, 100, 2000.0)
-    w.add_super_well(250, 100, 6000)
+    other = w.add_super_well(250, 100, 6000)
+    sw.spin = other.spin = 1.0                       # faster spin would fling the planet into orbit
     run(w, 300)
     assert w.wells == [sw]
-    assert sw.mass + w.total_mass() == 108000      # the super well merger spat some out as particles
+    assert sw.mass + w.total_mass() == pytest.approx(108000)   # the super well merger spat some out as particles
 
 
 def test_wells_feel_particles_with_self_gravity():
@@ -396,6 +397,7 @@ def test_global_orbit_carries_wells():
     w = make_world(pw=400, ph=400)
     wl = w.add_well(300, 200, 1000.0)                # 50 cells right of the centre
     w.set_orbit(1)
+    w.orbit_speed = 0.005                            # slow enough that it doesn't get halfway round
     run(w, 100)
     assert wl.vy > 0                                 # clockwise on screen: right of centre moves down
 
@@ -403,8 +405,8 @@ def test_global_orbit_carries_wells():
 def test_colliding_planets_rebound_shed_debris_and_shrink():
     w = make_world(pw=600, ph=400)
     w.merge_on = w.split_on = w.collapse_on = False
-    a = w.add_well(200, 200, 60000.0, radius=12.0, vx=1.5)     # heading right
-    b = w.add_well(400, 200, 30000.0, radius=8.0, vx=-1.5)     # half as heavy, heading left
+    a = w.add_well(200, 200, 60000.0, radius=24.0, vx=1.5)     # heading right
+    b = w.add_well(400, 200, 30000.0, radius=16.0, vx=-1.5)     # half as heavy, heading left
     ra, rb, ma, mb = a.radius, b.radius, a.mass, b.mass
     before = ma + mb
     hit = False
@@ -503,7 +505,7 @@ def test_spawner_rate_scales_with_its_circle():
         w.merge_on = w.split_on = False
         sp = w.add_spawner(200, 200, radius_px, locked=True)
         run(w, 100)
-        counts.append(w.particle_count())
+        counts.append(w.particle_count() + w.ghost_count())
         assert counts[-1] == pytest.approx(100 * sp.rate, rel=0.25)
     assert counts[1] == pytest.approx(4 * counts[0], rel=0.3)
 
@@ -524,7 +526,7 @@ def test_locked_spawner_stays_put():
     sp = w.add_spawner(100, 100, 8, locked=True)
     run(w, 40)
     assert (sp.x, sp.y, sp.vx, sp.vy) == (50.0, 50.0, 0.0, 0.0)
-    assert w.particle_count() > 0
+    assert w.ghost_count() > 0
 
 
 def test_super_well_deletes_spawner():
@@ -533,9 +535,9 @@ def test_super_well_deletes_spawner():
     w.add_spawner(260, 200, 4)
     run(w, 100)
     assert not w.spawners
-    n = w.particle_count()
+    n = w.particle_count() + w.ghost_count()
     run(w, 20)
-    assert w.particle_count() <= n                   # nothing new pours in
+    assert w.particle_count() + w.ghost_count() <= n   # nothing new pours in
 
 
 def test_spawner_random_masses():
@@ -543,7 +545,7 @@ def test_spawner_random_masses():
     w.merge_on = w.split_on = False
     w.add_spawner(200, 200, 30, pour_mass=(5, 9), locked=True)
     run(w, 30)
-    m = w.mass[w.mass > 0]
+    m = w.ghost_m
     assert m.min() == 5 and m.max() == 9
 
 
@@ -666,6 +668,7 @@ def test_global_orbit_keeps_everything_moving_without_piling_in_the_middle():
     a = rng.uniform(0, 2 * np.pi, n)
     w.place_many(np.round(150 + r * np.cos(a)), np.round(150 + r * np.sin(a)), rng.choice([1, 4, 16], n))
     w.set_orbit(1)
+    w.orbit_speed = 0.005                            # (rad/tick) the default edge speed would spin this small disc fast
     run(w, 600)
     idx = np.nonzero(w.mass)[0]
     r = np.hypot(idx % w.w - w.w / 2, idx // w.w - w.h / 2)
@@ -675,7 +678,7 @@ def test_global_orbit_keeps_everything_moving_without_piling_in_the_middle():
     assert (r < 30).mean() < 1.5 * near              # no pile in the middle
 
 
-def test_whirlpool_is_gentle_at_the_edge_and_overwhelming_at_the_core():
+def test_whirlpool_is_strong_through_its_range_and_stops_at_the_edge():
     w = make_world(pw=600, ph=600)
     w.merge_on = w.split_on = w.collapse_on = False
     sw = w.add_super_well(300, 300, 1000000)
@@ -683,13 +686,284 @@ def test_whirlpool_is_gentle_at_the_edge_and_overwhelming_at_the_core():
     w.held = sw
     w.rebuild_field()
     reach = w.well_range(sw)
-    near, edge = 150 + sw.core() + 4, 150 + 0.9 * reach
-    w.place_many([round(near), round(edge)], [150, 150], [1, 1])
-    run(w, 2)                                        # (the one beside the core is swallowed soon after)
+    inner, outer = 150 + 0.75 * reach, 150 + reach + 3
+    w.place_many([round(inner), round(outer)], [150, 150], [1, 1])
+    run(w, 2)
     idx = np.nonzero(w.mass)[0]
-    assert idx.size == 2
     x = idx % w.w
-    near_v = w.kin[idx[np.argmin(x)], 1]             # right of the centre, clockwise = moving down
-    edge_v = w.kin[idx[np.argmax(x)], 1]
-    assert near_v > 0.7                              # whirled hard straight away beside the core
-    assert 0 <= edge_v < 0.01                        # barely touched near the edge of its range
+    inner_v = w.kin[idx[np.argmin(x)], 1]            # right of the centre, clockwise = moving down
+    outer_v = w.kin[idx[np.argmax(x)], 1]
+    assert inner_v > 0.5                             # whirled hard three quarters of the way out
+    assert abs(outer_v) < 0.05                       # outside the dotted circle only gravity acts
+
+
+def test_clump_inside_whirlpool_keeps_turning():
+    w = make_world(pw=600, ph=600)
+    w.merge_on = w.split_on = w.collapse_on = False
+    sw = w.add_super_well(300, 300, 1000000)
+    sw.spin = 1.0
+    w.held = sw
+    w.rebuild_field()
+    reach = w.well_range(sw)
+    x0 = round(150 + 0.4 * reach)
+    xs, ys = np.meshgrid(np.arange(x0, x0 + 20), np.arange(140, 160))
+    w.place_many(xs.ravel(), ys.ravel(), 16)
+    run(w, 200)
+    inside = np.nonzero(w.mass)[0]
+    ix, iy = inside % w.w - 150, inside // w.w - 150
+    inside = inside[np.hypot(ix, iy) < 0.9 * reach]
+    assert inside.size > 50
+    assert np.mean(w.flag[inside]) > 0.9             # nothing in the whirlpool falls asleep
+    assert np.mean(np.hypot(w.kin[inside, 0], w.kin[inside, 1]) > 0.2) > 0.8   # and almost all of it moves
+
+
+def test_small_planet_shatters_into_particles_holding_its_mass():
+    w = make_world(pw=600, ph=400)
+    w.merge_on = w.split_on = w.collapse_on = False
+    big = w.add_well(200, 200, 60000.0, radius=24.0, vx=1.0)
+    small = w.add_well(400, 200, 8000.0, radius=6.0, vx=-1.0)
+    before = big.mass + small.mass
+    for _ in range(100):
+        w.step()
+        if small not in w.wells:
+            break
+    assert w.wells == [big]                          # the big one bounced, the small one broke up
+    assert big.vx < 0.7                              # slowed by the hit (7.5x heavier: it keeps going)
+    assert big.mass + w.total_mass() == pytest.approx(before)
+    assert w.particle_count() > 20 and len(np.unique(w.mass[w.mass > 0])) > 5   # many, of random masses
+    check_consistent(w)
+
+
+def test_planets_bounce_hard():
+    w = make_world(pw=600, ph=400)
+    w.merge_on = w.split_on = w.collapse_on = False
+    config.PLANET_EJECT, saved = 0.0, config.PLANET_EJECT
+    try:
+        a = w.add_well(200, 200, 30000.0, radius=24.0, vx=1.0)
+        b = w.add_well(400, 200, 30000.0, radius=24.0, vx=-1.0)
+        run(w, 60)
+    finally:
+        config.PLANET_EJECT = saved
+    assert a.vx < -0.9 and b.vx > 0.9                # they come back nearly as fast as they went in
+
+
+def test_planet_touching_super_well_dissolves_in_a_wave():
+    w = make_world(pw=600, ph=400)
+    w.merge_on = w.split_on = w.collapse_on = False
+    sw = w.add_super_well(200, 200, 50000)
+    sw.spin = 0.0
+    w.held = sw
+    pl = w.add_well(200 + 2 * (sw.core() + 15.5), 200, 30000.0, radius=15.0)
+    before = sw.mass + pl.mass
+    started = None
+    for t in range(200):
+        w.step()
+        if pl.wave >= 0 and started is None:
+            started = t
+            mass0 = pl.mass
+        if started is not None and t == started + 5:
+            assert pl in w.wells and 0 < pl.mass < mass0   # partly dissolved: a wave, not all at once
+        if pl not in w.wells:
+            break
+    assert started is not None and pl not in w.wells
+    assert sw.mass + w.total_mass() == pytest.approx(before, abs=1)
+    check_consistent(w)
+
+
+def test_super_well_spin_keys_scale_and_cap():
+    w = make_world()
+    sw = w.add_super_well(100, 80, 50000)
+    sw.spin = -1.0
+    for _ in range(50):
+        w.scale_spin(sw, config.SUPER_SPIN_STEP)
+    assert sw.spin == -config.SUPER_SPIN_MAX         # faster, still counterclockwise, capped
+    for _ in range(100):
+        w.scale_spin(sw, 1 / config.SUPER_SPIN_STEP)
+    assert sw.spin == pytest.approx(-0.05)
+
+
+@pytest.mark.parametrize("speed, expect", [(0.5, False), (config.VMAX * 0.9, True)])
+def test_merge_and_split_only_in_fast_collisions(speed, expect):
+    config.MERGE_CHANCE, saved = 1.0, config.MERGE_CHANCE      # every qualifying collision merges
+    merges = splits = 0
+    try:
+        for seed in range(20):
+            w = make_world(seed=seed)
+            w.merge_on = w.split_on = True
+            w.place_many([40, 50], [40, 40], [16, 16], [speed, 0.0], [0.0, 0.0])   # one flies into the other
+            for _ in range(30):
+                w.step()
+                merges += w.stats[2]
+                splits += w.stats[3]
+    finally:
+        config.MERGE_CHANCE = saved
+    if expect:
+        assert merges > 0 and splits > 0
+    else:
+        assert merges == 0 and splits == 0           # a slow touch just pushes
+
+
+def test_super_well_explodes_past_the_threshold_and_releases_all_its_mass():
+    w = make_world(pw=1200, ph=800)
+    w.merge_on = w.split_on = False
+    w.collapse_on = True
+    sw = w.add_super_well(600, 400, config.SUPER_EXPLODE_MASS - 1000)
+    w.place_many(np.arange(290, 310), np.full(20, 200), 100)     # 2,000 more falls in and tips it over
+    before = sw.mass + w.total_mass()
+    for _ in range(300):
+        w.step()
+        if w.explosions:
+            break
+    assert w.explosions == 1 and not any(wl.is_super for wl in w.wells)
+    assert w.total_mass() == pytest.approx(before)    # every bit of it came back out as particles
+    assert w.particle_count() > 5000
+    run(w, config.SUPER_EXPLODE_CALM // 2)
+    assert not any(wl.is_super for wl in w.wells)    # the debris isn't collapsed straight back
+    check_consistent(w)
+
+
+def test_ghosts_pass_through_particles_and_land_after_their_time():
+    w = make_world()
+    w.merge_on = w.split_on = False
+    w.set_gravity(0)                                 # down
+    xs, ys = np.meshgrid(np.arange(30, 70), np.arange(50, 60))
+    w.place_many(xs.ravel(), ys.ravel(), 4)          # a slab in the way
+    w.pour_ghosts(100, 40, 10, 16)                   # above it (pixels: cell 2)
+    n_ghosts, ghost_mass, mass0 = w.ghost_count(), w.ghost_mass(), w.total_mass()
+    assert n_ghosts > 0 and w.total_mass() == mass0  # ghosts aren't on the grid
+    run(w, 40)
+    assert (w.ghost_y > 60).any()                    # fallen through the slab
+    run(w, config.GHOST_TICKS)
+    assert w.ghost_count() == 0                      # landed
+    assert w.total_mass() == mass0 + ghost_mass
+    check_consistent(w)
+
+
+def test_ghosts_dont_attract_each_other_or_collapse():
+    w = make_world(pw=400, ph=320)
+    w.sg_on = True
+    w.collapse_on = True
+    m = int(np.ceil(5 * w.collapse_threshold() / 100))
+    w.pour_ghosts(200, 160, 12, m)                   # far more than the collapse threshold, all in one spot
+    assert w.ghost_mass() > w.collapse_threshold()
+    x0, y0 = w.ghost_x.copy(), w.ghost_y.copy()
+    run(w, config.GHOST_TICKS // 2)
+    assert np.allclose(w.ghost_x, x0) and np.allclose(w.ghost_y, y0)   # no pull between ghosts: they stay put
+    assert not w.wells                               # and nothing collapsed
+
+
+def test_super_well_swallows_ghosts():
+    w = make_world(pw=400, ph=320)
+    sw = w.add_super_well(200, 160, 200000)
+    sw.spin = 0.0
+    w.held = sw
+    w.pour_ghosts(260, 160, 6, 8)
+    before = sw.mass + w.ghost_mass()
+    run(w, 150)
+    assert w.ghost_count() == 0 and w.total_mass() == 0
+    assert sw.mass == pytest.approx(before)
+
+
+def test_default_orbit_turns_the_edge_at_the_configured_speed():
+    for pw, ph in ((600, 400), (1920, 1000)):
+        w = make_world(pw=pw, ph=ph)
+        assert w.orbit_edge_speed() == pytest.approx(config.ORBIT_EDGE_SPEED)
+    w.resize(1200, 900)                              # the window grows: the edge still turns as fast
+    assert w.orbit_edge_speed() == pytest.approx(config.ORBIT_EDGE_SPEED)
+
+
+def layered_ball(w, cx, cy, radius, masses=(256, 32, 2), aspect=1.0):
+    """A packed disc (an ellipse when aspect != 1) of three layers by radius: core, mantle, crust."""
+    xs, ys = np.meshgrid(np.arange(w.w), np.arange(w.h))
+    d = np.hypot((xs - cx) / aspect, ys - cy) / radius
+    inside = d <= 1.0
+    m = np.where(d < 0.35, masses[0], np.where(d < 0.7, masses[1], masses[2]))
+    w.place_many(xs[inside], ys[inside], m[inside])
+    return int(m[inside].sum())
+
+
+def planet_world():
+    w = make_world(pw=400, ph=320)
+    w.merge_on = w.split_on = False
+    return w
+
+
+def test_round_layered_clump_becomes_a_planet():
+    w = planet_world()
+    mass = layered_ball(w, 100, 80, 10)
+    w.form_planets()
+    assert w.particle_count() == 0 and len(w.wells) == 1
+    pl = w.wells[0]
+    assert not pl.is_super and pl.mass == mass and pl.radius == pytest.approx(10, rel=0.1)
+    assert (pl.x, pl.y) == (pytest.approx(100, abs=0.5), pytest.approx(80, abs=0.5))
+
+
+@pytest.mark.parametrize("radius, masses, aspect", [
+    (10, (32, 32, 32), 1.0),                         # one material: no layers
+    (10, (256, 160, 2), 1.0),                        # core and mantle too alike (less than 2x apart)
+    (10, (256, 32, 2), 3.0),                         # layered but a long streak, not round
+    (2.5, (256, 32, 2), 1.0),                        # too small
+    (34, (256, 32, 2), 1.0),                         # too large
+])
+def test_clumps_that_dont_qualify_stay_particles(radius, masses, aspect):
+    w = planet_world()
+    layered_ball(w, 100, 80, radius, masses, aspect)
+    n = w.particle_count()
+    w.form_planets()
+    assert not w.wells and w.particle_count() == n
+
+
+def test_planet_forms_on_its_own_and_keeps_momentum():
+    w = planet_world()
+    w.collapse_on = False
+    layered_ball(w, 100, 80, 8)
+    w.kin[w.mass > 0, 0] = 0.3                       # the whole clump drifting right
+    run(w, config.PLANET_FORM_EVERY)
+    assert len(w.wells) == 1 and w.planets_formed == 1
+    assert w.wells[0].vx == pytest.approx(0.3, rel=0.05)
+
+
+def test_smooth_gradient_or_crust_round_a_planet_dont_form_planets():
+    w = planet_world()
+    xs, ys = np.meshgrid(np.arange(w.w), np.arange(w.h))
+    d = np.hypot(xs - 100, ys - 80) / 10
+    inside = d <= 1.0
+    w.place_many(xs[inside], ys[inside], np.round(256 ** (1 - d[inside])).astype(int))   # heavy to light, no dividers
+    w.form_planets()
+    assert not w.wells
+    w.clear()
+    w.add_well(200, 160, 50000.0, radius=4.0)        # a planet at cell (100, 80)...
+    w.rebuild_field()
+    ring = inside & (d > 0.45)
+    w.place_many(xs[ring], ys[ring], np.where(d[ring] < 0.65, 256, np.where(d[ring] < 0.85, 32, 2)))   # ...crusted
+    w.form_planets()
+    assert len(w.wells) == 1                         # the crust is hollow: it stays a crust
+
+
+def test_spawner_pours_ghosts_that_land_or_particles_when_asked():
+    w = make_world(pw=400, ph=400)
+    w.merge_on = w.split_on = False
+    sp = w.add_spawner(200, 200, 16, locked=True)
+    run(w, 20)
+    assert w.ghost_count() > 0 and w.particle_count() == 0
+    sp.ghosts = False
+    run(w, 20)
+    assert w.particle_count() > 0                    # ordinary particles straight away
+    sp.locked = False
+    w.remove_body(sp)
+    run(w, config.GHOST_TICKS)
+    assert w.ghost_count() == 0                      # every ghost landed
+
+
+def test_crowded_ghosts_all_land_without_lining_up():
+    w = make_world(pw=400, ph=400)
+    w.merge_on = w.split_on = False
+    xs, ys = np.meshgrid(np.arange(85, 115), np.arange(85, 115))
+    w.place_many(xs.ravel(), ys.ravel(), 1)          # a packed block...
+    w.add_ghosts(np.full(1500, 100.0), np.full(1500, 100.0), 1)   # ...with a crowd of ghosts in one cell inside it
+    w.ghost_age[:] = config.GHOST_TICKS
+    w.step()
+    assert w.ghost_count() == 0                      # none stuck for lack of room nearby
+    occ = (w.mass > 0).reshape(w.h, w.w)
+    thin = lambda o: (o[1:-1, 1:-1] & ~o[:-2, 1:-1] & ~o[2:, 1:-1]).sum()   # cells with nothing above or below
+    assert thin(occ) < 2 * thin(occ.T) + 20          # landed as a blob, not stacked in horizontal strips

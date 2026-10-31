@@ -27,12 +27,17 @@ SUPER_RIM_COLOR = (120, 110, 150)
 SUPER_RANGE_COLOR = (150, 140, 190)
 SUPER_SPIN_COLOR = (200, 175, 255)
 CRATER_COLOR = (40, 34, 48)
+GHOST_TINT = (190, 215, 255)           # ghosts are drawn see-through, washed towards this
+DISSOLVE_COLOR = (255, 140, 220)       # the wave front eating a planet that touched a super well
 
 # --- Particles ---------------------------------------------------------------
 MAX_MASS = 4096                        # merges stop here
 POUR_MASSES = (1, 4, 16, 64, 256)      # keys 1-5
 RANDOM_MASS = (1, 256)                 # key 6: each poured particle gets a uniform random mass in this range
 POUR_CHANCE = 0.25                     # per cell per frame under the brush (sand.py)
+GHOST_TICKS = 180                      # shift+click pours ghosts: they feel gravity (not each other's) but collide
+                                       #   with nothing for this many ticks, then land as ordinary particles in
+                                       #   the nearest free cells
 
 # --- Motion ------------------------------------------------------------------
 VMAX = 8.0                             # cells / tick
@@ -55,10 +60,11 @@ LEAN = 0.002                           #   particles it is a random push compara
 
 # --- Merging / splitting -----------------------------------------------------
 MERGE_ON = True
-STICK_SPEED = 0.4                      # contacts slower than this may merge
-MERGE_CHANCE = 0.01                    # per slow contact
+MERGE_SPEED = 1.0                      # only collisions at least this fast (closing speed, cells/tick) may merge
+MERGE_CHANCE = 0.05                    #   the two, with this chance per collision
 SPLIT_ON = True
-BIND = 0.6                             # impact energy per unit mass needed to break a particle
+SPLIT_SPEED = 2.0                      # only collisions at least this fast may break the particle that is hit...
+BIND = 0.6                             # ...and only with this much impact energy per unit of its mass
 SPLIT_KICK = 0.3                       # separation speed of the parts, x impact speed
 
 # --- Gravity -----------------------------------------------------------------
@@ -73,12 +79,26 @@ WELL_SOFTENING = 4.0                   # preset wells' size (cells)
 WELL_INERTIA_MASS = 20000.0            # wells accelerate (and top out) at VMAX x this / (this + their mass)
 PLANET_SPIN = (0.005, 0.02)            # a new planet spins at a random speed in this range (rad/tick), either way;
                                        #   its surface carries resting particles round with it
-PLANET_RESTITUTION = 0.8               # how much two colliding planets bounce back (0 = stick, 1 = perfect)
+PLANET_RESTITUTION = 1.0              # how much two colliding planets bounce back (0 = stick, 1 = perfect)
 PLANET_REST_SPEED = 0.02               # slower contacts are resting: held apart, no bounce, no debris
 PLANET_EJECT = 0.10                    # most debris a collision sheds, as a share of the pair's combined mass,
 PLANET_EJECT_SPEED = 1.0               #   reached at this impact speed (slower hits shed proportionally less)
 PLANET_LOSS_BIAS = 1.0                 # who loses it: each planet's share ~ its mass ^ -bias (1 = the smaller more)
 PLANET_DEBRIS_SPEED = 0.5              # debris flies out at 0.9 x impact speed + this (cells/tick)
+PLANET_SHATTER_RADIUS = 10.0           # a planet smaller than this (cells) shatters into particles of random masses
+PLANET_SHATTER_SPEED = 0.6             #   when it hits another, flying apart at up to this + half the impact speed
+PLANET_DISSOLVE_SPEED = 1.5            # a planet touching a super well's core dissolves into particles in a wave
+PLANET_DISSOLVE_KICK = 0.4             #   from the point of contact, moving this many cells/tick; the particles
+                                       #   are kicked this fast away from that point
+PLANET_FORM_ON = True                  # a round clump layered heavy core / lighter mantle / lightest crust becomes a
+PLANET_FORM_EVERY = 30                 #   planet holding its mass (checked every this many ticks). A clump is
+PLANET_FORM_RADIUS = (4.0, 30.0)       #   touching particles with space round them, between these sizes (radius
+                                       #   in cells of a disc of the same area: about 50 to 2,800 particles),
+PLANET_FORM_ROUND = 1.5                #   at most this elongated (long / short axis),
+PLANET_FORM_FILL = 0.8                 #   filling at least this share of the disc of the same area (not ragged),
+PLANET_FORM_LAYER_RATIO = 2.0          #   each layer's typical mass at least this x the next one out's,
+PLANET_FORM_PURITY = 0.75              #   with at least this share of each layer's particles in its own mass band
+PLANET_FORM_MIN_LAYER = 3              #   and at least this many particles in each layer
 WELL_REBUILD_MOVE = 0.5                # cells a well moves before the field is recomputed
 FIELD_BLOCK = 4                        # wells' pull is summed every this many cells and blended in between...
 FIELD_NEAR = 16.0                      # ...except within this many cells (or 3 softening lengths) of a well: exact
@@ -91,10 +111,12 @@ SG_EVERY = 4                           # ticks between self-gravity field update
 SG_SOFTENING = 1.0                     # in mesh blocks
 SG_WAKE = 0.002                        # field change that wakes sleeping particles in a block
 
+SPAWNER_GHOSTS = True                  # spawners pour ghost particles (they land as ordinary ones GHOST_TICKS on)
 SPAWNER_RATE = 0.005                   # particles per tick per cell of a spawner's circle (24 px brush: ~2/tick)
 WRAP = False                           # continuous borders (W): leaving one side enters from the opposite one
 ORBIT = 0                              # starting global orbit: 0 off, 1 clockwise, -1 counterclockwise (O)
-ORBIT_SPEED = 0.005                    # global orbit angular speed (rad/tick): 1.5 cells/tick 300 cells out
+ORBIT_EDGE_SPEED = 3.0                 # starting global orbit speed: cells/tick at the edge of the universe (half the
+                                       #   shorter side out); it turns at the same angular speed throughout
 ORBIT_MIN_SPEED = 0.5                  # it turns things at least this fast (cells/tick), even at the centre
 ORBIT_GRIP = 0.02                      # how quickly things are brought up to the orbiting speed (per tick)
 ORBIT_STEP = 1.25                      # K / L multiply or divide the orbit speed by this
@@ -109,17 +131,21 @@ SUPER_RANGE_FACTOR = 0.25              # a super well's range (the dotted circle
                                        #   space round within it, and overlapping ranges merge. Its pull goes on
 SUPER_SOFTENING = 0.25                 # its pull is softened over this share of its range, so infalling particles
                                        #   keep their sideways motion (under VMAX) and can miss the core or orbit
-SUPER_CORE = 1.5                       # absorbing core radius (cells) = SUPER_CORE + SUPER_CORE_GROWTH * sqrt(mass)
-SUPER_CORE_GROWTH = 0.004
-SUPER_SWIRL_SPEED = 6.0                # a spinning super well whirls everything inside its range: sideways speed
-SUPER_SWIRL_GRIP = 0.25                #   is driven towards spin x this x closeness (0 at the edge, 1 at the
-                                       #   centre), gripped this x closeness^2 hard (per tick): gentle on entering,
-                                       #   almost impossible to resist beside the core (0 speed = straight in)
+SUPER_CORE = 0.75                      # absorbing core radius (cells) = SUPER_CORE + SUPER_CORE_GROWTH * sqrt(mass)
+SUPER_CORE_GROWTH = 0.002
+SUPER_SWIRL_SPEED = 20.0               # a spinning super well whirls everything inside its range: sideways speed
+SUPER_SWIRL_GRIP = 0.25                #   is driven towards spin x this, gripped this hard (per tick), all the way
+SUPER_SWIRL_EDGE = 0.15                #   out, fading in only over this outer share of the range. Inside, nothing
+                                       #   sleeps or rests on friction: it moves unless matter blocks the way
 SUPER_SWIRL_INFALL = 0.98              # ...but never faster than this share of the speed that would hold it in
-                                       #   orbit there, so whirling matter still spirals in
-SUPER_SPIN_J = 5.0                     # spin of a new super well = the collapsing matter's angular momentum per
-SUPER_SPIN_MIN = 0.25                  #   unit mass / this, between this minimum and 1, in the way it was turning
-SUPER_SPIN_VISUAL = 0.12               # how fast its spiral arms turn at full spin (rad/tick)
+                                       #   orbit there (x its spin above 1), so whirling matter still spirals in;
+                                       #   a well spun up past 1 flings matter out into a ring instead
+SUPER_SPIN_NATURAL = 5.0               # spin of a super well formed by collapse, the way the matter was turning
+SUPER_SPIN_MAX = 7.0                   # ; / ' spin the nearest super well down / up by SUPER_SPIN_STEP, up to this
+SUPER_SPIN_PLACED = 5.0                # spin of a super well placed with B (either way)
+SUPER_SPIN_STEP = 1.25
+SUPER_SPIN_VISUAL = 0.4                # how fast its spiral arms turn at spin 1 (rad/tick)...
+SUPER_SPIN_VISUAL_MAX = 0.8            # ...and at most (faster would look like turning backwards)
 SUPER_MERGE_RATE = 0.08                # super wells whose ranges overlap close this share of their gap per tick,
 SUPER_MERGE_MIN_SPEED = 1.0            #   at least this fast (cells/tick), until their cores touch and they merge
 MERGE_EJECT = (0.01, 0.10)             # share of the combined mass a super well merger spits out as particles
@@ -129,3 +155,7 @@ MERGE_LOSS_BIAS = 1.0                  # who loses that mass: each well's share 
 COLLAPSE_EJECT = (0.10, 0.30)          # share of the collapsed mass a new super well spits out
 EJECT_MASS = (1, 256)                  # masses of the ejected particles (uniform)
 EJECT_ESCAPE = 1.2                     # ejected particles leave at this x the speed needed to escape the range
+SUPER_EXPLODE_MASS = 5_000_000         # a super well this heavy explodes, releasing all its mass as particles:
+SUPER_EXPLODE_PARTICLES = 20000        #   about this many (random masses), filling a disc about half full...
+SUPER_EXPLODE_SPEED = 5.0              #   ...flying out at up to this (cells/tick), fastest at its edge
+SUPER_EXPLODE_CALM = 180               # ticks after an explosion before anything can collapse again
