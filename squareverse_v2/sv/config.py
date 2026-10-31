@@ -91,15 +91,16 @@ STAR_SHATTER_SPEED = 0.6               #   when it hits another, flying apart at
 STAR_DISSOLVE_SPEED = 1.5              # a star touching a super well's core dissolves into particles in a wave
 STAR_DISSOLVE_KICK = 0.4               #   from the point of contact, moving this many cells/tick; the particles
                                        #   are kicked this fast away from that point
-STAR_FORM_ON = True                    # a round clump layered heavy core / lighter mantle / lightest crust becomes a
-STAR_FORM_EVERY = 30                   #   star holding its mass (checked every this many ticks). A clump is
-STAR_FORM_RADIUS = (4.0, 30.0)         #   touching particles with space round them, between these sizes (radius
-                                       #   in cells of a disc of the same area: about 50 to 2,800 particles),
-STAR_FORM_ROUND = 1.5                  #   at most this elongated (long / short axis),
-STAR_FORM_FILL = 0.8                   #   filling at least this share of the disc of the same area (not ragged),
-STAR_FORM_LAYER_RATIO = 2.0            #   each layer's typical mass at least this x the next one out's,
-STAR_FORM_PURITY = 0.75                #   with at least this share of each layer's particles in its own mass band
-STAR_FORM_MIN_LAYER = 3                #   and at least this many particles in each layer
+STAR_FORM_ON = True                    # a knot of matter with a heavy core inside a lighter envelope becomes a star
+STAR_FORM_EVERY = 60                   #   holding its mass (checked every this many ticks, round up to
+STAR_FORM_SEEDS = 12                   #   this many of the densest spots). A knot is the largest disc round a
+STAR_FORM_RADIUS = (4, 30)             #   spot, between these radii (cells: about 50 to 2,800 particles), that is
+STAR_FORM_FILL = 0.8                   #   at least this full, where the packing ends. Its core's typical mass
+STAR_FORM_LAYER_RATIO = 2.0            #   must be at least this x its envelope's,
+STAR_FORM_PURITY = 0.6                 #   with this share of each side's particles on its own side of the divide
+STAR_FORM_MIN_LAYER = 3                #   and at least this many particles on each side. None forms within this
+STAR_FORM_GAP = 8                      #   many cells of a star's ground, 3x its radius, or a super well's core,
+STAR_FORM_PER_CHECK = 1                #   and at most this many form per check
 WELL_REBUILD_MOVE = 0.5                # cells a well moves before the field is recomputed
 FIELD_BLOCK = 4                        # wells' pull is summed every this many cells and blended in between...
 FIELD_NEAR = 16.0                      # ...except within this many cells (or 3 softening lengths) of a well: exact
@@ -154,7 +155,7 @@ SUPER_MERGE_ACCEL = 0.0025             # super wells whose ranges overlap are dr
                                        #   grows as they near (a few seconds from first overlap to merging) ...
 SUPER_MERGE_MAX_SPEED = 3.0            #   ... up to this closing speed (cells/tick), until their cores touch and merge
 SUPER_MERGE_SPIRAL = 0.03              #   their sideways motion round each other fades by this share per tick
-MERGE_EJECT = (0.01, 0.10)             # share of the combined mass a super well merger spits out as particles
+MERGE_EJECT = (0.002, 0.02)           # share of the combined mass a super well merger spits out as particles
 MERGE_LOSS_BIAS = 1.0                  # who loses that mass: each well's share ~ its mass ^ -bias. 1 = inversely
                                        #   to size (a well merging with one half its size loses half as much as
                                        #   it); 0 = equal shares; -1 = in proportion to size

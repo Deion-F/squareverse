@@ -335,7 +335,8 @@ def test_super_wells_with_overlapping_ranges_merge_and_eject():
     assert all(c2 >= c1 - 1e-9 for c1, c2 in zip(closing[:len(closing) // 2], closing[1:len(closing) // 2 + 1]))
     ejected = w.total_mass()
     assert a.mass + ejected == 800000
-    assert 0.01 * 800000 * 0.9 <= ejected <= 0.10 * 800000
+    lo, hi = config.MERGE_EJECT
+    assert lo * 800000 * 0.9 <= ejected <= hi * 800000
 
 
 def test_far_apart_super_wells_dont_merge():
@@ -956,8 +957,7 @@ def test_round_layered_clump_becomes_a_star():
 
 @pytest.mark.parametrize("radius, masses, aspect", [
     (10, (32, 32, 32), 1.0),                         # one material: no layers
-    (10, (256, 160, 2), 1.0),                        # core and mantle too alike (less than 2x apart)
-    (10, (256, 32, 2), 3.0),                         # layered but a long streak, not round
+    (10, (40, 32, 24), 1.0),                         # core and envelope too alike (less than 2x apart)
     (2.5, (256, 32, 2), 1.0),                        # too small
     (34, (256, 32, 2), 1.0),                         # too large
 ])
@@ -974,26 +974,56 @@ def test_star_forms_on_its_own_and_keeps_momentum():
     w.collapse_on = False
     layered_ball(w, 100, 80, 8)
     w.kin[w.mass > 0, 0] = 0.3                       # the whole clump drifting right
-    run(w, config.STAR_FORM_EVERY)
+    w.tick_count = config.STAR_FORM_EVERY - 5        # (nothing holds it together: check before it spreads)
+    run(w, 5)
     assert len(w.wells) == 1 and w.stars_formed == 1
     assert w.wells[0].vx == pytest.approx(0.3, rel=0.05)
 
 
-def test_smooth_gradient_or_crust_round_a_star_dont_form_stars():
+def test_smooth_gradient_counts_as_layered():
     w = star_world()
     xs, ys = np.meshgrid(np.arange(w.w), np.arange(w.h))
     d = np.hypot(xs - 100, ys - 80) / 10
     inside = d <= 1.0
-    w.place_many(xs[inside], ys[inside], np.round(256 ** (1 - d[inside])).astype(int))   # heavy to light, no dividers
+    w.place_many(xs[inside], ys[inside], np.round(256 ** (1 - d[inside])).astype(int))   # heavy to light
+    w.form_stars()
+    assert len(w.wells) == 1
+
+
+def test_a_knot_inside_a_larger_body_becomes_a_star():
+    w = star_world()
+    xs, ys = np.meshgrid(np.arange(60, 140), np.arange(60, 100))
+    w.place_many(xs.ravel(), ys.ravel(), 1)                     # a slab of light dust...
+    d = np.hypot(xs - 100, ys - 80)
+    w.mass.reshape(w.h, w.w)[ys[d < 4], xs[d < 4]] = 64        # ...with a heavy knot inside
+    w.quad.reshape(w.h, w.w, 4)[ys[d < 4], xs[d < 4]] = (16, 16, 16, 16)
+    # the slab is packed right out past the largest star size: no edge, so no knot...
     w.form_stars()
     assert not w.wells
-    w.clear()
+    w.mass.reshape(w.h, w.w)[(np.hypot(*np.meshgrid(np.arange(w.w) - 100, np.arange(w.h) - 80)) > 9)
+                             & (w.mass.reshape(w.h, w.w) > 0) & (np.arange(w.w)[None, :] % 3 == 0)] = 0
+    w.quad[w.mass == 0] = 0
+    w.form_stars()                                   # ...until thinned out round it
+    assert len(w.wells) == 1 and w.wells[0].radius < 16   # the knot, not the whole slab
+    check_consistent(w)
+
+
+def test_no_star_forms_in_or_next_to_another_star():
+    w = star_world()
+    xs, ys = np.meshgrid(np.arange(w.w), np.arange(w.h))
+    d = np.hypot(xs - 100, ys - 80) / 10
     w.add_well(200, 160, 50000.0, radius=4.0)        # a star at cell (100, 80)...
     w.rebuild_field()
-    ring = inside & (d > 0.45)
+    ring = (d <= 1.0) & (d > 0.45)
     w.place_many(xs[ring], ys[ring], np.where(d[ring] < 0.65, 256, np.where(d[ring] < 0.85, 32, 2)))   # ...crusted
     w.form_stars()
     assert len(w.wells) == 1                         # the crust is hollow: it stays a crust
+    layered_ball(w, 100 + 4 * 3 + 6, 80, 5)          # a layered knot just past the crust, close to the star
+    w.form_stars()
+    assert len(w.wells) == 1
+    layered_ball(w, 170, 80, 6)                      # one well clear of it forms
+    w.form_stars()
+    assert len(w.wells) == 2
 
 
 def test_spawner_pours_ghosts_that_land_or_particles_when_asked():

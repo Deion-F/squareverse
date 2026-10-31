@@ -34,13 +34,16 @@ Press **H** in the app for the controls. F1–F4 load the presets (rain, disk, c
   from the point of contact (`STAR_DISSOLVE_*`), and the core swallows them as they reach it. Repulsors stay put and ignore the global
   gravity direction. Shift+drag moves any well, X deletes the nearest one, and `,` / `.` make the nearest well lighter
   or heavier. Hover a well to see its mass, speed and reach.
-* **Star formation:** every 30 ticks, a clump of touching particles with space round it becomes a star holding
-  its total mass, momentum and spin when it is layered like one: a heavy core, a lighter mantle and a lighter crust
-  still, each layer's typical mass at least 2× the next one out's, with a sharp divide between them (a smooth gradient
-  doesn't count) and most of each layer's particles in its own mass band. It must also be round (at most 1.5× as long
-  as it is wide, filling the disc of its area, solid in the middle) and between 4 and 30 cells in radius (about 50 to
-  2,800 particles). See `STAR_FORM_*`. To make one, pour a small heavy blob, then a lighter ring round it, then a
-  lighter ring still, with self-gravity on to hold it together.
+* **Star formation:** every 60 ticks, the densest knots of matter (up to 12, `STAR_FORM_SEEDS`) are checked, and a
+  knot that looks like a young star becomes one holding its total mass, momentum and spin. A knot is the largest disc
+  round a dense spot that is at least 80% packed, between 4 and 30 cells in radius (about 50 to 2,800 particles), where
+  the packing ends; it may be part of a larger body, such as an arm of a disk. It must be layered: a heavy core inside
+  a lighter envelope, the core's typical mass at least 2× the envelope's (a smooth gradient counts), with most of each
+  side's particles on its own side of the divide. No star forms within 8 cells of a star's ground or of three times its
+  radius (its crust), near a super well's core, or against a solid border (a pile on the floor isn't a star), and at
+  most one forms per check. See `STAR_FORM_*`. Scenes of one particle mass (like the cloud preset) can't form stars,
+  since nothing is layered. To make one by hand, pour a small heavy blob with a lighter ring round it, with
+  self-gravity on to hold it together.
 * **Super wells:** B places one (as heavy as a brush-sized well, and never lighter than the collapse threshold). It
   is a tiny black core that deletes every particle and super well touching it and adds their mass to its own. Its pull
   grows with that mass and follows the same law as every other mass, at any distance. Inside its dotted circle it
@@ -53,7 +56,8 @@ Press **H** in the app for the controls. F1–F4 load the presets (rain, disk, c
   matter faster than it would orbit and flings it out into a ring instead of drawing it in. When two super wells' dotted circles overlap, they are drawn
   together, slowly at first and ever faster as they near: the pull between them grows as their distance shrinks
   (`SUPER_MERGE_ACCEL`, up to `SUPER_MERGE_MAX_SPEED`, 3 cells/tick), and their motion round each other fades
-  (`SUPER_MERGE_SPIRAL`), so they spiral in and merge within a few seconds. The lighter one covers more of the gap. The merged well spits out 1–10% of their combined mass as particles, taken mostly from the smaller of the two
+  (`SUPER_MERGE_SPIRAL`), so they spiral in and merge within a few seconds. The lighter one covers more of the gap.
+  The merged well spits out 0.2–2% of their combined mass as particles (`MERGE_EJECT`), taken mostly from the smaller of the two
   (`MERGE_LOSS_BIAS`). A super well that reaches `SUPER_EXPLODE_MASS` (5,000,000) goes
   supernova: it vanishes and all of its mass leaves its spot as a ring of very heavy debris (ghosts of about 3,300
   mass, `SUPER_BLAST_HOT_MASS`) riding a shock front that starts at 6 cells/tick (`SUPER_BLAST_SPEED`) and slows to

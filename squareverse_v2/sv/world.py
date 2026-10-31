@@ -30,6 +30,16 @@ def super_core(mass):
     return config.SUPER_CORE + config.SUPER_CORE_GROWTH * math.sqrt(mass)
 
 
+def box_sum(a, r):
+    """Sum of a 2-D array over the (2r + 1)-square round each cell (cut off at the edges)."""
+    h, w = a.shape
+    s = np.zeros((h + 2 * r + 1, w + 2 * r + 1))
+    s[r + 1:r + 1 + h, r + 1:r + 1 + w] = a
+    s = s.cumsum(0).cumsum(1)
+    k = 2 * r + 1
+    return s[k:, k:] - s[:-k, k:] - s[k:, :-k] + s[:-k, :-k]
+
+
 @dataclass(eq=False, slots=True)
 class Blast:
     """A supernova's shock front: a ring round (x, y) at radius r (cells) slowing as it nears `reach`, pushing the
@@ -334,78 +344,93 @@ class World:
         self.changed_wells.append(near[0] if near else self.wells[-1])
 
     def form_stars(self):
-        """Turn every clump of particles that looks like a layered star (see layered()) into a star with its
-        total mass, momentum and spin, and the size of the clump."""
-        labels = np.zeros(self.n, np.int32)
-        if not kernels.label_clumps(self.mass, self.w, self.h, labels, np.zeros(self.n, np.int32)):
-            return
+        """Turn knots of matter that look like young stars into stars holding their total mass, momentum and spin.
+        A knot is found round each of the densest spots (up to STAR_FORM_SEEDS, apart from each other): the largest
+        disc round it, STAR_FORM_RADIUS cells across, that is packed (STAR_FORM_FILL) - so it is round and solid in
+        the middle - and where the packing ends. It may be part of a larger body, such as a filament. It must be
+        layered: a heavy core inside a lighter envelope (see layered()). None forms in or next to a star or
+        its crust, near a super well's core, or against a solid border, and at most STAR_FORM_PER_CHECK form at a time."""
         lo, hi = config.STAR_FORM_RADIUS
-        occ = np.nonzero(labels)[0]
-        lab = labels[occ]
-        counts = np.bincount(lab)
-        ok = (counts >= math.pi * lo * lo) & (counts <= math.pi * hi * hi)
-        occ, lab = occ[ok[lab]], lab[ok[lab]]
-        if not occ.size:
-            return
-        order = np.argsort(lab, kind="stable")
-        occ, lab = occ[order], lab[order]
-        for idx in np.split(occ, np.nonzero(np.diff(lab))[0] + 1):
-            if self.layered(idx):
-                self._form_star(idx)
-
-    def layered(self, idx):
-        """Whether the clump in cells idx is round and layered: a heavy core, a lighter mantle and a lighter crust
-        still, with a clear divide between them (the clump's size is checked by the caller)."""
-        xs, ys = (idx % self.w).astype(np.float64), (idx // self.w).astype(np.float64)
-        cx, cy = xs.mean(), ys.mean()
-        dx, dy = xs - cx, ys - cy
-        r_eq = math.sqrt(idx.size / math.pi)
-        # round: not elongated, and filling the disc of the same area rather than straggling out of it
-        cov = np.cov(np.vstack([dx, dy]))
-        lmin, lmax = np.linalg.eigvalsh(cov)
-        if lmin <= 0 or math.sqrt(lmax / lmin) > config.STAR_FORM_ROUND:
-            return False
-        r = np.hypot(dx, dy)
-        if (r <= r_eq).sum() < config.STAR_FORM_FILL * math.pi * r_eq * r_eq:
-            return False
-        # solid in the middle: not a crust round a star or a super well's core
-        core = max(1.5, 0.35 * r_eq)
-        if (r <= core).sum() < 0.9 * len(self._disk_cells(cx, cy, core)[0]):
-            return False
-        # layers: try dividing it at two radii; the typical (median) log mass must fall by the layer ratio at each
-        # divide, sharply (just inside it vs just outside it, not a gradual fall), and most particles of every
-        # layer must lie in that layer's own band (so a layer can't be a mix of its neighbours)
-        order = np.argsort(r)
-        lm = np.log(self.mass[idx[order]].astype(np.float64))
-        r = r[order] / r.max()
-        gap, k = math.log(config.STAR_FORM_LAYER_RATIO), config.STAR_FORM_MIN_LAYER
-        n = lm.size
-        for f1 in np.arange(0.1, 0.75, 0.05):
-            i1 = int(np.searchsorted(r, f1))
-            if i1 < k:
+        b, cw, ch = self.sg.block, self.sg.cw, self.sg.ch
+        rho = np.zeros(cw * ch)
+        kernels.bin_mass(self.mass, self.w, self.h, b, cw, rho)
+        dens = box_sum(rho.reshape(ch, cw), 1)           # mass round each block: heavy, packed knots stand out
+        apart, formed = -(-2 * hi // b), 0
+        for _ in range(config.STAR_FORM_SEEDS):
+            by, bx = np.unravel_index(int(np.argmax(dens)), dens.shape)
+            if dens[by, bx] <= 0.0:
+                break
+            dens[max(0, by - apart):by + apart + 1, max(0, bx - apart):bx + apart + 1] = 0.0
+            x, y = self._knot_centre(min(bx * b + b // 2, self.w - 1), min(by * b + b // 2, self.h - 1), 2 * b)
+            r = self._packed_radius(x, y, hi + 1)
+            if not lo <= r <= hi or self._near_body(x, y, r):
                 continue
-            for f2 in np.arange(f1 + 0.1, 0.95, 0.05):
-                i2 = int(np.searchsorted(r, f2))
-                if i2 - i1 < k or n - i2 < k:
-                    continue
-                a, b, c = lm[:i1], lm[i1:i2], lm[i2:]
-                ma, mb, mc = np.median(a), np.median(b), np.median(c)
-                if ma - mb < gap or mb - mc < gap:
-                    continue
-                if not (self._sharp(a, b, gap) and self._sharp(b, c, gap)):
-                    continue
-                t1, t2 = (ma + mb) / 2, (mb + mc) / 2
-                pure = config.STAR_FORM_PURITY
-                if ((a > t1).mean() >= pure and ((b > t2) & (b <= t1)).mean() >= pure
-                        and (c <= t2).mean() >= pure):
-                    return True
+            if not self.wrap and not (r < x < self.w - 1 - r and r < y < self.h - 1 - r):
+                continue                                 # cut off by a solid border: a pile, not a knot
+            gx, gy, dx, dy = self._disk_cells(x, y, r)
+            idx = gy * self.w + gx
+            keep = self.mass[idx] > 0
+            if self.layered(idx[keep], np.hypot(dx, dy)[keep] / r):
+                self._form_star(idx[keep])
+                formed += 1
+                if formed >= config.STAR_FORM_PER_CHECK:
+                    break
+
+    def _knot_centre(self, x, y, r):
+        """The cell at the centre of mass of the particles within r of (x, y), refined twice (a mean shift)."""
+        for _ in range(2):
+            gx, gy, dx, dy = self._disk_cells(x, y, r)
+            m = self.mass[gy * self.w + gx].astype(np.float64)
+            if m.sum() <= 0:
+                break
+            x = int(round(x + (dx * m).sum() / m.sum())) % self.w if self.wrap else \
+                min(max(int(round(x + (dx * m).sum() / m.sum())), 0), self.w - 1)
+            y = int(round(y + (dy * m).sum() / m.sum())) % self.h if self.wrap else \
+                min(max(int(round(y + (dy * m).sum() / m.sum())), 0), self.h - 1)
+        return x, y
+
+    def _packed_radius(self, x, y, r_max):
+        """The largest radius (cells, whole numbers up to r_max) of a disc round (x, y) at least STAR_FORM_FILL full
+        of particles, or 0."""
+        gx, gy, dx, dy = self._disk_cells(x, y, r_max)
+        ring = np.ceil(np.hypot(dx, dy)).astype(np.int64)            # the smallest whole radius each cell is in
+        cells = np.cumsum(np.bincount(ring, minlength=r_max + 1))
+        full = np.cumsum(np.bincount(ring, weights=self.mass[gy * self.w + gx] > 0, minlength=r_max + 1))
+        packed = full[1:r_max + 1] >= config.STAR_FORM_FILL * np.maximum(cells[1:r_max + 1], 1)
+        return r_max if packed.all() else int(np.argmin(packed))
+
+    def _near_body(self, x, y, r):
+        """Whether a knot of radius r at (x, y) would touch a star's ground, or come within STAR_FORM_GAP of the crust
+        and surroundings of a star (three times its radius) or of a super well's core."""
+        gx, gy, _, _ = self._disk_cells(x, y, r + config.STAR_FORM_GAP)
+        idx = gy * self.w + gx
+        if self.solid[idx].any() or self.hole[idx].any():
+            return True
+        for wl in self.wells:
+            reach = wl.core() if wl.is_super else 3 * wl.radius
+            if self.distance(wl.x, wl.y, x, y) < reach + r + config.STAR_FORM_GAP:
+                return True
         return False
 
-    @staticmethod
-    def _sharp(inner, outer, gap):
-        """Whether log masses fall by gap right at the divide between two layers (each sorted by radius)."""
-        s = max(config.STAR_FORM_MIN_LAYER, min(inner.size, outer.size) // 4)
-        return np.median(inner[-s:]) - np.median(outer[:s]) >= gap
+    def layered(self, idx, r):
+        """Whether a knot (cells idx, r = their distance from its middle as a share of its radius) has a heavy core
+        inside a lighter envelope: dividing it at some radius, the core's typical (median) mass is at least
+        STAR_FORM_LAYER_RATIO x the envelope's, with STAR_FORM_PURITY of each side's particles on its own side of the
+        mass between them, and at least STAR_FORM_MIN_LAYER particles in each."""
+        lm = np.log(self.mass[idx].astype(np.float64))
+        gap, k, pure = math.log(config.STAR_FORM_LAYER_RATIO), config.STAR_FORM_MIN_LAYER, config.STAR_FORM_PURITY
+        for f in np.arange(0.3, 0.75, 0.05):
+            inner = r <= f
+            a, b = lm[inner], lm[~inner]
+            if a.size < k or b.size < k:
+                continue
+            ma, mb = np.median(a), np.median(b)
+            if ma - mb < gap:
+                continue
+            t = (ma + mb) / 2
+            if (a > t).mean() >= pure and (b <= t).mean() >= pure:
+                return True
+        return False
 
     def _form_star(self, idx):
         m = self.mass[idx].astype(np.float64)
