@@ -6,7 +6,7 @@ Everything here is compiled to machine code once and cached on disk (cache=True)
 
 kin[i] = (vx, vy, ox, oy): velocity in cells/tick and the sub-cell offset from the cell centre, so slow velocities
 still add up to moves. quad[i] = children per quadrant (up-left, up-right, down-left, down-right); they always sum
-to mass[i]. solid[i] = 1 inside a normal well's body (a planet): nothing can enter it. hole[i] = k + 1 when cell
+to mass[i]. solid[i] = 1 inside a normal well's body (a star): nothing can enter it. hole[i] = k + 1 when cell
 i is inside the core of super well k: a particle that enters it is absorbed.
 With wrap on, the borders are continuous: x = -1 is x = w - 1, and so on.
 stamp[i] = 2 * tick + blocked for the last tick the particle was simulated in, so the kernel can tell
@@ -505,10 +505,10 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
                 moved = True
                 continue
 
-            # Occupied by a particle or a planet's solid ground. Velocities below are relative to what is in the
+            # Occupied by a particle or a star's solid ground. Velocities below are relative to what is in the
             # way, so particles flowing together (an orbiting ring) don't brake each other; a jammed particle,
             # like the ground, counts as standing still, whatever velocity it holds.
-            if rock:                                     # the ground moves with its planet's spin
+            if rock:                                     # the ground moves with its star's spin
                 mk = np.int64(0)
                 kvx, kvy = np.float64(gvx[j]), np.float64(gvy[j])
             else:
@@ -806,6 +806,43 @@ def render_ghosts(gx, gy, gm, w, h, mass_lut, tint, rgb):
             rgb[i, c] = (np.int32(rgb[i, c]) + col) >> 1
 
 
+@njit(cache=True)
+def blast_push(cx, cy, r_in, r_out, reach, push, drag, vcap, w, h, mass, kin, stamp, flag, solid, wrap):
+    """A supernova's shock front sweeping from r_in to r_out round (cx, cy): every particle in that ring is given an
+    outward speed push * drag * (1 - r / reach) (at most vcap), unless it is already moving outwards faster. Particles
+    already inside r_in lose `drag` of their outward speed each tick, so a shoved one coasts about `push` cells (less
+    further out) before it stops. Returns how many particles were shoved."""
+    shoved = 0
+    x0, x1, xmin = _span(cx, r_out, w, wrap)
+    y0, y1, ymin = _span(cy, r_out, h, wrap)
+    for yy in range(y0, y1):
+        dy = _axis(yy, cy, h, ymin)
+        for xx in range(x0, x1):
+            dx = _axis(xx, cx, w, xmin)
+            d2 = dx * dx + dy * dy
+            if d2 > r_out * r_out or d2 < 1.0:
+                continue
+            i = (yy % h) * w + xx % w
+            if mass[i] == 0:
+                continue
+            d = np.sqrt(d2)
+            ux, uy = dx / d, dy / d
+            vr = kin[i, 0] * ux + kin[i, 1] * uy
+            if d >= r_in:
+                v = min(push * drag * max(0.0, 1.0 - d / reach), vcap)
+                if vr < v:
+                    kin[i, 0] += (v - vr) * ux
+                    kin[i, 1] += (v - vr) * uy
+                    stamp[i] &= ~np.uint32(1)            # no longer wedged
+                    wake_around(i, w, h, mass, flag, wrap)
+                    shoved += 1
+            elif vr > 0.0:
+                kin[i, 0] -= drag * vr * ux
+                kin[i, 1] -= drag * vr * uy
+                flag[i] = 1
+    return shoved
+
+
 # --- super wells -------------------------------------------------------------------------------------
 
 @njit(cache=True)
@@ -863,7 +900,7 @@ def mark_solid(bodies, w, h, solid, gvx, gvy, mass, kin, quad, shade, stamp, fla
     """Mark every normal well's body (rows of x, y, radius, spin, vx, vy, eaten dx, eaten dy, eaten radius) as solid
     ground moving with it - its own velocity plus its spin (rad/tick, > 0 clockwise on screen) - and push any
     particle inside it straight out, away from that well's centre, into the first free cell beyond the surface. A
-    dissolving planet has lost the part within the eaten radius of (its centre + eaten offset); < 0 = none."""
+    dissolving star has lost the part within the eaten radius of (its centre + eaten offset); < 0 = none."""
     solid[:] = 0
     for k in range(bodies.shape[0]):
         cx, cy, r, om, bvx, bvy = bodies[k, 0], bodies[k, 1], bodies[k, 2], bodies[k, 3], bodies[k, 4], bodies[k, 5]

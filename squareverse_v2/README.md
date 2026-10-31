@@ -16,26 +16,30 @@ python -m pytest                   # physics invariants
 
 Press **H** in the app for the controls. F1–F4 load the presets (rain, disk, cloud, binary).
 
-* **Planets (wells):** G places a well and Shift+G a repulsor, the size of the brush circle (mouse wheel). A well is
-  a solid, spinning planet (its craters turn with it, and its surface carries resting particles round). Particles
+* **Stars (wells):** G places a well and Shift+G a repulsor, the size of the brush circle (mouse wheel). A well is
+  a solid, spinning star: a glowing disc with a corona, coloured by its mass (red-orange when light, through yellow and
+  white to blue-white when very heavy; a repulsor glows cold blue), its sunspots turning with it. Its surface carries
+  resting particles round. Particles
   can't enter its body: they bounce off, slide around and rest on its surface, building a
   crust. Particles already inside when it is placed, or when it moves over them, are pushed out to its surface. A
   well has a mass: its circle's area × the pour mass × `WELL_DENSITY` (64). It pulls with the same constant `G` as
   particles, so a well poured at mass 64 holds its own in a heavy scene. Wells attract each other and, with
-  self-gravity on, are pulled by the particles. The heavier a well is, the more slowly it accelerates and moves.
-  Colliding planets bounce apart elastically (`PLANET_RESTITUTION` 1.0) and shed debris from the point of contact,
-  the smaller losing more; each shrinks to keep its density (`PLANET_*` settings). A planet smaller than
-  `PLANET_SHATTER_RADIUS` (10 cells) shatters instead: it breaks into particles of random masses adding up to its
-  mass, which fly apart. A planet that touches a super well's core dissolves into particles in a wave that spreads
-  from the point of contact (`PLANET_DISSOLVE_*`), and the core swallows them as they reach it. Repulsors stay put and ignore the global
+  self-gravity on, are pulled by the particles. Gravity accelerates a star as it does a particle, whatever its mass
+  (up to `VMAX`), so a star swings into orbit round a super well or another star instead of crawling. Only the drag of
+  the global orbit and of super wells' whirlpools moves heavy stars more slowly (`WELL_INERTIA_MASS`).
+  Colliding stars bounce apart elastically (`STAR_RESTITUTION` 1.0) and shed debris from the point of contact,
+  the smaller losing more; each shrinks to keep its density (`STAR_*` settings). A star smaller than
+  `STAR_SHATTER_RADIUS` (10 cells) shatters instead: it breaks into particles of random masses adding up to its
+  mass, which fly apart. A star that touches a super well's core dissolves into particles in a wave that spreads
+  from the point of contact (`STAR_DISSOLVE_*`), and the core swallows them as they reach it. Repulsors stay put and ignore the global
   gravity direction. Shift+drag moves any well, X deletes the nearest one, and `,` / `.` make the nearest well lighter
   or heavier. Hover a well to see its mass, speed and reach.
-* **Planet formation:** every 30 ticks, a clump of touching particles with space round it becomes a planet holding
+* **Star formation:** every 30 ticks, a clump of touching particles with space round it becomes a star holding
   its total mass, momentum and spin when it is layered like one: a heavy core, a lighter mantle and a lighter crust
   still, each layer's typical mass at least 2× the next one out's, with a sharp divide between them (a smooth gradient
   doesn't count) and most of each layer's particles in its own mass band. It must also be round (at most 1.5× as long
   as it is wide, filling the disc of its area, solid in the middle) and between 4 and 30 cells in radius (about 50 to
-  2,800 particles). See `PLANET_FORM_*`. To make one, pour a small heavy blob, then a lighter ring round it, then a
+  2,800 particles). See `STAR_FORM_*`. To make one, pour a small heavy blob, then a lighter ring round it, then a
   lighter ring still, with self-gravity on to hold it together.
 * **Super wells:** B places one (as heavy as a brush-sized well, and never lighter than the collapse threshold). It
   is a tiny black core that deletes every particle and super well touching it and adds their mass to its own. Its pull
@@ -46,18 +50,26 @@ Press **H** in the app for the controls. F1–F4 load the presets (rain, disk, c
   spins. `;` / `'` spin the nearest super well slower / faster (up to `SUPER_SPIN_MAX`, 7). One placed with B starts at spin 5
   (`SUPER_SPIN_PLACED`); one formed by collapse spins at 5
   (`SUPER_SPIN_NATURAL`) the way the collapsing matter was turning. Above spin 1 it whirls
-  matter faster than it would orbit and flings it out into a ring instead of drawing it in. When two super wells' dotted circles overlap, they are hauled
-  together and merge within about a second. The merged well spits out 1–10% of their combined mass as particles, taken mostly from the smaller of the two
-  (`MERGE_LOSS_BIAS`). A super well that reaches `SUPER_EXPLODE_MASS` (5,000,000) explodes: all of its mass comes
-  back out as about 20,000 particles of random masses, in a disc flying outwards at up to 5 cells/tick. Collapse is
-  paused for 180 ticks (`SUPER_EXPLODE_CALM`) so the debris can spread before dense parts of it collapse again.
+  matter faster than it would orbit and flings it out into a ring instead of drawing it in. When two super wells' dotted circles overlap, they are drawn
+  together, slowly at first and ever faster as they near: the pull between them grows as their distance shrinks
+  (`SUPER_MERGE_ACCEL`, up to `SUPER_MERGE_MAX_SPEED`, 3 cells/tick), and their motion round each other fades
+  (`SUPER_MERGE_SPIRAL`), so they spiral in and merge within a few seconds. The lighter one covers more of the gap. The merged well spits out 1–10% of their combined mass as particles, taken mostly from the smaller of the two
+  (`MERGE_LOSS_BIAS`). A super well that reaches `SUPER_EXPLODE_MASS` (5,000,000) goes
+  supernova: it vanishes and all of its mass leaves its spot as a ring of very heavy debris (ghosts of about 3,300
+  mass, `SUPER_BLAST_HOT_MASS`) riding a shock front that starts at 6 cells/tick (`SUPER_BLAST_SPEED`) and slows to
+  a halt 150 cells out (`SUPER_BLAST_RADIUS`, at most 45% of the shorter side). The front shoves every particle it
+  passes outwards, those near the middle about 60 cells (`SUPER_BLAST_PUSH`), less further out and nothing at the
+  edge, then they come to a stop (`SUPER_BLAST_DRAG`), leaving a clear cavity and a pile-up shell. The debris cools as it
+  flies: every 20 ticks from age 20 each piece over 400 mass breaks in two, ending as about 17,000 particles of 200–400
+  mass that land as ordinary ones after the ghost time. Collapse is paused for 180 ticks (`SUPER_EXPLODE_CALM`) so the
+  debris can spread before dense parts of it collapse again. Stars, super wells and spawners aren't pushed.
 * **Collapse** (Shift+B, on by default): every 8 ticks, the heaviest 20×20-cell window collapses into a super well
   (or feeds one close by) once it holds `COLLAPSE_MASS` (5,000). The new super well keeps the matter's momentum and
   spits out 10–30% of it. Ejected particles have random masses (`EJECT_MASS`) and leave at 1.2× the speed needed to
   escape its range, so they get out unless something stops them.
 * **Spawners:** F places a particle spawner the size of the brush circle, pouring ghost particles (see Ghosts;
   `SPAWNER_GHOSTS`) at the current pour mass (or random range), so they don't pile up and collapse at the spawner. Bigger circles pour more: `SPAWNER_RATE` particles per tick per cell of area, about 2 per
-  tick for the default brush. A spawner has no collisions, so it passes through particles and planets. It falls under
+  tick for the default brush. A spawner has no collisions, so it passes through particles and stars. It falls under
   every kind of gravity like a particle, and a super well's core deletes it. Shift+F places a locked spawner that
   stays exactly where it is put and ignores gravity. Shift+drag moves spawners, and X deletes the nearest.
 * **Continuous borders:** W makes the edges wrap: a particle leaving one side enters from the opposite one. Gravity
@@ -74,7 +86,7 @@ Press **H** in the app for the controls. F1–F4 load the presets (rain, disk, c
   collapse threshold is divided by the same factor, so stronger gravity collapses sooner.
 * **Ghosts:** Shift+click pours ghost particles (Shift+click on a well or spawner still drags it). For
   `GHOST_TICKS` (180, 3 seconds) they feel every kind of gravity except each other's, but collide with nothing,
-  passing through particles, planets and each other. They aren't counted in self-gravity or collapse, so a big pour
+  passing through particles, stars and each other. They aren't counted in self-gravity or collapse, so a big pour
   can't turn straight into a super well. Then each lands as an ordinary particle in a random free cell of the nearest ring of cells round it that has
   room, so a crowd landing together spreads out evenly. A super
   well's core still swallows them. They are drawn see-through.

@@ -239,15 +239,36 @@ def test_wells_attract_each_other():
     assert b.x - a.x < 100 - 5           # they started 100 cells apart
 
 
-def test_heavy_wells_move_slower():
+def test_stars_fall_alike_but_heavy_super_wells_move_slower():
     moved = {}
-    for mass in (5000.0, 500000.0):
+    for kind, mass in (("star", 5000.0), ("star", 500000.0), ("super", 50000.0), ("super", 500000.0)):
         w = make_world(pw=400, ph=200)
-        w.held = w.add_well(200, 100, 300000.0)        # the same pull for both, held in place
-        probe = w.add_well(100, 100, mass)
+        w.held = w.add_well(200, 100, 300000.0)        # the same pull for all, held in place
+        if kind == "star":
+            probe = w.add_well(100, 100, mass)
+        else:
+            probe = w.add_super_well(60, 100, mass)    # its range must not reach the other (that would merge)
+        x0 = probe.x
         run(w, 15)
-        moved[mass] = probe.x - 50
-    assert moved[5000.0] > 10 * moved[500000.0] > 0
+        moved[kind, mass] = probe.x - x0
+    assert moved["star", 5000.0] > 0
+    assert moved["star", 5000.0] == pytest.approx(moved["star", 500000.0], rel=0.05)      # free fall
+    assert moved["super", 50000.0] > 5 * moved["super", 500000.0] > 0
+
+
+def test_star_can_orbit_a_super_well():
+    w = make_world(pw=1600, ph=1200)
+    sw = w.add_super_well(800, 600, 400000)
+    star = w.add_well(800 + 2 * 120, 600, 200000.0, radius=8)
+    d, s, soft = 120.0, w.g_scale * sw.pull(), w.softening(sw)
+    star.vy = math.sqrt(s * d * d / (d * d + soft * soft) ** 1.5)    # circular speed
+    angles = []
+    for _ in range(400):
+        w.step()
+        dx, dy = w.delta(sw.x, sw.y, star.x, star.y)
+        assert 0.8 * d < math.hypot(dx, dy) < 1.2 * d                   # stays in orbit...
+        angles.append(math.atan2(dy, dx))
+    assert np.abs(np.diff(np.unwrap(angles))).sum() > 2 * math.pi        # ...and goes round at least once
 
 
 def test_repulsors_stay_put():
@@ -263,7 +284,7 @@ def test_super_well_swallows_wells():
     sw = w.add_super_well(200, 100, 100000)
     w.add_well(160, 100, 2000.0)
     other = w.add_super_well(250, 100, 6000)
-    sw.spin = other.spin = 1.0                       # faster spin would fling the planet into orbit
+    sw.spin = other.spin = 1.0                       # faster spin would fling the star into orbit
     run(w, 300)
     assert w.wells == [sw]
     assert sw.mass + w.total_mass() == pytest.approx(108000)   # the super well merger spat some out as particles
@@ -300,8 +321,18 @@ def test_super_wells_with_overlapping_ranges_merge_and_eject():
     a = w.add_super_well(200, 200, 480000)
     b = w.add_super_well(400, 200, 320000)
     assert math.hypot(a.x - b.x, a.y - b.y) < w.well_range(a) + w.well_range(b)
-    run(w, 60)                                      # "rapidly": within a second at 60 ticks/s
+    closing, gap = [], math.hypot(a.x - b.x, a.y - b.y)
+    for t in range(600):
+        w.step()
+        if b not in w.wells:
+            break
+        new_gap = math.hypot(a.x - b.x, a.y - b.y)
+        closing.append(gap - new_gap)
+        gap = new_gap
     assert w.wells == [a]
+    assert 60 < t < 400                             # gradually: over a couple of seconds at 60 ticks/s
+    assert closing[0] < 0.1 and max(closing) > 1.0  # starting slowly, closing ever faster
+    assert all(c2 >= c1 - 1e-9 for c1, c2 in zip(closing[:len(closing) // 2], closing[1:len(closing) // 2 + 1]))
     ejected = w.total_mass()
     assert a.mass + ejected == 800000
     assert 0.01 * 800000 * 0.9 <= ejected <= 0.10 * 800000
@@ -349,13 +380,13 @@ def test_super_well_range_is_a_share_of_its_reach():
     assert w.collapse_threshold() == config.COLLAPSE_MASS == 40000
 
 
-def test_planet_pushes_particles_out_and_stays_solid():
+def test_star_pushes_particles_out_and_stays_solid():
     w = make_world(pw=400, ph=400)
     w.merge_on = w.split_on = False
     xs, ys = np.meshgrid(np.arange(80, 120), np.arange(80, 120))
-    w.place_many(xs.ravel(), ys.ravel(), 4)          # a block of particles where the planet will be
+    w.place_many(xs.ravel(), ys.ravel(), 4)          # a block of particles where the star will be
     before, count = w.total_mass(), w.particle_count()
-    planet = w.add_sized_well(200, 200, 24)          # radius 12 cells at (100, 100)
+    star = w.add_sized_well(200, 200, 24)          # radius 12 cells at (100, 100)
     run(w, 1)
     assert w.total_mass() == before and w.particle_count() == count
     assert not w.mass[w.solid > 0].any()
@@ -363,14 +394,14 @@ def test_planet_pushes_particles_out_and_stays_solid():
     run(w, 300)
     assert not w.mass[w.solid > 0].any()           # nothing ever gets inside
     idx = np.nonzero(w.mass)[0]
-    r = np.hypot(idx % w.w - planet.x, idx // w.w - planet.y)
-    assert np.median(r) < planet.radius + 25       # they settle on the surface as a crust
+    r = np.hypot(idx % w.w - star.x, idx // w.w - star.y)
+    assert np.median(r) < star.radius + 25       # they settle on the surface as a crust
 
 
-def test_planet_ground_holds_particles_up():
+def test_star_ground_holds_particles_up():
     w = make_world(pw=400, ph=400)
     w.add_sized_well(200, 200, 24)
-    w.place_many([100], [40], [1])                   # falls straight onto the planet from above
+    w.place_many([100], [40], [1])                   # falls straight onto the star from above
     run(w, 300)
     i = np.nonzero(w.mass)[0][0]
     assert 11 <= np.hypot(i % w.w - 100, i // w.w - 100) <= 15
@@ -402,7 +433,7 @@ def test_global_orbit_carries_wells():
     assert wl.vy > 0                                 # clockwise on screen: right of centre moves down
 
 
-def test_colliding_planets_rebound_shed_debris_and_shrink():
+def test_colliding_stars_rebound_shed_debris_and_shrink():
     w = make_world(pw=600, ph=400)
     w.merge_on = w.split_on = w.collapse_on = False
     a = w.add_well(200, 200, 60000.0, radius=24.0, vx=1.5)     # heading right
@@ -424,7 +455,7 @@ def test_colliding_planets_rebound_shed_debris_and_shrink():
     assert b.radius == pytest.approx(rb * math.sqrt(b.mass / mb))
 
 
-def test_gently_touching_planets_shed_nothing():
+def test_gently_touching_stars_shed_nothing():
     w = make_world(pw=600, ph=400)
     w.merge_on = w.split_on = w.collapse_on = False
     a = w.add_well(200, 200, 60000.0, radius=12.0)
@@ -473,7 +504,7 @@ def test_wrap_wells_pull_across_the_seam():
     assert w.fx[40 * w.w + 2] > 0
 
 
-def test_wrap_planet_body_spans_the_edge_and_wells_cross_it():
+def test_wrap_star_body_spans_the_edge_and_wells_cross_it():
     w = make_world()
     w.set_wrap(True)
     w.add_well(0, 80, 1000.0, radius=6.0)            # centred on the left edge
@@ -513,10 +544,10 @@ def test_spawner_rate_scales_with_its_circle():
 def test_spawner_falls_through_everything_under_gravity():
     w = make_world(pw=400, ph=400)
     w.set_gravity(0)
-    w.add_sized_well(200, 300, 30)                   # a planet in the way
+    w.add_sized_well(200, 300, 30)                   # a star in the way
     sp = w.add_spawner(200, 40, 8)
     run(w, 40)
-    assert sp.y > 150 and sp.vy > 0                  # fell straight through the planet (radius 15 at y = 150)
+    assert sp.y > 150 and sp.vy > 0                  # fell straight through the star (radius 15 at y = 150)
 
 
 def test_locked_spawner_stays_put():
@@ -566,7 +597,7 @@ def test_super_merge_takes_more_from_the_smaller_well():
     w = make_world(pw=600, ph=400)
     a = w.add_super_well(200, 200, 480000)
     b = w.add_super_well(400, 200, 240000)
-    run(w, 60)
+    run(w, 400)
     assert w.wells == [a] and a.mass + w.total_mass() == 720000
 
 
@@ -631,12 +662,12 @@ def test_super_well_pulls_beyond_its_dotted_circle():
 
 
 @pytest.mark.parametrize("omega", [0.0, 0.02, -0.02])
-def test_spinning_planet_carries_its_crust(omega):
+def test_spinning_star_carries_its_crust(omega):
     w = make_world(pw=400, ph=400)
     w.merge_on = w.split_on = w.collapse_on = False
-    planet = w.add_well(200, 200, 200000.0, radius=20.0)
-    planet.omega = omega
-    w.held = planet                                  # keep it in place
+    star = w.add_well(200, 200, 200000.0, radius=20.0)
+    star.omega = omega
+    w.held = star                                  # keep it in place
     a = np.linspace(0, 2 * np.pi, 40, endpoint=False)
     w.place_many(np.round(100 + 22 * np.cos(a)), np.round(100 + 22 * np.sin(a)), 1)   # a ring on its surface
     run(w, 100)
@@ -655,7 +686,7 @@ def test_super_wells_spins_add_up_when_they_merge():
     a = w.add_super_well(200, 200, 480000)
     b = w.add_super_well(400, 200, 240000)
     a.spin, b.spin = 1.0, -1.0
-    run(w, 60)
+    run(w, 400)
     assert w.wells == [a] and 0 < a.spin < 0.5     # opposite spins partly cancel
 
 
@@ -717,7 +748,7 @@ def test_clump_inside_whirlpool_keeps_turning():
     assert np.mean(np.hypot(w.kin[inside, 0], w.kin[inside, 1]) > 0.2) > 0.8   # and almost all of it moves
 
 
-def test_small_planet_shatters_into_particles_holding_its_mass():
+def test_small_star_shatters_into_particles_holding_its_mass():
     w = make_world(pw=600, ph=400)
     w.merge_on = w.split_on = w.collapse_on = False
     big = w.add_well(200, 200, 60000.0, radius=24.0, vx=1.0)
@@ -734,20 +765,20 @@ def test_small_planet_shatters_into_particles_holding_its_mass():
     check_consistent(w)
 
 
-def test_planets_bounce_hard():
+def test_stars_bounce_hard():
     w = make_world(pw=600, ph=400)
     w.merge_on = w.split_on = w.collapse_on = False
-    config.PLANET_EJECT, saved = 0.0, config.PLANET_EJECT
+    config.STAR_EJECT, saved = 0.0, config.STAR_EJECT
     try:
         a = w.add_well(200, 200, 30000.0, radius=24.0, vx=1.0)
         b = w.add_well(400, 200, 30000.0, radius=24.0, vx=-1.0)
         run(w, 60)
     finally:
-        config.PLANET_EJECT = saved
+        config.STAR_EJECT = saved
     assert a.vx < -0.9 and b.vx > 0.9                # they come back nearly as fast as they went in
 
 
-def test_planet_touching_super_well_dissolves_in_a_wave():
+def test_star_touching_super_well_dissolves_in_a_wave():
     w = make_world(pw=600, ph=400)
     w.merge_on = w.split_on = w.collapse_on = False
     sw = w.add_super_well(200, 200, 50000)
@@ -815,10 +846,35 @@ def test_super_well_explodes_past_the_threshold_and_releases_all_its_mass():
         if w.explosions:
             break
     assert w.explosions == 1 and not any(wl.is_super for wl in w.wells)
-    assert w.total_mass() == pytest.approx(before)    # every bit of it came back out as particles
-    assert w.particle_count() > 5000
-    run(w, config.SUPER_EXPLODE_CALM // 2)
+    assert w.total_mass() + w.ghost_mass() == pytest.approx(before)   # every bit of it came back out as debris
+    assert w.ghost_count() > 1000 and w.ghost_m.max() > 2000          # very heavy at first...
+    run(w, 100)
+    assert w.ghost_m.max() < 1500 and w.ghost_count() > 5000          # ...cooling into many lighter pieces
+    assert w.total_mass() + w.ghost_mass() == pytest.approx(before)
+    run(w, config.SUPER_EXPLODE_CALM - 100 - 20)
     assert not any(wl.is_super for wl in w.wells)    # the debris isn't collapsed straight back
+    check_consistent(w)
+
+
+def test_explosion_ring_starts_at_the_well_and_the_blast_pushes_particles_away():
+    w = make_world(pw=1200, ph=800)
+    w.merge_on = w.split_on = False
+    w.g_scale = 1e-9                                 # nothing else moves anything
+    xs, ys = np.meshgrid(np.arange(600), np.arange(400))
+    xs, ys = xs.ravel(), ys.ravel()
+    keep = w.rng.random(xs.size) < 0.25
+    w.place_many(xs[keep], ys[keep], 4)
+    w.add_super_well(600, 400, config.SUPER_EXPLODE_MASS + 10)    # cell (300, 200)
+    w.step()
+    assert w.explosions == 1
+    d = np.hypot(w.ghost_x - 300, w.ghost_y - 200)
+    assert d.max() < 15                              # the ring comes from where the well was
+    r = np.hypot(xs - 300, ys - 200)
+    dust = lambda lim: int(((w.mass[ys * w.w + xs] > 0) & (r < lim)).sum())
+    start = dust(40)
+    run(w, 80)
+    assert dust(40) < 0.1 * start                    # the nearby dust has been shoved back out of the way
+    assert dust(config.SUPER_BLAST_RADIUS * 1.2) > 0.3 * dust(1e9)    # and not just thrown away
     check_consistent(w)
 
 
@@ -882,16 +938,16 @@ def layered_ball(w, cx, cy, radius, masses=(256, 32, 2), aspect=1.0):
     return int(m[inside].sum())
 
 
-def planet_world():
+def star_world():
     w = make_world(pw=400, ph=320)
     w.merge_on = w.split_on = False
     return w
 
 
-def test_round_layered_clump_becomes_a_planet():
-    w = planet_world()
+def test_round_layered_clump_becomes_a_star():
+    w = star_world()
     mass = layered_ball(w, 100, 80, 10)
-    w.form_planets()
+    w.form_stars()
     assert w.particle_count() == 0 and len(w.wells) == 1
     pl = w.wells[0]
     assert not pl.is_super and pl.mass == mass and pl.radius == pytest.approx(10, rel=0.1)
@@ -906,37 +962,37 @@ def test_round_layered_clump_becomes_a_planet():
     (34, (256, 32, 2), 1.0),                         # too large
 ])
 def test_clumps_that_dont_qualify_stay_particles(radius, masses, aspect):
-    w = planet_world()
+    w = star_world()
     layered_ball(w, 100, 80, radius, masses, aspect)
     n = w.particle_count()
-    w.form_planets()
+    w.form_stars()
     assert not w.wells and w.particle_count() == n
 
 
-def test_planet_forms_on_its_own_and_keeps_momentum():
-    w = planet_world()
+def test_star_forms_on_its_own_and_keeps_momentum():
+    w = star_world()
     w.collapse_on = False
     layered_ball(w, 100, 80, 8)
     w.kin[w.mass > 0, 0] = 0.3                       # the whole clump drifting right
-    run(w, config.PLANET_FORM_EVERY)
-    assert len(w.wells) == 1 and w.planets_formed == 1
+    run(w, config.STAR_FORM_EVERY)
+    assert len(w.wells) == 1 and w.stars_formed == 1
     assert w.wells[0].vx == pytest.approx(0.3, rel=0.05)
 
 
-def test_smooth_gradient_or_crust_round_a_planet_dont_form_planets():
-    w = planet_world()
+def test_smooth_gradient_or_crust_round_a_star_dont_form_stars():
+    w = star_world()
     xs, ys = np.meshgrid(np.arange(w.w), np.arange(w.h))
     d = np.hypot(xs - 100, ys - 80) / 10
     inside = d <= 1.0
     w.place_many(xs[inside], ys[inside], np.round(256 ** (1 - d[inside])).astype(int))   # heavy to light, no dividers
-    w.form_planets()
+    w.form_stars()
     assert not w.wells
     w.clear()
-    w.add_well(200, 160, 50000.0, radius=4.0)        # a planet at cell (100, 80)...
+    w.add_well(200, 160, 50000.0, radius=4.0)        # a star at cell (100, 80)...
     w.rebuild_field()
     ring = inside & (d > 0.45)
     w.place_many(xs[ring], ys[ring], np.where(d[ring] < 0.65, 256, np.where(d[ring] < 0.85, 32, 2)))   # ...crusted
-    w.form_planets()
+    w.form_stars()
     assert len(w.wells) == 1                         # the crust is hollow: it stays a crust
 
 

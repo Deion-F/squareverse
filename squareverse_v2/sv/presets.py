@@ -74,9 +74,9 @@ def binary(world, count=None):
     right = world.add_well(world.pw / 2 + a * world.cell, world.ph / 2, 60000.0)
     strength = world.g_scale * left.pull()
     soft = config.WELL_SOFTENING
-    # circular mutual orbit around the centre: v^2 / a = the other's pull (scaled by mobility) across d = 2a
+    # circular mutual orbit around the centre: v^2 / a = the other's pull across d = 2a
     d = 2 * a
-    v = np.sqrt(left.mobility() * strength * d / (d * d + soft * soft) ** 1.5 * a)
+    v = np.sqrt(left.fall() * strength * d / (d * d + soft * soft) ** 1.5 * a)
     left.vy, right.vy = v, -v
     s = min(w, h)
     count = count or int(np.pi * ((0.46 * s) ** 2 - (0.3 * s) ** 2) * 0.5)

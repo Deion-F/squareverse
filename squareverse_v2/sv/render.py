@@ -12,11 +12,11 @@ HELP = [
     ("shift+LMB", f"pour ghosts: feel gravity but pass through everything for {config.GHOST_TICKS} ticks"),
     ("1-5 / 6", "pour mass " + " / ".join(str(m) for m in config.POUR_MASSES)
      + " / random {}-{}".format(*config.RANDOM_MASS)),
-    ("G / shift+G", "place planet well / repulsor: brush size, solid, weighs its area x pour mass"),
+    ("G / shift+G", "place star / repulsor: brush size, solid, weighs its area x pour mass"),
     ("F / shift+F", "place particle spawner: brush size sets the rate; shift locks it in place"),
     ("B", "place super well (swallows what touches its core; overlapping ones merge)"),
     ("shift+B", "collapse: dense mass becomes a super well, on/off"),
-    ("shift+drag on a body", "move a well or spawner (wells attract each other; heavy ones are slow)"),
+    ("shift+drag on a body", "move a well or spawner (wells attract each other; heavy super wells are slow)"),
     ("X", "delete nearest well or spawner"),
     (", / .", "lighter / heavier nearest well"),
     ("; / '", "nearest super well spins slower / faster"),
@@ -64,6 +64,7 @@ class Renderer:
         self.small = pygame.font.Font(None, 18)
         self.overlay = None
         self.overlay_key = None
+        self._glows = {}            # star coronas by (radius, colour)
 
     def draw_world(self, world, mode):
         world.render(mode)
@@ -122,10 +123,11 @@ class Renderer:
             pygame.draw.circle(screen, (0, 0, 0), center, radius)
             pygame.draw.circle(screen, config.SUPER_RIM_COLOR, center, radius + 1, 1)
         elif wl.wave >= 0:
+            self._draw_star_glow(wl, center, radius)
             # dissolving: drawn on its own surface with the swept part cut out and the wave front glowing
             surf = pygame.Surface((2 * radius + 2, 2 * radius + 2), pygame.SRCALPHA)
             local = (radius + 1, radius + 1)
-            self._draw_planet(surf, wl, local, radius)
+            self._draw_star(surf, wl, local, radius)
             cell = world.cell
             ex, ey = local[0] + wl.wave_dx * cell, local[1] + wl.wave_dy * cell
             er = wl.wave * cell
@@ -139,18 +141,56 @@ class Renderer:
                     pygame.draw.line(surf, config.DISSOLVE_COLOR, p0, p1, 2)
             screen.blit(surf, (center[0] - local[0], center[1] - local[1]))
         else:
-            self._draw_planet(screen, wl, center, radius)
+            self._draw_star_glow(wl, center, radius)
+            self._draw_star(screen, wl, center, radius)
 
-    def _draw_planet(self, surf, wl, center, radius):
-        """A solid planet: filled body with craters turning with its spin, rim coloured by attract / repel."""
-        color = config.WELL_COLOR if wl.sign > 0 else config.REPULSOR_COLOR
-        pygame.draw.circle(surf, config.PLANET_COLOR, center, radius)
+    def _star_color(self, wl):
+        """A star's surface colour: red-orange when light, through yellow and white to blue-white when very heavy;
+        a repulsor glows cold blue."""
+        if wl.sign < 0:
+            return config.REPULSOR_COLOR
+        t = min(1.0, max(0.0, (math.log10(max(wl.mass, 1.0)) - 3.5) / 3.5)) * (len(config.STAR_COLORS) - 1)
+        k = min(int(t), len(config.STAR_COLORS) - 2)
+        f = t - k
+        a, b = config.STAR_COLORS[k], config.STAR_COLORS[k + 1]
+        return tuple(int(a[c] + (b[c] - a[c]) * f) for c in range(3))
+
+    def _draw_star_glow(self, wl, center, radius):
+        """The star's corona: a soft glow round its body, added onto whatever is behind it."""
+        color = self._star_color(wl)
+        key = (radius, color)
+        glow = self._glows.get(key)
+        if glow is None:
+            if len(self._glows) > 64:
+                self._glows.clear()
+            outer = int(radius * config.STAR_GLOW_SIZE) + 6
+            glow = pygame.Surface((2 * outer, 2 * outer))
+            for r in range(outer, radius - 1, -1):
+                k = config.STAR_GLOW * (1.0 - (r - radius) / (outer - radius + 1e-9)) ** 2
+                pygame.draw.circle(glow, tuple(int(c * k) for c in color), (outer, outer), r)
+            self._glows[key] = glow
+        half = glow.get_width() // 2
+        self.screen.blit(glow, (center[0] - half, center[1] - half), special_flags=pygame.BLEND_RGB_ADD)
+
+    def _draw_star(self, surf, wl, center, radius):
+        """A star's glowing body: brightest at the middle and darker towards the edge (limb darkening), with sunspots
+        turning with its spin."""
+        color = self._star_color(wl)
+        hot = tuple(c + (255 - c) // 2 for c in color)
+        edge = tuple(int(c * 0.8) for c in color)
+        steps = max(1, min(radius, 10))
+        for s in range(steps):                           # from the edge in: darker limb, white-hot middle
+            t = s / steps
+            col = tuple(int(edge[c] + (color[c] - edge[c]) * min(1.0, 2 * t)) for c in range(3))
+            if t > 0.5:
+                col = tuple(int(col[c] + (hot[c] - col[c]) * (2 * t - 1)) for c in range(3))
+            pygame.draw.circle(surf, col, center, max(1, round(radius * (1.0 - t))))
         if radius >= 5:
-            for k, (dist, size) in enumerate(((0.55, 0.16), (0.6, 0.11), (0.3, 0.12), (0.72, 0.08))):
+            spot = tuple(int(c * 0.6) for c in color)
+            for k, (dist, size) in enumerate(((0.55, 0.13), (0.6, 0.09), (0.3, 0.1), (0.72, 0.07))):
                 a = wl.phase + k * 2.1
                 pos = (center[0] + radius * dist * math.cos(a), center[1] + radius * dist * math.sin(a))
-                pygame.draw.circle(surf, config.CRATER_COLOR, pos, max(1, int(radius * size)))
-        pygame.draw.circle(surf, color, center, radius, 1)
+                pygame.draw.circle(surf, spot, pos, max(1, int(radius * size)))
 
     def _draw_spin_arms(self, wl, center, core):
         """Three spiral arms round a super well's core, trailing like a whirlpool and turning with its spin, each
@@ -232,7 +272,7 @@ class Renderer:
              f"   super wells {supers}"
              f" holding {world.super_mass():,}   collapse {on(world.collapse_on)}"
              f" at {world.collapse_threshold():,.0f} mass   explode at {config.SUPER_EXPLODE_MASS:,}"
-             f" ({world.explosions} so far)   planets formed {world.planets_formed}", config.FG),
+             f" ({world.explosions} so far)   stars formed {world.stars_formed}", config.FG),
             (f"last tick: moved {s[0]:,}  collisions {s[1]:,}  merges {s[2]:,}  splits {s[3]:,}  sinks {s[4]:,}"
              f"  absorbed {s[5]:,}", config.DIM),
         ]

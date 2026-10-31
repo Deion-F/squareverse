@@ -31,13 +31,31 @@ def super_core(mass):
 
 
 @dataclass(eq=False, slots=True)
+class Blast:
+    """A supernova's shock front: a ring round (x, y) at radius r (cells) slowing as it nears `reach`, pushing the
+    particles it passes. Its debris (ghosts tagged with `tag`) rides the same front. `settled` counts the ticks since
+    the front stopped."""
+    x: float
+    y: float
+    r: float
+    reach: float
+    tag: int
+    settled: int = 0
+
+    def speed(self, r):
+        """Speed of the front at radius r: SUPER_BLAST_SPEED when it starts, none at its edge."""
+        return config.SUPER_BLAST_SPEED * np.sqrt(np.maximum(0.0, 1.0 - np.asarray(r) / self.reach))
+
+
+@dataclass(eq=False, slots=True)
 class Well:
     """A gravity well, in cell units. Its pull is G * mass, the same constant particles attract each other with.
 
     A normal well has a size (its softening radius); a repulsor (sign -1) pushes instead and stays put. A super well
     swallows every particle and well that reaches its core; its core grows with its mass. Its pull follows the same
     law at every distance; within its range (the dotted circle) it also spins space round. Wells attract each other
-    (and, with self-gravity on, feel the particles), moving more sluggishly the heavier they are.
+    (and, with self-gravity on, feel the particles). Gravity accelerates a star as it does a particle, whatever its
+    mass; a super well responds more sluggishly the heavier it is.
     """
     x: float
     y: float
@@ -46,14 +64,15 @@ class Well:
     is_super: bool = False
     sign: int = 1               # -1: repulsor
     spin: float = 0.0           # super well: -1..1, > 0 clockwise (it drags space round that way, faster when larger)
-    omega: float = 0.0          # planet: rotation speed (rad/tick, > 0 clockwise); its surface carries particles
+    omega: float = 0.0          # star: rotation speed (rad/tick, > 0 clockwise); its surface carries particles
     phase: float = 0.0          # angle it has turned through (for drawing)
-    wave: float = -1.0          # planet touched by a super well: radius dissolved so far round the contact point
+    wave: float = -1.0          # star touched by a super well: radius dissolved so far round the contact point
     wave_dx: float = 0.0        #   (offset of the contact point from its centre); < 0 = whole
     wave_dy: float = 0.0
     wave_by: object = None      #   the super well dissolving it
     vx: float = 0.0
     vy: float = 0.0
+    merging: bool = False       # super well being drawn into another (its speed isn't capped by its mobility)
     built: tuple = (0.0, 0.0, 0.0)   # (x, y, mass) when the field was last built
 
     def pull(self):
@@ -63,12 +82,20 @@ class Well:
         return super_core(self.mass)
 
     def body_radius(self):
-        """Its drawn body: a planet's size, or a super well's core (event horizon)."""
+        """Its drawn body: a star's size, or a super well's core (event horizon)."""
         return self.core() if self.is_super else self.radius
 
     def mobility(self):
         """How freely it accelerates: 1 for a weightless well, falling towards 0 as it gets heavier."""
         return config.WELL_INERTIA_MASS / (config.WELL_INERTIA_MASS + self.mass)
+
+    def fall(self):
+        """How freely gravity accelerates it: a star falls like a particle does, whatever its mass, so it can swing
+        into orbit; a super well is as sluggish as its mobility."""
+        return self.mobility() if self.is_super else 1.0
+
+    def top_speed(self):
+        return config.VMAX * (self.mobility() if self.is_super else 1.0)
 
 
 @dataclass(eq=False, slots=True)
@@ -101,7 +128,9 @@ class World:
         self.collapse_on = config.COLLAPSE_ON
         self.collapses = 0
         self.explosions = 0
-        self.planets_formed = 0
+        self.blasts = []             # shock fronts of exploding super wells still sweeping or settling
+        self.blast_serial = 0
+        self.stars_formed = 0
         self.calm_until = 0          # no collapse before this tick (after an explosion)
         self.wrap = config.WRAP     # continuous borders: leaving one side enters from the other
         self.orbit = config.ORBIT   # global orbit: 1 clockwise, -1 counterclockwise, 0 off
@@ -141,13 +170,15 @@ class World:
         self.rgb = np.zeros((self.h, self.w, 3), np.uint8)
         self.sg = SelfGravity(self.w, self.h, wrap=self.wrap)
         self.hole = np.zeros(n, np.int16)       # super well k's core cells hold k + 1
-        self.solid = np.zeros(n, np.uint8)      # 1 inside a normal well's body (planet ground)
-        self.gvx = np.zeros(n, np.float32)      # velocity of that ground (planet motion + spin)
+        self.solid = np.zeros(n, np.uint8)      # 1 inside a normal well's body (star ground)
+        self.gvx = np.zeros(n, np.float32)      # velocity of that ground (star motion + spin)
         self.gvy = np.zeros(n, np.float32)
         self.absorbed = np.zeros(1, np.int64)   # mass swallowed per well, collected after each tick
         self.field_dirty = True                 # rebuild the field and wake everything
         self.changed_wells = []                 # wells that moved or grew: rebuild, wake only their reach
         self.bucket = None
+        self.angle_rank, self.angle_key, self.phi_rank = None, None, None   # cached ranks for the orbit ordering
+        self.cut = 0.0                          # where the orbit ordering's cut is turned to (radians)
         self.order_tick = -10 ** 9
 
     # --- parameters / fields ----------------------------------------------------------------------
@@ -201,7 +232,7 @@ class World:
         return math.sqrt(self.g_scale * abs(well.pull()) / config.SUPER_RANGE_ACCEL)
 
     def softening(self, well):
-        """Distance (cells) over which a well's pull is softened: a planet's size; for a super well a share of its
+        """Distance (cells) over which a well's pull is softened: a star's size; for a super well a share of its
         range (never less than its core), so its pull near the core stays gentle enough to swing past."""
         if well.is_super:
             return max(well.core(), config.SUPER_SOFTENING * self.well_range(well))
@@ -302,13 +333,13 @@ class World:
         self.collapses += 1
         self.changed_wells.append(near[0] if near else self.wells[-1])
 
-    def form_planets(self):
-        """Turn every clump of particles that looks like a layered planet (see layered()) into a planet with its
+    def form_stars(self):
+        """Turn every clump of particles that looks like a layered star (see layered()) into a star with its
         total mass, momentum and spin, and the size of the clump."""
         labels = np.zeros(self.n, np.int32)
         if not kernels.label_clumps(self.mass, self.w, self.h, labels, np.zeros(self.n, np.int32)):
             return
-        lo, hi = config.PLANET_FORM_RADIUS
+        lo, hi = config.STAR_FORM_RADIUS
         occ = np.nonzero(labels)[0]
         lab = labels[occ]
         counts = np.bincount(lab)
@@ -320,7 +351,7 @@ class World:
         occ, lab = occ[order], lab[order]
         for idx in np.split(occ, np.nonzero(np.diff(lab))[0] + 1):
             if self.layered(idx):
-                self._form_planet(idx)
+                self._form_star(idx)
 
     def layered(self, idx):
         """Whether the clump in cells idx is round and layered: a heavy core, a lighter mantle and a lighter crust
@@ -332,12 +363,12 @@ class World:
         # round: not elongated, and filling the disc of the same area rather than straggling out of it
         cov = np.cov(np.vstack([dx, dy]))
         lmin, lmax = np.linalg.eigvalsh(cov)
-        if lmin <= 0 or math.sqrt(lmax / lmin) > config.PLANET_FORM_ROUND:
+        if lmin <= 0 or math.sqrt(lmax / lmin) > config.STAR_FORM_ROUND:
             return False
         r = np.hypot(dx, dy)
-        if (r <= r_eq).sum() < config.PLANET_FORM_FILL * math.pi * r_eq * r_eq:
+        if (r <= r_eq).sum() < config.STAR_FORM_FILL * math.pi * r_eq * r_eq:
             return False
-        # solid in the middle: not a crust round a planet or a super well's core
+        # solid in the middle: not a crust round a star or a super well's core
         core = max(1.5, 0.35 * r_eq)
         if (r <= core).sum() < 0.9 * len(self._disk_cells(cx, cy, core)[0]):
             return False
@@ -347,7 +378,7 @@ class World:
         order = np.argsort(r)
         lm = np.log(self.mass[idx[order]].astype(np.float64))
         r = r[order] / r.max()
-        gap, k = math.log(config.PLANET_FORM_LAYER_RATIO), config.PLANET_FORM_MIN_LAYER
+        gap, k = math.log(config.STAR_FORM_LAYER_RATIO), config.STAR_FORM_MIN_LAYER
         n = lm.size
         for f1 in np.arange(0.1, 0.75, 0.05):
             i1 = int(np.searchsorted(r, f1))
@@ -364,7 +395,7 @@ class World:
                 if not (self._sharp(a, b, gap) and self._sharp(b, c, gap)):
                     continue
                 t1, t2 = (ma + mb) / 2, (mb + mc) / 2
-                pure = config.PLANET_FORM_PURITY
+                pure = config.STAR_FORM_PURITY
                 if ((a > t1).mean() >= pure and ((b > t2) & (b <= t1)).mean() >= pure
                         and (c <= t2).mean() >= pure):
                     return True
@@ -373,10 +404,10 @@ class World:
     @staticmethod
     def _sharp(inner, outer, gap):
         """Whether log masses fall by gap right at the divide between two layers (each sorted by radius)."""
-        s = max(config.PLANET_FORM_MIN_LAYER, min(inner.size, outer.size) // 4)
+        s = max(config.STAR_FORM_MIN_LAYER, min(inner.size, outer.size) // 4)
         return np.median(inner[-s:]) - np.median(outer[:s]) >= gap
 
-    def _form_planet(self, idx):
+    def _form_star(self, idx):
         m = self.mass[idx].astype(np.float64)
         total = m.sum()
         xs, ys = (idx % self.w).astype(np.float64), (idx // self.w).astype(np.float64)
@@ -386,18 +417,19 @@ class World:
         dx, dy = xs - cx, ys - cy
         inertia = (m * (dx * dx + dy * dy)).sum()
         omega = (m * (dx * (vy - pvy) - dy * (vx - pvx))).sum() / inertia if inertia > 0 else 0.0
-        omega = max(-config.PLANET_SPIN[1], min(config.PLANET_SPIN[1], omega))   # as fast as a placed one at most
+        omega = max(-config.STAR_SPIN[1], min(config.STAR_SPIN[1], omega))   # as fast as a placed one at most
         self.mass[idx] = 0
         self.kin[idx] = 0.0
         self.quad[idx] = 0
         radius = math.sqrt(idx.size / math.pi)
         self.wells.append(Well(cx, cy, total, radius, omega=omega, vx=pvx, vy=pvy, built=(cx, cy, total)))
-        self.planets_formed += 1
+        self.stars_formed += 1
         self.field_dirty = True                          # the new ground is marked and its surroundings woken
 
     def step_wells(self):
-        """Move the wells: they attract each other (and feel the particles when self-gravity is on), accelerating
-        and moving more slowly the heavier they are. A super well swallows any well that reaches its core."""
+        """Move the wells: they attract each other (and feel the particles when self-gravity is on). Stars fall
+        freely, like particles; super wells, and every well's response to the global orbit and the whirlpools, are
+        slower the heavier they are. A super well swallows any well that reaches its core."""
         wells = self.wells
         if not wells:
             return
@@ -428,17 +460,19 @@ class World:
                 b = (min(int(wl.y), self.h - 1) // sg.block) * sg.cw + min(int(wl.x), self.w - 1) // sg.block
                 ax += float(sg.gx[b])
                 ay += float(sg.gy[b])
-            if self.orbit:              # the global orbit carries wells round too (heavy ones respond slowly)
-                ox, oy = self._orbit_accel(wl.x, wl.y, wl.vx, wl.vy)
-                ax += ox
-                ay += oy
+            fall = wl.fall()
+            wl.vx += ax * fall
+            wl.vy += ay * fall
+            # the global orbit and the whirlpools drag things round rather than pull them: heavy ones respond slowly
             ox, oy = self._whirl_accel(wl, wl.x, wl.y, wl.vx, wl.vy)
-            ax += ox
-            ay += oy
+            if self.orbit:
+                o2x, o2y = self._orbit_accel(wl.x, wl.y, wl.vx, wl.vy)
+                ox += o2x
+                oy += o2y
             mob = wl.mobility()
-            wl.vx += ax * mob
-            wl.vy += ay * mob
-            vmax = config.VMAX * mob
+            wl.vx += ox * mob
+            wl.vy += oy * mob
+            vmax = config.VMAX if wl.merging else wl.top_speed()
             speed = math.hypot(wl.vx, wl.vy)
             if speed > vmax:
                 wl.vx *= vmax / speed
@@ -464,20 +498,20 @@ class World:
         self._swallow_wells()
         for wl in [wl for wl in self.wells if wl.is_super and wl.mass >= config.SUPER_EXPLODE_MASS]:
             self.explode(wl)
-        planets = [wl for wl in self.wells if not wl.is_super and wl.sign > 0 and wl.wave < 0]
-        for i, a in enumerate(planets):
-            for b in planets[i + 1:]:
+        stars = [wl for wl in self.wells if not wl.is_super and wl.sign > 0 and wl.wave < 0]
+        for i, a in enumerate(stars):
+            for b in stars[i + 1:]:
                 if a not in self.wells:                  # shattered
                     break
                 if b in self.wells and self.distance(a.x, a.y, b.x, b.y) < a.radius + b.radius:
-                    self._collide_planets(a, b)
-        self._dissolve_planets()
+                    self._collide_stars(a, b)
+        self._dissolve_stars()
 
-    def _collide_planets(self, a, b):
-        """Two planets whose bodies overlap: pushed apart to touching and, if they hit hard enough, bounced back
-        along the line between their centres (momentum conserved, PLANET_RESTITUTION). A planet smaller than
-        PLANET_SHATTER_RADIUS then shatters into particles; otherwise they shed debris from the point of contact,
-        taken mostly from the smaller one (PLANET_LOSS_BIAS), and each shrinks to keep its density."""
+    def _collide_stars(self, a, b):
+        """Two stars whose bodies overlap: pushed apart to touching and, if they hit hard enough, bounced back
+        along the line between their centres (momentum conserved, STAR_RESTITUTION). A star smaller than
+        STAR_SHATTER_RADIUS then shatters into particles; otherwise they shed debris from the point of contact,
+        taken mostly from the smaller one (STAR_LOSS_BIAS), and each shrinks to keep its density."""
         dx, dy = self.delta(a.x, a.y, b.x, b.y)
         d = math.hypot(dx, dy)
         if d < 1e-9:
@@ -496,32 +530,32 @@ class World:
         u = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny     # closing speed
         if u <= 0:
             return
-        if u < config.PLANET_REST_SPEED:                 # resting contact: they just stop closing
+        if u < config.STAR_REST_SPEED:                 # resting contact: they just stop closing
             j = u * ma * mb / (ma + mb)
         else:
-            j = (1 + config.PLANET_RESTITUTION) * u * ma * mb / (ma + mb)
+            j = (1 + config.STAR_RESTITUTION) * u * ma * mb / (ma + mb)
         a.vx -= j / ma * nx
         a.vy -= j / ma * ny
         b.vx += j / mb * nx
         b.vy += j / mb * ny
-        if u < config.PLANET_REST_SPEED:
+        if u < config.STAR_REST_SPEED:
             return
-        small = [wl for wl in (a, b) if wl.radius < config.PLANET_SHATTER_RADIUS]
+        small = [wl for wl in (a, b) if wl.radius < config.STAR_SHATTER_RADIUS]
         if small:
             for wl in small:
-                self._shatter(wl, config.PLANET_SHATTER_SPEED + 0.5 * u)
+                self._shatter(wl, config.STAR_SHATTER_SPEED + 0.5 * u)
             return
-        # debris: up to PLANET_EJECT of their combined mass, in proportion to the impact speed
-        share = config.PLANET_EJECT * min(1.0, u / config.PLANET_EJECT_SPEED)
+        # debris: up to STAR_EJECT of their combined mass, in proportion to the impact speed
+        share = config.STAR_EJECT * min(1.0, u / config.STAR_EJECT_SPEED)
         loss = int((ma + mb) * share)
         if loss <= 0:
             return
         contact = (a.x + nx * a.radius, a.y + ny * a.radius)
         base = ((a.vx * a.mass + b.vx * b.mass) / (ma + mb), (a.vy * a.mass + b.vy * b.mass) / (ma + mb))
-        placed = self._spawn_debris(contact, loss, base, 0.9 * u + config.PLANET_DEBRIS_SPEED)
+        placed = self._spawn_debris(contact, loss, base, 0.9 * u + config.STAR_DEBRIS_SPEED)
         if placed <= 0:
             return
-        lost_a, lost_b = merge_losses(ma, mb, placed, bias=config.PLANET_LOSS_BIAS)
+        lost_a, lost_b = merge_losses(ma, mb, placed, bias=config.STAR_LOSS_BIAS)
         for wl, lost in ((a, lost_a), (b, lost_b)):
             left = max(wl.mass - lost, 1.0)
             wl.radius = max(1.0, wl.radius * math.sqrt(left / wl.mass))
@@ -608,7 +642,7 @@ class World:
         return self.total_mass() - before
 
     def _scatter_rest(self, wl, amount, speed, sink=None):
-        """Fling what is left of a broken planet out round it as debris; anything that finds no room goes to sink
+        """Fling what is left of a broken star out round it as debris; anything that finds no room goes to sink
         (a super well) if given. Returns the mass placed."""
         placed, tries = 0, 0
         while amount - placed >= 1 and tries < 8:
@@ -620,7 +654,7 @@ class World:
         return placed
 
     def _shatter(self, wl, speed):
-        """A planet breaks up into particles of random masses filling its body and adding up to its mass, flying
+        """A star breaks up into particles of random masses filling its body and adding up to its mass, flying
         apart from its centre (faster towards its surface) on top of its motion and spin."""
         self.remove_well(wl)
         xs, ys, dx, dy = self._disk_cells(wl.x, wl.y, wl.radius)
@@ -633,19 +667,19 @@ class World:
         self._scatter_rest(wl, wl.mass - placed, speed)
 
     def _start_wave(self, pl, sw):
-        """A super well's core touched planet pl: it starts dissolving from the point facing the well."""
+        """A super well's core touched star pl: it starts dissolving from the point facing the well."""
         dx, dy = self.delta(pl.x, pl.y, sw.x, sw.y)
         d = max(math.hypot(dx, dy), 1e-9)
         pl.wave, pl.wave_dx, pl.wave_dy, pl.wave_by = 0.0, dx / d * pl.radius, dy / d * pl.radius, sw
         self.changed_wells.append(pl)
 
-    def _dissolve_planets(self):
-        """Advance each dissolving planet's wave by PLANET_DISSOLVE_SPEED: the cells of its body it sweeps over turn
+    def _dissolve_stars(self):
+        """Advance each dissolving star's wave by STAR_DISSOLVE_SPEED: the cells of its body it sweeps over turn
         into particles holding their share of its mass, kicked away from the point of contact. Once the wave has
-        crossed it the planet is gone."""
-        kick = config.PLANET_DISSOLVE_KICK
+        crossed it the star is gone."""
+        kick = config.STAR_DISSOLVE_KICK
         for pl in [wl for wl in self.wells if wl.wave >= 0]:
-            old, new = pl.wave, pl.wave + config.PLANET_DISSOLVE_SPEED
+            old, new = pl.wave, pl.wave + config.STAR_DISSOLVE_SPEED
             xs, ys, dx, dy = self._disk_cells(pl.x, pl.y, pl.radius)
             ex, ey = dx - pl.wave_dx, dy - pl.wave_dy
             de = np.hypot(ex, ey)
@@ -667,35 +701,89 @@ class World:
                 self.changed_wells.append(pl)
 
     def explode(self, wl):
-        """A super well that grew too heavy blows apart: all its mass comes back out as particles of random masses
-        filling a disc round it about half full, flying outwards with its motion, faster the further out (so the cloud
-        expands evenly). Collapse is held off for SUPER_EXPLODE_CALM ticks so the debris can spread. Anything that
-        finds no room stays behind as a smaller super well."""
+        """A super well that grew too heavy goes supernova: it vanishes and all its mass comes back out from where it
+        was as a ring of very heavy debris (ghosts, so nothing in the way stops them) flying outwards on a shock front
+        that shoves every particle it passes away, further the nearer it was (see `_step_blasts`). The debris cools
+        as it flies, breaking into lighter pieces (see `_cool_blasts`). Collapse is held off for SUPER_EXPLODE_CALM
+        ticks so the debris can spread."""
         self.remove_well(wl)
         rng = self.rng
-        amount = wl.mass
-        n = config.SUPER_EXPLODE_PARTICLES
-        r_max = max(wl.core() + 2.0, math.sqrt(2 * n / math.pi))
-        placed = 0
-        for _ in range(6):
-            if amount - placed < 1:
-                break
-            r = r_max * np.sqrt(rng.uniform((wl.core() / r_max) ** 2, 1.0, n))
-            a = rng.uniform(0.0, 2 * math.pi, n)
-            xs = np.round(wl.x + r * np.cos(a)).astype(np.int64)
-            ys = np.round(wl.y + r * np.sin(a)).astype(np.int64)
-            if self.wrap:
-                xs, ys = xs % self.w, ys % self.h
-            ok = (xs >= 0) & (xs < self.w) & (ys >= 0) & (ys < self.h)
-            speed = min(config.SUPER_EXPLODE_SPEED, 0.95 * config.VMAX) * r[ok] / r_max
-            placed += self._burst(xs[ok], ys[ok], amount - placed, wl.vx + np.cos(a[ok]) * speed,
-                                  wl.vy + np.sin(a[ok]) * speed)
-            r_max *= 1.5                                 # crowded: spread the rest wider
-        if amount - placed >= 1:
-            self.wells.append(Well(wl.x, wl.y, amount - placed, is_super=True, spin=wl.spin, vx=wl.vx, vy=wl.vy,
-                                   built=(wl.x, wl.y, amount - placed)))
+        r0 = max(wl.core() + 1.0, 2.0)
+        reach = max(min(config.SUPER_BLAST_RADIUS, 0.45 * min(self.w, self.h)), r0 + 5.0)
+        self.blast_serial += 1
+        blast = Blast(wl.x, wl.y, r0, reach, self.blast_serial)
+        self.blasts.append(blast)
+        n = max(1, round(wl.mass / config.SUPER_BLAST_HOT_MASS))
+        masses = self._split_mass(wl.mass, n)
+        a = 2 * math.pi * (np.arange(masses.size) + rng.uniform(0.0, 1.0, masses.size)) / masses.size
+        r = r0 + rng.uniform(0.0, 3.0, masses.size)
+        s = blast.speed(r)
+        self.add_ghosts(wl.x + r * np.cos(a), wl.y + r * np.sin(a), masses, wl.vx + s * np.cos(a),
+                        wl.vy + s * np.sin(a), tag=blast.tag)
         self.explosions += 1
         self.calm_until = self.tick_count + config.SUPER_EXPLODE_CALM
+
+    def _step_blasts(self):
+        """Sweep each shock front on: it shoves the particles it passes outwards, and damps the outward motion of
+        everything behind it, so what it pushed back stops after a while."""
+        for b in self.blasts:
+            r_new = b.r + float(b.speed(b.r))
+            if r_new >= b.reach - 0.05:
+                r_new = b.reach
+            if b.r < b.reach:
+                kernels.blast_push(b.x, b.y, b.r, r_new, b.reach, config.SUPER_BLAST_PUSH, config.SUPER_BLAST_DRAG,
+                                   0.95 * config.VMAX, self.w, self.h, self.mass, self.kin, self.stamp, self.flag,
+                                   self.solid, self.wrap)
+            else:
+                # the front has stopped: no ring to shove (r_in past r_out), only the fading behind it
+                kernels.blast_push(b.x, b.y, b.reach + 1.0, b.reach, b.reach, 0.0, config.SUPER_BLAST_DRAG, 0.0,
+                                   self.w, self.h, self.mass, self.kin, self.stamp, self.flag, self.solid, self.wrap)
+                b.settled += 1
+            b.r = r_new
+        self.blasts = [b for b in self.blasts if b.settled < config.SUPER_BLAST_SETTLE]
+
+    def _cool_blasts(self):
+        """Blast debris (ghosts tagged with their blast's number) rides its front while the blast lasts, slowing as
+        the front does, and cools however long that is: every SUPER_BLAST_COOL_EVERY ticks from
+        SUPER_BLAST_COOL_FROM each piece heavier than SUPER_BLAST_COOL_TO breaks in two, the new piece scattering a
+        little. Once cool, and at rest or its blast over, a piece is an ordinary ghost."""
+        hot = np.nonzero(self.ghost_tag > 0)[0]
+        if not hot.size:
+            return
+        active = {b.tag: b for b in self.blasts}
+        for b in active.values():
+            sel = hot[self.ghost_tag[hot] == b.tag]
+            if not sel.size:
+                continue
+            dx, dy = self.ghost_x[sel] - b.x, self.ghost_y[sel] - b.y
+            if self.wrap:
+                dx -= self.w * np.floor(dx / self.w + 0.5)
+                dy -= self.h * np.floor(dy / self.h + 0.5)
+            d = np.maximum(np.hypot(dx, dy), 1e-9)
+            ux, uy = dx / d, dy / d
+            speed = b.speed(np.minimum(d, b.reach))
+            vx, vy = self.ghost_vx[sel], self.ghost_vy[sel]
+            along = vx * ux + vy * uy
+            out = d < b.reach                            # past the edge: stopped
+            self.ghost_vx[sel] = np.where(out, speed * ux + 0.9 * (vx - along * ux), 0.0)  # sideways drift fades
+            self.ghost_vy[sel] = np.where(out, speed * uy + 0.9 * (vy - along * uy), 0.0)
+        age = self.ghost_age[hot]
+        due = hot[(age >= config.SUPER_BLAST_COOL_FROM)
+                  & ((age - config.SUPER_BLAST_COOL_FROM) % config.SUPER_BLAST_COOL_EVERY == 0)
+                  & (self.ghost_m[hot] > config.SUPER_BLAST_COOL_TO)]
+        if due.size:
+            m = self.ghost_m[due]
+            new = np.clip(np.round(m * self.rng.uniform(0.3, 0.7, due.size)), 1, m - 1).astype(np.int64)
+            self.ghost_m[due] = m - new
+            jx, jy = self.rng.normal(0.0, 0.2, (2, due.size))
+            for tag in np.unique(self.ghost_tag[due]):
+                k = self.ghost_tag[due] == tag
+                self.add_ghosts(self.ghost_x[due[k]], self.ghost_y[due[k]], new[k], self.ghost_vx[due[k]] + jx[k],
+                                self.ghost_vy[due[k]] + jy[k], tag=int(tag), age=self.ghost_age[due[k]])
+        hot = self.ghost_tag > 0
+        over = ~np.isin(self.ghost_tag, list(active))
+        still = np.hypot(self.ghost_vx, self.ghost_vy) < 0.1
+        self.ghost_tag[hot & (self.ghost_m <= config.SUPER_BLAST_COOL_TO) & (over | still)] = 0
 
     def scale_spin(self, wl, factor):
         """Spin a super well faster or slower, keeping its direction, between 0.05 and SUPER_SPIN_MAX."""
@@ -766,33 +854,39 @@ class World:
         self.place_many(xs, ys, masses, sp.vx, sp.vy)
 
     def _draw_supers_together(self):
-        """Super wells whose ranges overlap are hauled rapidly towards their common centre of mass (or towards one
-        being dragged), whatever their mass, until their cores touch and they merge."""
+        """Super wells whose ranges overlap are drawn together, whatever their mass, until their cores touch and they
+        merge. They close faster and faster: the pull between them grows the nearer they are (SUPER_MERGE_ACCEL x the
+        sum of their ranges / their distance, per tick), up to SUPER_MERGE_MAX_SPEED. Their sideways motion round each
+        other fades (SUPER_MERGE_SPIRAL), so they spiral in. The lighter one covers more of the gap (about their common
+        centre of mass); one being dragged stays put and the other comes to it."""
         supers = [wl for wl in self.wells if wl.is_super]
+        for wl in supers:
+            wl.merging = False
         for i, a in enumerate(supers):
             for b in supers[i + 1:]:
+                reach = self.well_range(a) + self.well_range(b)
                 gap = self.distance(a.x, a.y, b.x, b.y)
-                if gap >= self.well_range(a) + self.well_range(b):
+                if gap >= reach or gap <= 0:
                     continue
+                a.merging = b.merging = True
                 bdx, bdy = self.delta(a.x, a.y, b.x, b.y)   # b as seen from a (round the border if shorter)
+                ux, uy = bdx / gap, bdy / gap
+                rvx, rvy = b.vx - a.vx, b.vy - a.vy
+                closing = -(rvx * ux + rvy * uy)
+                tx, ty = rvx + closing * ux, rvy + closing * uy             # sideways part
+                pull = config.SUPER_MERGE_ACCEL * reach / max(gap, a.core() + b.core())
+                closing = min(max(closing, 0.0) + pull, config.SUPER_MERGE_MAX_SPEED, gap)
+                keep = 1.0 - config.SUPER_MERGE_SPIRAL
+                rvx, rvy = -closing * ux + keep * tx, -closing * uy + keep * ty
                 if a is self.held or b is self.held:
-                    cx, cy = (a.x, a.y) if a is self.held else (a.x + bdx, a.y + bdy)
-                    cvx = cvy = 0.0
-                else:
-                    total = a.mass + b.mass
-                    cx = a.x + bdx * b.mass / total
-                    cy = a.y + bdy * b.mass / total
-                    cvx = (a.vx * a.mass + b.vx * b.mass) / total
-                    cvy = (a.vy * a.mass + b.vy * b.mass) / total
-                for wl, (wx, wy) in ((a, (a.x, a.y)), (b, (a.x + bdx, a.y + bdy))):
-                    if wl is self.held:
-                        continue
-                    dx, dy = cx - wx, cy - wy
-                    d = math.hypot(dx, dy)
-                    if d > 0:
-                        speed = min(d, max(config.SUPER_MERGE_MIN_SPEED, d * config.SUPER_MERGE_RATE))
-                        wl.vx = cvx + dx / d * speed
-                        wl.vy = cvy + dy / d * speed
+                    moving, sign = (b, 1.0) if a is self.held else (a, -1.0)
+                    moving.vx, moving.vy = sign * rvx, sign * rvy
+                    continue
+                total = a.mass + b.mass
+                cvx = (a.vx * a.mass + b.vx * b.mass) / total
+                cvy = (a.vy * a.mass + b.vy * b.mass) / total
+                a.vx, a.vy = cvx - rvx * b.mass / total, cvy - rvy * b.mass / total
+                b.vx, b.vy = cvx + rvx * a.mass / total, cvy + rvy * a.mass / total
 
     def _random_masses(self, amount):
         """Particle masses drawn uniformly from EJECT_MASS, the last one trimmed so they add up to exactly amount."""
@@ -852,7 +946,7 @@ class World:
         return ejected
 
     def _swallow_wells(self):
-        """A planet touching a super well's core starts dissolving into particles (which the core swallows as they
+        """A star touching a super well's core starts dissolving into particles (which the core swallows as they
         reach it). Two super wells merge when their cores touch: mass adds up and momentum is conserved."""
         merged = True
         while merged:
@@ -866,7 +960,7 @@ class World:
                     if b is a or b.sign < 0:
                         continue
                     d = self.distance(a.x, a.y, b.x, b.y)
-                    if not b.is_super:          # a planet touching the core dissolves (the core eats the particles)
+                    if not b.is_super:          # a star touching the core dissolves (the core eats the particles)
                         if b.wave < 0 and d <= a.core() + b.radius:
                             self._start_wave(b, a)
                         continue
@@ -907,10 +1001,13 @@ class World:
                          for wl in self.wells if wl.is_super], np.float64).reshape(-1, 6)
 
     def _whirl_accel(self, body, x, y, vx, vy):
-        """The super wells' whirlpools on a well or spawner at (x, y) (not a super well on itself)."""
+        """The super wells' whirlpools on a well or spawner at (x, y). Not on a super well: one is only inside another's
+        whirlpool when their ranges overlap, and then they are being drawn together (_draw_supers_together)."""
         ax = ay = 0.0
+        if getattr(body, "is_super", False):
+            return ax, ay
         for wl in self.wells:
-            if wl.is_super and wl is not body:
+            if wl.is_super:
                 dx, dy = self.delta(wl.x, wl.y, x, y)
                 wx, wy, _ = kernels.whirl(dx, dy, vx, vy, self.well_range(wl), wl.spin, self.g_scale * wl.pull(),
                                           self.softening(wl), config.SUPER_SWIRL_SPEED, config.SUPER_SWIRL_GRIP,
@@ -933,21 +1030,33 @@ class World:
         r = min(self.w, self.h) / 2
         return math.hypot(self.orbit_speed * r, config.ORBIT_MIN_SPEED)
 
-    def rebuild_order(self):
+    def rebuild_order(self, cut_only=False):
         """Rank cells for leading-particles-first processing: lowest potential first and, with the global orbit on,
-        furthest ahead in the direction of turning first, so a moving clump's front moves before the rest follow."""
-        key = self.phi
-        if self.orbit:
-            ys, xs = np.divmod(np.arange(self.n), self.w)
-            ahead = -self.orbit * np.arctan2(ys - self.h / 2, xs - self.w / 2)     # lower = further ahead
-            if float(self.phi.max() - self.phi.min()) > 1e-9:  # mix both by rank
-                key = (order_buckets(self.phi, self.rng, 4096).astype(np.float64)
-                       + order_buckets(ahead.astype(np.float32), self.rng, 4096))
-            else:
-                key = ahead
-        self.bucket = order_buckets(np.asarray(key, np.float32), self.rng)
-        self.order_dirty = False
+        furthest ahead in the direction of turning first, so a moving clump's front moves before the rest follow.
+        cut_only: the potential hasn't changed, only turn the orbit's cut (cheap: no re-ranking)."""
         self.order_tick = self.tick_count
+        if not self.orbit:
+            self.bucket = order_buckets(np.asarray(self.phi, np.float32), self.rng)
+            self.order_dirty = False
+            return
+        nb = 4096
+        if self.angle_rank is None or self.angle_rank.size != self.n or self.angle_key != (self.w, self.h):
+            ys, xs = np.divmod(np.arange(self.n), self.w)
+            angle = np.arctan2(ys - self.h / 2, xs - self.w / 2).astype(np.float32)
+            self.angle_rank = order_buckets(angle, self.rng, nb).astype(np.int32)
+            self.angle_key = (self.w, self.h)
+        if not cut_only or self.phi_rank is None:
+            flat = float(self.phi.max() - self.phi.min()) <= 1e-9
+            self.phi_rank = None if flat else order_buckets(self.phi, self.rng, nb).astype(np.int32)
+            self.order_dirty = False
+        # Ranked by angle there is a cut where the rank jumps from last to first: flow crossing it is processed
+        # trailing-first and jams into a visible line. So the cut is turned a little every re-rank (a cyclic shift of
+        # the angle rank), which smears any such edge away.
+        self.cut = (self.cut + config.ORDER_CUT_STEP) % (2 * math.pi)
+        ahead = self.angle_rank if self.orbit < 0 else nb - 1 - self.angle_rank     # lower = further ahead
+        ahead = (ahead + int(self.cut / (2 * math.pi) * nb)) % nb
+        # the sum of two ranks already orders the cells; its 2 x 4096 levels fit the bucket sort as they are
+        self.bucket = (ahead if self.phi_rank is None else self.phi_rank + ahead).astype(np.uint16)
 
     # --- simulation -------------------------------------------------------------------------------
 
@@ -958,6 +1067,8 @@ class World:
         # the processing order lags a little while a well is being dragged: it only affects efficiency
         if self.order_dirty and self.tick_count - self.order_tick >= config.ORDER_EVERY or self.bucket is None:
             self.rebuild_order()
+        elif self.orbit and self.tick_count - self.order_tick >= config.ORDER_CUT_EVERY:
+            self.rebuild_order(cut_only=True)
         if self.sg_on and self.tick_count % config.SG_EVERY == 0:
             changed = self.sg.update(self.mass, self.sg_g * self.g_scale)
             kernels.wake_blocks(changed, self.sg.block, self.sg.cw, self.w, self.h, self.mass, self.flag)
@@ -965,17 +1076,20 @@ class World:
         self.tick_count += 1
         self.stats[:] = 0
         params, whirls = self.params(), self.whirls()
+        if self.blasts:
+            self._step_blasts()
         self.n_awake = kernels.step(self.w, self.h, self.tick_count, params, self.mass, self.kin, self.quad,
                                     self.shade, self.stamp, self.flag, self.cur, self.order, self.bucket_counts,
                                     self.bucket, self.fx, self.fy, self.sg.gx, self.sg.gy, self.sg.block, self.sg.cw,
                                     self.hole, self.absorbed, self.solid, self.gvx, self.gvy, whirls, self.stats)
         if self.ghost_m.size:
             self._step_ghosts(params, whirls)
+            self._cool_blasts()
         self._collect_absorbed()
         if self.collapse_on and self.tick_count % config.COLLAPSE_EVERY == 0 and self.tick_count >= self.calm_until:
             self.check_collapse()
-        if config.PLANET_FORM_ON and self.tick_count % config.PLANET_FORM_EVERY == 0:
-            self.form_planets()
+        if config.STAR_FORM_ON and self.tick_count % config.STAR_FORM_EVERY == 0:
+            self.form_stars()
         self.step_wells()
         self.step_spawners()
         t2 = time.perf_counter()
@@ -1000,10 +1114,11 @@ class World:
         self.ghost_vy = np.zeros(0)
         self.ghost_m = np.zeros(0, np.int64)
         self.ghost_age = np.zeros(0, np.int64)
+        self.ghost_tag = np.zeros(0, np.int64)       # > 0: debris of that blast (see _cool_blasts)
 
     def pour_ghosts(self, px, py, radius_px, m):
         """Pour ghost particles in a circle around a pixel, at the brush's rate, anywhere in it (they overlap
-        particles, planets and each other freely). m: a mass or a (min, max) range."""
+        particles, stars and each other freely). m: a mass or a (min, max) range."""
         c = self.cell
         xs, ys, _, _ = self._disk_cells(px // c, py // c, max(0.5, radius_px / c))
         pick = self.rng.random(xs.size) < config.POUR_CHANCE
@@ -1013,8 +1128,9 @@ class World:
         lo, hi = m if isinstance(m, tuple) else (m, m)
         self.add_ghosts(xs[pick], ys[pick], self.rng.integers(lo, hi + 1, n))
 
-    def add_ghosts(self, xs, ys, masses, vx=0.0, vy=0.0):
-        """Add ghosts at positions in cells (arrays) with masses (an array or one mass) and velocity."""
+    def add_ghosts(self, xs, ys, masses, vx=0.0, vy=0.0, tag=0, age=0):
+        """Add ghosts at positions in cells (arrays) with masses (an array or one mass), velocity (a number or an
+        array), a blast tag and an age."""
         n = len(xs)
         if self.wrap:
             xs, ys = np.mod(xs, self.w), np.mod(ys, self.h)
@@ -1025,7 +1141,8 @@ class World:
         self.ghost_vx = np.concatenate([self.ghost_vx, np.broadcast_to(np.float64(vx), n)])
         self.ghost_vy = np.concatenate([self.ghost_vy, np.broadcast_to(np.float64(vy), n)])
         self.ghost_m = np.concatenate([self.ghost_m, np.broadcast_to(np.asarray(masses, np.int64), n)])
-        self.ghost_age = np.concatenate([self.ghost_age, np.zeros(n, np.int64)])
+        self.ghost_age = np.concatenate([self.ghost_age, np.broadcast_to(np.asarray(age, np.int64), n)])
+        self.ghost_tag = np.concatenate([self.ghost_tag, np.full(n, tag, np.int64)])
 
     def _step_ghosts(self, params, whirls):
         """Move the ghosts (feeling every gravity but each other's: they aren't in the self-gravity mesh), let the
@@ -1038,7 +1155,7 @@ class World:
                             self.quad, self.shade, self.stamp, self.flag, self.solid, self.hole, self.wrap)
         keep = self.ghost_m > 0
         if not keep.all():
-            for name in ("ghost_x", "ghost_y", "ghost_vx", "ghost_vy", "ghost_m", "ghost_age"):
+            for name in ("ghost_x", "ghost_y", "ghost_vx", "ghost_vy", "ghost_m", "ghost_age", "ghost_tag"):
                 setattr(self, name, getattr(self, name)[keep])
 
     def ghost_count(self):
@@ -1074,6 +1191,7 @@ class World:
                                   self.flag, self.solid)
 
     def clear(self):
+        self.blasts.clear()
         self.mass[:] = 0
         self.kin[:] = 0
         self.quad[:] = 0
@@ -1163,7 +1281,7 @@ class World:
     def add_well(self, px, py, mass, radius=config.WELL_SOFTENING, sign=1, vx=0.0, vy=0.0):
         """A normal well (a repulsor if sign < 0) at a pixel position; radius is its size in cells."""
         x, y = px / self.cell, py / self.cell
-        omega = float(self.rng.choice((-1, 1)) * self.rng.uniform(*config.PLANET_SPIN))
+        omega = float(self.rng.choice((-1, 1)) * self.rng.uniform(*config.STAR_SPIN))
         wl = Well(x, y, mass, radius, sign=sign, vx=vx, vy=vy, omega=omega, built=(x, y, mass))
         self.wells.append(wl)
         self.field_dirty = True
@@ -1343,6 +1461,6 @@ def warmup():
     w.ghost_age[:] = config.GHOST_TICKS - 2
     for _ in range(config.COLLAPSE_EVERY):
         w.step()
-    w.form_planets()
+    w.form_stars()
     for mode in range(len(VIEW_MODES)):
         w.render(mode)
