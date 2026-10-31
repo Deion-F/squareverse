@@ -30,6 +30,7 @@ class Square:
     body_color: tuple
     outline_color: tuple
     previous_direction: str | None = None
+    bounced: bool = False          # last move was a bounce (not its first-choice direction)
     blocked: bool = False          # failed every attempt and survived (white outline, as in the original)
     alive: bool = True
     directions_already_tried: set = field(default_factory=set)
@@ -230,11 +231,14 @@ class Squareverse:
             first = children.dominant(self.rng)[1]
         else:
             single, side = children.dominant(self.rng)
-            first = side if single else square.previous_direction
+            # right after a bounce momentum wins once; otherwise a light Square (children all in one half) would
+            # head back into whatever just blocked it and ping-pong between two cells
+            first = side if single and not square.bounced else square.previous_direction
 
         for direction in (first, INVERSE[first]):
             tried.add(direction)
             if self.attempt(square, direction):
+                square.bounced = direction != first
                 return self._after_move(square)
 
         for _ in range(2):
@@ -243,6 +247,7 @@ class Squareverse:
                 break
             tried.add(direction)
             if self.attempt(square, direction):
+                square.bounced = True
                 return self._after_move(square)
 
         self._stats.trapped += 1
@@ -281,13 +286,16 @@ class Squareverse:
             result, next_square = self.check(front.col, front.row, direction)
             if result is FREE:
                 break
-            if result is BORDER:
+            if result is BORDER or front.mass <= next_square.mass:
+                if not self.crush_when_trapped:   # --no-crush: a push that would destroy a Square is blocked
+                    self._blockers.append(occupant)
+                    return False
                 victim = chain.pop()
-                self._stats.border_kills += 1
-                break
-            if front.mass <= next_square.mass:
-                victim, against = chain.pop(), next_square
-                self._stats.crushed += 1
+                if result is BORDER:
+                    self._stats.border_kills += 1
+                else:
+                    against = next_square
+                    self._stats.crushed += 1
                 break
             chain.append(next_square)
 

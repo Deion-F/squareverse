@@ -7,8 +7,8 @@ DIAGONAL_MOVES = False        # original HEAD allowed 8 directions; the agreed l
 CRUSH_WHEN_TRAPPED = True     # original: a Square that fails every ladder attempt is destroyed
 
 # --- Child Squareverse (mini universe inside every Square) ----------------------
-CHILD_GRID = 12               # original: 300 px / 25 px spacing -> 12 x 12 cells
-CHILD_COUNT_RANGE = (1, 96)   # children per Square (= its mass); original HEAD used random mass 0-255
+CHILD_GRID = 24               # original: 300 px / 25 px spacing -> 12 x 12 cells
+CHILD_COUNT_RANGE = (2, 192)  # children per Square (= its mass); original HEAD used random mass 0-255
 SPAWN_CHILD_CYCLES = 5        # original a41bbab: 5 child cycles before an idle Square picks a direction
 MOVE_CHILD_CYCLES = 1         # original a41bbab: 1 child cycle after every successful parent move
 

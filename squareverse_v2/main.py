@@ -33,9 +33,10 @@ from sv.world import World, warmup
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--size", default=f"{config.WINDOW[0]}x{config.WINDOW[1]}", help="window size WxH in px")
+    p.add_argument("--fullscreen", action="store_true", help="start fullscreen (F11 toggles)")
     p.add_argument("--cell", type=int, default=config.DEFAULT_CELL, choices=config.CELL_SIZES,
                    help="px per particle")
-    p.add_argument("--preset", default="disk", choices=sorted(PRESETS), help="starting scene")
+    p.add_argument("--preset", default=config.DEFAULT_PRESET, choices=sorted(PRESETS), help="starting scene")
     p.add_argument("--particles", type=int, help="particle count for the preset (default: fills its region)")
     p.add_argument("--seed", type=int, help="random seed for a reproducible run")
     p.add_argument("--benchmark", type=int, metavar="TICKS", help="run TICKS ticks headless and print timings")
@@ -81,7 +82,7 @@ def main():
         return
 
     from sv.app import App   # imported late so --benchmark works without a display
-    App(world).run()
+    App(world, fullscreen=args.fullscreen).run()
 
 
 if __name__ == "__main__":
