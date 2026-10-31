@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # Launch Squareverse v2. Extra args pass through, e.g. `squareverse --preset cloud --cell 3`.
-# `squareverse --legacy ...` runs the original pygame edition, e.g. `squareverse --legacy --no-prompt --squares q`
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 if [ -x "$root/.venv/bin/python" ]; then py="$root/.venv/bin/python"; else py=python3; fi
-if [ "$1" = "--legacy" ]; then
-    shift
-    cd "$root/squareverse_pygame" && exec "$py" main.py "$@"
-fi
 cd "$root/squareverse_v2" && exec "$py" main.py "$@"

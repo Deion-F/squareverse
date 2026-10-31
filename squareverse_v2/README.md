@@ -2,11 +2,11 @@
 
 A particle sandbox for watching large numbers of square particles under gravity wells, global gravity and
 self-gravity. Particles of different masses layer, collide, merge and split. It is a ground-up rebuild of
-`squareverse_pygame/` for performance, using the architecture of the falling-sand prototype (`~/TV_Project/sand.py`)
-plus numba.
+the older `squareverse_pygame` edition (in the history of `master`) for performance, using the architecture of the
+falling-sand prototype (`~/TV_Project/sand.py`) plus numba.
 
 ```
-./squareverse                      # from the repository root (v2; `--legacy` runs the old edition)
+./squareverse                      # from the repository root
 python main.py --preset cloud      # or directly; re-launches itself with ../.venv if numba is missing
 python main.py --cell 1 --preset disk --particles 200000
 python main.py --fullscreen                    # F11 toggles; the window is also resizable
