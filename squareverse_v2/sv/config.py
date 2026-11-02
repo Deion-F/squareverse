@@ -13,7 +13,21 @@ STRIP_SIZE = 20                        # cells: on all cores the particles run i
                                        #   strips share clumps of matter out more evenly
 
 # --- Starting state of the app ----------------------------------------------
-DEFAULT_PRESET = "disk"                # rain, disk, cloud, binary or empty (--preset overrides)
+DEFAULT_PRESET = "systems"             # rain, disk, cloud, binary, systems or empty (--preset overrides)
+SYSTEM_WELL = 80_000                   # the systems preset: super wells this heavy (B at pour mass 1, default brush),
+SYSTEM_ORBIT = 130.0                   #   each orbited this far out (cells) by stars of this size (cells; a 20 px
+SYSTEM_STAR_RADIUS = 10.0              #   brush: three of the default size unsettle each other) and pour mass (see
+SYSTEM_POUR = 16                       #   README: A star orbiting a super well)
+SYSTEM_CENTRE_STARS = 3                # stars round the one in the middle
+SYSTEM_OTHERS = (2, 3)                 # how many more systems are scattered round it (at random, between these) ...
+SYSTEM_OTHER_STARS = (1, 2)            #   ... with this many stars each
+SYSTEM_SPACING = 5.0                   # systems' centres at least this x the orbit apart, their stars clear of the
+SYSTEM_EDGE = 10.0                     #   edge by this (cells; in a smaller universe it is all scaled down: lengths x k,
+SYSTEM_MIN_SCALE = 0.6                 #   masses x k^2, to at most this, then the systems are closer together)
+SYSTEM_BALANCE = 0.1                   # where the others' pulls on the middle one cancel to under this share of one's
+                                       #   at the nearest they may be (else its stars are dragged off their orbits,
+                                       #   as its well responds less: Well.fall)
+DISK_REACH = 20.0                      # the disk preset's gravity reach (cells), which it was made for
 DISK_MASS = 20_000_000                 # the disk preset's total mass, in particles of every mass from 1 up
 DISK_FILL = 0.6                        # ...filling this share of its ring's cells
 TICKS_PER_FRAME = 1                    # + / -
@@ -93,7 +107,8 @@ FUSION_LIGHT = 16                      # fusion in stars: a star's particle this
 FUSION_CHANCE = 0.002                  #   neighbour of the same star with this chance per tick, and the two fuse
 FUSION_HEAT_SHARE = 0.05               #   into one, losing this share of their mass as heat (blowing light matter
                                        #   away from the star: its own particles let heat through)
-HEAT_COLOR = (255, 250, 70)                # heat particles glow this colour (saturated: no particle is this colour)
+RADIATION_COLOR = (150, 225, 255)      # radiation - heat and gravitational waves - glows this pale blue (yellow
+HEAT_COLOR = RADIATION_COLOR           #   heat looked like the stars' own particles)
 
 # --- Gravity -----------------------------------------------------------------
 G_SCALE_STEP = 1.25                    # < / > multiply or divide all gravity by this
@@ -101,9 +116,11 @@ GLOBAL_G = 0.2                         # global gravity (arrow keys), at gravity
 GRAVITY_DIR = None                     # starting global gravity: None or down, down-left, left, ... (arrows, Q/E, 0)
 GRAVITY_SCALE = 0.6                    # starting strength of all gravity (< / >)
 G = 0.002                              # gravitational constant: particles, wells and super wells all pull with
-                                       #   accel = G * mass * r / (r^2 + soft^2)^1.5 x (1 + d/R) e^(-d/R), d the
-GRAVITY_REACH = 20.0                   #   softened distance and R this many cells: gravity fades past a few R, so
-                                       #   things must come close to interact strongly (0: it reaches all the way)
+                                       #   accel = G * mass * r / (r^2 + soft^2)^1.5, in full out to the softened
+GRAVITY_REACH = 0.0                    #   distance R (this many cells), then fading smoothly to nothing at 2 R
+                                       #   (kernels.fade), so things must come close to interact and further apart
+                                       #   don't at all; orbits within R are stable, past ~1.16 R none is (0: it
+                                       #   reaches all the way)
 WELL_DENSITY = 64.0                    # a brush-sized well weighs its circle's area x pour mass x this
 WELL_SOFTENING = 4.0                   # default size of a solid well (cells)
 WELL_INERTIA_MASS = 20000.0            # super wells accelerate (and top out at VMAX) x this / (this + their mass);
@@ -139,6 +156,16 @@ STAR_BLAST_PUSH = 0.4                  #   as debris, and it shoves what it pass
 STAR_PLACE_LAYERS = ((0.4, 8.0), (0.7, 3.0), (1.0, 1.0))   # a placed star's particle masses by radius share, against
                                        #   its envelope: its core is made of pour-mass particles, the middle 3/8 and
                                        #   the envelope 1/8 of that (at least 1)
+ORBIT_BAND_HOLD = 2.9                  # the Star tool shows round each super well where the star it would place can
+                                       #   orbit: beyond where its own pull at its surface is this x the tide across
+                                       #   it (1.3 x what it was where a pour-16 star from the 40 px brush was
+                                       #   stripped, 110 cells from an 80,000 well), outside the dotted circle ...
+ORBIT_BAND_STABLE = 2.8                #   ... out to where the pull falls as fast as 1 / r^this (2.8: 3 is the limit
+                                       #   for any stable orbit), within half its Hill radius against any other super
+                                       #   well (and 0.6 of the way to where their pulls balance), inside the edge
+ORBIT_BAND_COLOR = (110, 220, 140)
+ORBIT_STARS = True                     # a placed star sets off in orbit round the super well pulling hardest on it
+                                       #   (menu; T)
 GHOST_STARS = False                    # placed stars arrive as ghost stars, landing GHOST_TICKS later (menu; shift+click
                                        #   with the Star tool always places one)
 STAR_FORM_ON = True                    # a knot of matter with a heavy core inside a lighter envelope becomes a star
@@ -221,12 +248,32 @@ SUPER_SPIN_ARMS_AT = 0.5               # its spiral arms turn as fast as its whi
                                        #   of the way out to its dotted circle...
 SUPER_SPIN_FRAME_MAX = 0.6             # ...eased to less than this many radians per frame when that is faster (three
                                        #   arms a third of a turn apart turning further would seem to turn backwards)
-SUPER_MERGE_ACCEL = 0.0025             # super wells whose ranges overlap are drawn together, closing faster by this x
-                                       #   (sum of their ranges / their distance) cells/tick every tick, so the pull
-                                       #   grows as they near (a few seconds from first overlap to merging) ...
-SUPER_MERGE_MAX_SPEED = 3.0            #   ... up to this closing speed (cells/tick), until their cores touch and merge
-SUPER_MERGE_SPIRAL = 0.03              #   their sideways motion round each other fades by this share per tick
-SUPER_MERGE_GRACE = 120                # a super well that has just merged, or just got over SUPER_EXPLODE_MASS in
+SUPER_INSPIRAL_TICKS = 540             # super wells whose ranges overlap fall into orbit round each other and spiral
+                                       #   in: from ranges just touching to merging takes about this many ticks, the
+SUPER_INSPIRAL_SHRINK = 1.5            #   gap closing ~ (sum of ranges / gap) ^ this (slowly at first, ever faster) ...
+SUPER_INSPIRAL_PLUNGE = 0.12           #   ... and at the end by at most this share of it a tick: the final plunge
+SUPER_INSPIRAL_SPIN = 0.03             # they circle each other this fast (rad/tick) when their ranges just touch, and
+SUPER_INSPIRAL_SPIN_MAX = 0.35         #   faster as they near (~ gap ^ -1.5, as Kepler's law), up to this and never
+                                       #   faster than VMAX against each other
+SUPER_INSPIRAL_GRIP = 0.1              # a pair just caught settles onto that orbit over 1 / this ticks
+SUPER_STRETCH = 0.6                    # drawn: each core stretches towards the other by up to this share (~ 1 / gap^2),
+SUPER_BRIDGE = 1.6                     #   and once their gap is under this x their cores' radii added up a bridge
+                                       #   joins them
+SUPER_RINGDOWN = 0.5                   # the merged core is a bar this stretched, turning as fast as they circled at
+SUPER_RINGDOWN_TICKS = 18              #   the end, settling into a round core (e-folding time, ticks)
+SUPER_GW_INSPIRAL = 0.012              # gravitational waves (radiation; at most, for equal masses, x 4 m1 m2 / M^2): a
+                                       #   pair radiates this share of its mass as it spirals in, ever faster (the
+                                       #   binding energy it gives up: ~ 1 / gap) ...
+SUPER_GW_MERGER = 0.01                 #   ... this share in a burst as they merge ...
+SUPER_GW_RINGDOWN = 0.008              #   ... and this share, fading, while the merged core settles
+SUPER_GW_SPEED = 8.0                   # waves are particles flying straight at this speed (cells/tick), unbent by
+SUPER_GW_TICKS = 50                    #   gravity, for this many ticks, then land as ordinary particles. They leave
+SUPER_GW_SPREAD = 0.35                 #   in two beams along the line through the pair (spread this much, radians),
+SUPER_GW_BURST_SPREAD = 0.9            #   (the merger's burst this much), so they trace a two-armed spiral
+SUPER_GW_PIECES = 48                   #   at most this many a tick (the merger's burst: 8 x this), heavier when more
+SUPER_GW_COUPLING = 0.15               #   is radiated; like heat they hand matter this share of a head-on hit
+SUPER_GW_COLOR = RADIATION_COLOR       #   and glow this colour
+SUPER_MERGE_GRACE = 120               # a super well that has just merged, or just got over SUPER_EXPLODE_MASS in
                                        #   any way, can't go supernova for this many ticks (from the first merger:
                                        #   more in that time don't stretch it, unless one takes it over the limit)
 SUPER_MERGE_SHOCK_REACH = 1.5          # a merger sends a shock front out to this x the merged well's range ...

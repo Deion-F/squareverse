@@ -13,7 +13,8 @@ from .ui import UI
 from .usage import Usage
 from .world import VIEW_MODES
 
-PRESET_KEYS = {pygame.K_F1: "rain", pygame.K_F2: "disk", pygame.K_F3: "cloud", pygame.K_F4: "binary"}
+PRESET_KEYS = {pygame.K_F1: "rain", pygame.K_F2: "disk", pygame.K_F3: "cloud", pygame.K_F4: "binary",
+               pygame.K_F5: "systems"}
 ARROWS = {pygame.K_DOWN: 0, pygame.K_LEFT: 2, pygame.K_UP: 4, pygame.K_RIGHT: 6}
 POUR_KEYS = {pygame.K_1 + k: m for k, m in enumerate(config.POUR_MASSES)}
 POUR_KEYS[pygame.K_1 + len(config.POUR_MASSES)] = tuple(config.RANDOM_MASS)   # random mass in a range
@@ -34,6 +35,7 @@ class App:
         self.pour_mass = tuple(config.RANDOM_MASS) if config.POUR_MASS == "random" else config.POUR_MASS
         self.brush_px = config.BRUSH_PX
         self.ghost_stars = config.GHOST_STARS   # placed stars arrive as ghost stars
+        self.orbit_stars = config.ORBIT_STARS   # placed stars set off in orbit round the nearest super well
         self.render_ms = 0.0
         self.dragging = None        # the body being dragged
         self.tool = "pour"          # what a left click on the universe does (see menu.TOOLS)
@@ -134,6 +136,8 @@ class App:
             t = time.perf_counter()
             renderer.draw_world(world, self.view)
             self.render_ms = (time.perf_counter() - t) * 1000
+            if self.tool == "star":                     # where the star it would place could orbit
+                renderer.draw_orbit_bands(world, *world.brush_star(self.brush_px, self.pour_mass))
             renderer.draw_wells(world)
             if self.selected is not None:
                 renderer.draw_selection(world, self.selected)
@@ -166,12 +170,14 @@ class App:
         self.cam.zoom_at(factor, *pos)
 
     def place(self, what, mx, my):
-        """Put a body of the brush's size at a pixel: a star (a ghost star if what says so, or ghost_stars is on), a
+        """Put a body of the brush's size at a pixel: a star (a ghost star if what says so, or ghost_stars is on;
+        in orbit round the super well pulling hardest there if orbit_stars is on), a
         repulsor, a super well (as heavy as a brush-sized well, and never lighter than what collapse would make), or
         a spawner (locked or not)."""
         w = self.world
         if what in ("star", "ghost star"):
-            return w.add_star(mx, my, self.brush_px, self.pour_mass, ghost=what == "ghost star" or self.ghost_stars)
+            return w.add_star(mx, my, self.brush_px, self.pour_mass, ghost=what == "ghost star" or self.ghost_stars,
+                              orbit=self.orbit_stars)
         if what == "repulsor":
             return w.add_sized_well(mx, my, self.brush_px, self.pour_mass, -1)
         if what == "super":
@@ -252,6 +258,8 @@ class App:
                 w.collapse_on = not w.collapse_on
             else:
                 self.place("super", mx, my)
+        elif k == pygame.K_t:
+            self.orbit_stars = not self.orbit_stars
         elif k == pygame.K_x:
             nearest = w.nearest_body(mx, my)
             if nearest is not None:

@@ -61,3 +61,28 @@ def test_super_well_arms_never_seem_to_turn_backwards(ui):
     assert steps[0] == pytest.approx(0.1, rel=0.01)                  # slow turns are drawn as they are
     assert all(0 < s < config.SUPER_SPIN_FRAME_MAX for s in steps)   # fast ones eased, still forwards...
     assert steps == sorted(steps)                                    # ...and faster still looks faster
+
+
+def test_star_tool_shades_the_stable_orbit_band():
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    try:
+        from sv import config
+        from sv.render import Renderer
+        from sv.world import World
+        w = World(800, 600, 2, seed=1)
+        w.set_reach(0)
+        w.g_scale = 0.6
+        wl = w.add_super_well(400, 300, 80000)
+        r = Renderer(screen)
+        r.cam.update(w, (800, 600))
+        inner, outer = w.orbit_band(wl, *w.brush_star(20, 16))
+        screen.fill((0, 0, 0))
+        r.draw_orbit_bands(w, *w.brush_star(20, 16))
+        x, y = r.cam.point(wl.x, wl.y)
+        k = r.cam.k
+        band = screen.get_at((round(x + (inner + outer) / 2 * k), round(y)))[:3]
+        hole = screen.get_at((round(x + inner / 2 * k), round(y)))[:3]
+        assert band[1] > band[0] and band[1] > 0 and hole == (0, 0, 0)   # greenish in the band, nothing inside
+    finally:
+        pygame.quit()

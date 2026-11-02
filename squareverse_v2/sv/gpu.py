@@ -70,7 +70,15 @@ def open_device(name=None):
 # Ports of the numba helpers they are named after (kernels._axis, fade, _pull, _lerp_axis, whirl, orbit_accel,
 # _star_pull), in float32. A dispatch can be wider than MAX_GROUPS workgroups, so the index folds in id.y.
 
-COMMON = """
+def _fade_constants():
+    """kernels.fade's constants, for the shaders' port of it."""
+    from . import kernels as k
+    return "".join(f"const {name}: f32 = {value!r};\n" for name, value in
+                   (("TAPER", k.REACH_TAPER), ("TL", k._TL), ("A0", k._A0), ("A1", k._A1), ("A2", k._A2),
+                    ("A3", k._A3), ("H_END", float(k._H_END)), ("H_IN", float(k._H_IN))))
+
+
+COMMON = _fade_constants() + """
 fn pmod(a: f32, n: f32) -> f32 { return a - n * floor(a / n); }
 fn pmodi(a: i32, n: i32) -> i32 {             // a mod n for a in [-n, 2n): % of a negative is unreliable in GLSL
     if (a < 0) { return a + n; }
@@ -82,9 +90,15 @@ fn axis(v: f32, c: f32, n: f32, min_image: bool) -> f32 {
     if (min_image) { d -= n * floor(d / n + 0.5); }
     return d;
 }
+fn taper_h(u: f32) -> f32 {
+    return -A0 / u + A1 * log(u) + A2 * u + 0.5 * A3 * u * u;
+}
 fn fade(rho: f32, kinv: f32) -> vec2<f32> {
-    let e = exp(-rho * kinv);
-    return vec2<f32>(e * (1.0 + rho * kinv), e);
+    let u = rho * kinv;
+    if (u <= 1.0) { return vec2<f32>(1.0, 1.0 - u + u * H_IN); }
+    if (u >= TAPER) { return vec2<f32>(0.0); }
+    let t = (u - 1.0) / TL;
+    return vec2<f32>(1.0 - t * t * (3.0 - 2.0 * t), u * (H_END - taper_h(u)));
 }
 fn pull(dx: f32, dy: f32, strength: f32, soft: f32, kinv: f32) -> vec3<f32> {
     let rho = sqrt(dx * dx + dy * dy + soft * soft);
@@ -265,9 +279,10 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     if (gp[7] != 0.0) {
         a += orbit_accel(g.x - gp[10], g.y - gp[11], g.z, g.w, gp[7], gp[8], gp[9]);
     }
-    for (var j = 0; j < i32(gp[19]); j++) {
+    for (var j = 0; j < i32(gp[19]); j++) {      // each super well's exact pull and whirlpool
         let o = i32(gp[27]) + j * 6;
-        a += whirl(axis(g.x, aux[o], w, wrap), axis(g.y, aux[o + 1], h, wrap), g.z, g.w, o, kinv);
+        let rx = axis(g.x, aux[o], w, wrap); let ry = axis(g.y, aux[o + 1], h, wrap);
+        a += pull(-rx, -ry, aux[o + 4], aux[o + 5], kinv).xy + whirl(rx, ry, g.z, g.w, o, kinv);
     }
     if (gp[20] > 0.0) {
         a += star_pull(g.x, g.y, w, h, wrap, kinv);

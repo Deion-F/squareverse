@@ -17,6 +17,7 @@ HELP = [
     ("G / shift+G", "place star (a ball of particles, core of pour-mass particles, held by its own gravity) / solid "
                     "repulsor"),
     ("shift+LMB, Star tool", "place a ghost star: flies through everything, lands as a star"),
+    ("T", "placed stars set off in orbit round the super well pulling hardest on them, on/off"),
     ("F / shift+F", "place particle spawner: brush size sets the rate; shift locks it in place"),
     ("B", "place super well (swallows what touches its core; overlapping ones merge)"),
     ("shift+B", "collapse: dense mass becomes a super well, on/off"),
@@ -40,7 +41,7 @@ HELP = [
     ("U", "universe: the window's rectangle / round, reaching past the window (rotation stays on its circles)"),
     ("+ / -", "ticks per frame"),
     ("space / N", "pause / single tick"),
-    ("F1-F4", "presets: rain, disk, cloud, binary"),
+    ("F1-F5", "presets: rain, disk, cloud, binary, systems"),
     ("F11", "fullscreen (the window can also be resized)"),
     ("C / H / Esc", "clear / help / quit"),
 ]
@@ -48,6 +49,19 @@ HELP = [
 
 def pour_label(m):
     return "{}-{} random".format(*m) if isinstance(m, tuple) else str(m)
+
+
+def _oval(center, radius, stretch, angle, n=28):
+    """Points round a core stretched by `stretch` along `angle` (long axis radius x (1 + stretch), short axis
+    radius / sqrt(1 + stretch))."""
+    long_, short = radius * (1.0 + stretch), radius / math.sqrt(1.0 + stretch)
+    ca, sa = math.cos(angle), math.sin(angle)
+    pts = []
+    for i in range(n):
+        t = 2 * math.pi * i / n
+        u, v = long_ * math.cos(t), short * math.sin(t)
+        pts.append((center[0] + u * ca - v * sa, center[1] + u * sa + v * ca))
+    return pts
 
 
 def grid_overlay(world):
@@ -141,6 +155,7 @@ class Renderer:
         self.overlay_key = None
         self._glows = {}            # star coronas by (radius, colour)
         self._arms = {}             # super well id -> (its phase last frame, the angle its arms are drawn at)
+        self._band_layer = None     # see-through layer the stable-orbit bands are shaded on
 
     def draw_world(self, world, mode):
         """The cells the camera sees, scaled to the window (averaged when zoomed out past a px per cell)."""
@@ -165,6 +180,34 @@ class Renderer:
                 self.overlay, self.overlay_key = grid_overlay(world), key
             if self.overlay:
                 self.screen.blit(self.overlay, tuple(round(c) for c in cam.point(0, 0)))
+
+    def draw_orbit_bands(self, world, radius, mass):
+        """Round each super well, the band where a star of this radius (cells) and mass could be put to orbit it
+        (World.orbit_band): shaded, with its edges drawn."""
+        bands = [(wl, world.orbit_band(wl, radius, mass)) for wl in world.wells if wl.is_super]
+        bands = [(wl, band) for wl, band in bands if band]
+        if not bands:
+            return
+        size = self.screen.get_size()
+        if self._band_layer is None or self._band_layer.get_size() != size:
+            self._band_layer = pygame.Surface(size, pygame.SRCALPHA)
+        layer, cam, k = self._band_layer, self.cam, self.cam.k
+        layer.fill((0, 0, 0, 0))
+        pw, ph = world.w * k, world.h * k
+        shifts = [(sx, sy) for sx in (-pw, 0, pw) for sy in (-ph, 0, ph)] if world.wrap else [(0, 0)]
+        shade, edge = (*config.ORBIT_BAND_COLOR, 34), (*config.ORBIT_BAND_COLOR, 160)
+        for wl, (inner, outer) in bands:
+            x, y = cam.point(wl.x, wl.y)
+            ri, ro = max(1, round(inner * k)), max(2, round(outer * k))
+            for sx, sy in shifts:
+                c = (round(x + sx), round(y + sy))
+                if not (-ro <= c[0] <= size[0] + ro and -ro <= c[1] <= size[1] + ro):
+                    continue
+                pygame.draw.circle(layer, shade, c, ro)
+                pygame.draw.circle(layer, (0, 0, 0, 0), c, ri)      # (the layer's pixels are set, not blended)
+                pygame.draw.circle(layer, edge, c, ro, 1)
+                pygame.draw.circle(layer, edge, c, ri, 1)
+        self.screen.blit(layer, (0, 0))
 
     def draw_wells(self, world):
         cam, k = self.cam, self.cam.k
@@ -196,6 +239,14 @@ class Renderer:
                 center = at(wl, sx, sy)
                 if visible(center, extent):
                     self._draw_well(world, wl, center, radius)
+        for a, b, fill in world.bridges():               # a pair about to merge: their cores joined
+            ra, rb = (max(3, int(world.well_radius_px(wl) * cam.zoom)) for wl in (a, b))
+            dx, dy = world.delta(a.x, a.y, b.x, b.y)
+            for sx, sy in shifts:
+                ca = at(a, sx, sy)
+                if visible(ca, ra + math.hypot(dx, dy) * k):
+                    cb = (ca[0] + dx * k, ca[1] + dy * k)
+                    self._draw_bridge(world, (a, b), (ca, cb), (ra, rb), fill)
         self._arms = {key: self._arms[key] for key in arms}
         for sp in world.spawners:
             radius = max(3, int(sp.radius * k))
@@ -229,11 +280,30 @@ class Renderer:
                 pos = (int(center[0] + reach * math.cos(a)), int(center[1] + reach * math.sin(a)))
                 pygame.draw.circle(screen, config.SUPER_RANGE_COLOR, pos, 1)
             self._draw_spin_arms(wl, center, radius, self._arms[id(wl)][1])
-            pygame.draw.circle(screen, (0, 0, 0), center, radius)
-            pygame.draw.circle(screen, config.SUPER_RIM_COLOR, center, radius + 1, 1)
+            stretch, angle = world.well_shape(wl)
+            if stretch < 0.02:
+                pygame.draw.circle(screen, (0, 0, 0), center, radius)
+                pygame.draw.circle(screen, config.SUPER_RIM_COLOR, center, radius + 1, 1)
+            else:
+                pygame.draw.polygon(screen, (0, 0, 0), _oval(center, radius, stretch, angle))
+                pygame.draw.polygon(screen, config.SUPER_RIM_COLOR, _oval(center, radius + 1, stretch, angle), 1)
         else:
             self._draw_star_glow(wl, center, radius)
             self._draw_star(screen, wl, center, radius)
+
+    def _draw_bridge(self, world, pair, centers, radii, fill):
+        """Two cores about to merge, joined: a neck between them as wide as `fill` (0..1) of the smaller core, rimmed
+        on the outside, with both stretched cores filled in again over it so no rim shows inside."""
+        (ca, cb), (ra, rb) = centers, radii
+        ang = math.atan2(cb[1] - ca[1], cb[0] - ca[0])
+        half = fill * min(ra, rb)
+        nx, ny = -math.sin(ang) * half, math.cos(ang) * half
+        neck = [(ca[0] + nx, ca[1] + ny), (cb[0] + nx, cb[1] + ny), (cb[0] - nx, cb[1] - ny), (ca[0] - nx, ca[1] - ny)]
+        pygame.draw.polygon(self.screen, config.SUPER_RIM_COLOR, neck, 1)
+        pygame.draw.polygon(self.screen, (0, 0, 0), neck)
+        for wl, c, r in zip(pair, centers, radii):
+            stretch, angle = world.well_shape(wl)
+            pygame.draw.polygon(self.screen, (0, 0, 0), _oval(c, r, stretch, angle))
 
     def _draw_star_marks(self, st, center, ring):
         """A star is its particles; on top of them a small dot marks its centre of mass and a faint ring the reach of
@@ -463,6 +533,13 @@ class Renderer:
              f"spin {abs(wl.omega) * config.FPS:.2f} rad/s {'clockwise' if wl.omega > 0 else 'counterclockwise'}   "
              f"reach {world.reach(wl):.0f} cells", config.DIM),
         ]
+        pair = next((bn for bn in world.binaries if wl is bn.a or wl is bn.b), None)
+        if pair:
+            other = pair.b if wl is pair.a else pair.a
+            lines.append((f"spiralling in: {world.distance(wl.x, wl.y, other.x, other.y):.0f} cells apart, "
+                          f"circling {pair.omega * config.FPS / (2 * math.pi):.2f} times a second", config.DIM))
+        elif wl.ring:
+            lines.append(("ringing down after a merger", config.DIM))
         self.panel(lines, (pos[0] + 16, pos[1] + 16), self.small)
 
     def draw_inspector(self, info, pos):

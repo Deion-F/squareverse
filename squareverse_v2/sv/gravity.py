@@ -10,9 +10,31 @@ from . import config, kernels
 
 def fade(rho, kinv):
     """Shares of the plain inverse-square pull and of its potential left at softened distance rho (a number or an
-    array) when gravity reaches about 1 / kinv cells (kinv = 0: all the way). As kernels.fade."""
-    e = np.exp(-rho * kinv)
-    return e * (1.0 + rho * kinv), e
+    array) when gravity reaches 1 / kinv cells (kinv = 0: all the way). As kernels.fade."""
+    u = np.asarray(rho, np.float64) * kinv
+    t = np.clip((u - 1.0) / kernels._TL, 0.0, 1.0)
+    pull = 1.0 - t * t * (3.0 - 2.0 * t)
+    inside = np.minimum(u, 1.0)
+    taper = np.clip(u, 1.0, kernels.REACH_TAPER)
+    pot = np.where(u <= 1.0, 1.0 - inside + inside * kernels._H_IN,
+                   taper * (kernels._H_END - (-kernels._A0 / taper + kernels._A1 * np.log(taper) + kernels._A2 * taper
+                                               + 0.5 * kernels._A3 * taper * taper)))
+    if np.ndim(rho) == 0:
+        return float(pull), float(pot)
+    return pull, pot
+
+
+def tide_share(d, kinv):
+    """How much of the plain inverse-square tide (the change of a pull across a body) is left at distance d as gravity
+    fades: f - u f'(u) / 2, f the pull's share (fade) at u = d kinv. All of it within the reach, none past the
+    taper."""
+    u = d * kinv
+    if u <= 1.0:
+        return 1.0
+    if u >= kernels.REACH_TAPER:
+        return 0.0
+    t = (u - 1.0) / kernels._TL
+    return 1.0 - t * t * (3.0 - 2.0 * t) + 3.0 * u * t * (1.0 - t) / kernels._TL
 
 
 @functools.lru_cache(maxsize=4096)
@@ -20,21 +42,16 @@ def reach_for(strength, accel, kinv):
     """The distance (cells) at which a pull of `strength` (G x mass) drops to accel: strength / r^2, faded. (Asked
     for many times a tick for the same few wells, so the answers are kept.)"""
     r = math.sqrt(max(strength, 0.0) / accel)
-    if kinv <= 0.0 or r <= 0.0:
+    if kinv <= 0.0 or r * kinv <= 1.0:          # within the reach the pull is the plain one
         return r
-    # solve ln(strength / accel) + ln(1 + r kinv) - r kinv - 2 ln r = 0 in u = ln r by Newton's method: the left
-    # side falls and curves down in u, so from the unfaded distance (beyond the answer) it closes in from above
-    c = math.log(strength / accel)
-    u = math.log(r)
-    for _ in range(30):
-        r = math.exp(u)
-        x = r * kinv
-        g = c + math.log1p(x) - x - 2.0 * u
-        step = g / (x / (1.0 + x) - x - 2.0)
-        u -= step
-        if abs(step) < 1e-9:
-            break
-    return math.exp(u)
+    lo, hi = 1.0 / kinv, kernels.REACH_TAPER / kinv
+    for _ in range(50):                         # in the taper the pull falls steadily to nothing: halve the interval
+        mid = 0.5 * (lo + hi)
+        if strength / (mid * mid) * fade(mid, kinv)[0] > accel:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
 
 
 def external_field(w, h, wells, gvec, wrap=False, kinv=0.0, gpu=None, key=None):

@@ -30,6 +30,7 @@ S_MOVED, S_COLLISIONS, S_MERGES, S_SPLITS, S_SINKS, S_ABSORBED, S_HEAT = range(7
 N_STATS = 7
 
 HEAT_TAG = -1                   # ghost tag of heat (radiation): see _shed and heat_push
+WAVE_TAG = -2                   # ghost tag of gravitational waves (World._radiate_waves): they fly straight
 
 N_SHADES = 6
 
@@ -470,12 +471,13 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             ax += ox_
             ay += oy_
         whirled = False                                  # inside a whirlpool: never sleeps or sticks
-        for k in range(whirls.shape[0]):
-            wx_, wy_, inside = whirl(_axis(x, whirls[k, 0], w, wrap), _axis(y, whirls[k, 1], h, wrap), vx0, vy0,
-                                     whirls[k, 2], whirls[k, 3], whirls[k, 4], whirls[k, 5], whirl_speed,
-                                     whirl_grip, whirl_infall, whirl_edge, kinv)
-            ax += wx_
-            ay += wy_
+        for k in range(whirls.shape[0]):                 # each super well: its pull, exact from where it is now (it
+            rx_, ry_ = _axis(x, whirls[k, 0], w, wrap), _axis(y, whirls[k, 1], h, wrap)   # isn't on the field), and
+            gx_, gy_, _ = _pull(-rx_, -ry_, whirls[k, 4], whirls[k, 5], kinv)               # its whirlpool
+            wx_, wy_, inside = whirl(rx_, ry_, vx0, vy0, whirls[k, 2], whirls[k, 3], whirls[k, 4], whirls[k, 5],
+                                     whirl_speed, whirl_grip, whirl_infall, whirl_edge, kinv)
+            ax += gx_ + wx_
+            ay += gy_ + wy_
             whirled = whirled or (inside and whirls[k, 3] != 0.0)
         if stars.shape[0] > 0:
             sx_, sy_, px_, py_ = _star_pull(x, y, own, stars, sfx, sfy, s_block, s_cw, s_ch, w, h, wrap, kinv)
@@ -956,12 +958,13 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
                                    P[P_ORBIT_VMIN])
             ax += ox_
             ay += oy_
-        for j in range(whirls.shape[0]):
-            wx_, wy_, _ = whirl(_axis(gx[k], whirls[j, 0], w, wrap), _axis(gy[k], whirls[j, 1], h, wrap), gvx[k],
-                                gvy[k], whirls[j, 2], whirls[j, 3], whirls[j, 4], whirls[j, 5], P[P_WHIRL_SPEED],
-                                P[P_WHIRL_GRIP], P[P_WHIRL_INFALL], P[P_WHIRL_EDGE], P[P_REACH])
-            ax += wx_
-            ay += wy_
+        for j in range(whirls.shape[0]):                 # each super well's exact pull and whirlpool
+            rx_, ry_ = _axis(gx[k], whirls[j, 0], w, wrap), _axis(gy[k], whirls[j, 1], h, wrap)
+            px_, py_, _ = _pull(-rx_, -ry_, whirls[j, 4], whirls[j, 5], P[P_REACH])
+            wx_, wy_, _ = whirl(rx_, ry_, gvx[k], gvy[k], whirls[j, 2], whirls[j, 3], whirls[j, 4], whirls[j, 5],
+                                P[P_WHIRL_SPEED], P[P_WHIRL_GRIP], P[P_WHIRL_INFALL], P[P_WHIRL_EDGE], P[P_REACH])
+            ax += px_ + wx_
+            ay += py_ + wy_
         if stars.shape[0] > 0:
             sx_, sy_, _, _ = _star_pull(gx[k], gy[k], 0, stars, sfx, sfy, s_block, s_cw, s_ch, w, h, wrap, P[P_REACH])
             ax += sx_
@@ -1105,13 +1108,13 @@ def paint(idx, color, rgb):
 
 
 @njit(cache=True)
-def heat_push(gx, gy, gvx, gvy, gm, gtag, coupling, min_speed, vmax, w, h, mass, kin, owner, flag):
-    """Radiation pressure: each heat ghost still faster than min_speed against the free particle in its cell (not a
-    star's) pushes it the way it is going, handing over `coupling` of what a head-on elastic collision would - so a
-    light particle is blown away while a heavy one barely moves and soaks the heat up - and slows by as much
-    (momentum is kept). A pushed particle is woken and kept under vmax."""
+def heat_push(gx, gy, gvx, gvy, gm, gtag, tag, coupling, min_speed, vmax, w, h, mass, kin, owner, flag):
+    """Radiation pressure: each ghost tagged `tag` (heat or waves) still faster than min_speed against the free
+    particle in its cell (not a star's) pushes it the way it is going, handing over `coupling` of what a head-on
+    elastic collision would - so a light particle is blown away while a heavy one barely moves and soaks the heat up
+    - and slows by as much (momentum is kept). A pushed particle is woken and kept under vmax."""
     for k in range(gm.size):
-        if gtag[k] != HEAT_TAG or gm[k] == 0:
+        if gtag[k] != tag or gm[k] == 0:
             continue
         i = _ghost_cell(gx[k], gy[k], w, h)
         if mass[i] == 0 or owner[i] != 0:
@@ -1174,16 +1177,17 @@ def star_fuse(stars, chance, light, share, max_mass, w, h, mass, kin, quad, owne
 
 
 @njit(cache=True)
-def render_ghosts(gx, gy, gm, gtag, w, h, mass_lut, tint, heat_color, rgb):
+def render_ghosts(gx, gy, gm, gtag, w, h, mass_lut, tint, heat_color, wave_color, rgb):
     """Draw the ghosts see-through: their mass colour washed towards tint, blended half over what is there; heat
-    (tag HEAT_TAG) glows heat_color, solid."""
+    (tag HEAT_TAG) glows heat_color and gravitational waves (WAVE_TAG) wave_color, solid."""
     for k in range(gm.size):
         if gm[k] == 0:
             continue
         i = _ghost_cell(gx[k], gy[k], w, h)
-        if gtag[k] == HEAT_TAG:
+        if gtag[k] == HEAT_TAG or gtag[k] == WAVE_TAG:
+            glow = heat_color if gtag[k] == HEAT_TAG else wave_color
             for c in range(3):
-                rgb[i, c] = heat_color[c]
+                rgb[i, c] = glow[c]
             continue
         for c in range(3):
             col = (mass_lut[gm[k], c] + tint[c]) >> 1
@@ -1337,16 +1341,41 @@ def mark_solid(bodies, w, h, solid, gvx, gvy, mass, kin, quad, shade, stamp, fla
 
 # --- gravity fields ----------------------------------------------------------------------------------
 
-# Gravity only reaches so far: every pull is the softened inverse-square law faded by fade() - near a body as
-# strong as ever, a few reach lengths out next to nothing - so things must come close to interact strongly.
+# Gravity only reaches so far: every pull is the softened inverse-square law faded by fade() - at full strength
+# out to the reach R, then less and less, to nothing at REACH_TAPER x R - so things must come close to interact
+# strongly, orbits within R are as stable as with no fading at all (beyond about 1.16 R, where the pull falls faster
+# than 1 / r^3, none is), and bodies further apart than that don't feel each other at all.
+REACH_TAPER = 2.0               # (a constant here, not in config: the cached kernels would keep an old value)
+_TL = REACH_TAPER - 1.0         # the taper's length, in reach lengths
+# the taper's share of the pull as a cubic in u = rho / R (a smoothstep from 1 at u = 1 down to 0 at REACH_TAPER) ...
+_A0 = 1.0 - 3.0 / _TL ** 2 - 2.0 / _TL ** 3
+_A1 = 6.0 / _TL ** 2 + 6.0 / _TL ** 3
+_A2 = -3.0 / _TL ** 2 - 6.0 / _TL ** 3
+_A3 = 2.0 / _TL ** 3
+
+
+@njit(cache=True)
+def _taper_h(u):
+    """... and the integral of that share / u^2 (whose differences give the potential), up to a constant."""
+    return -_A0 / u + _A1 * np.log(u) + _A2 * u + 0.5 * _A3 * u * u
+
+
+_H_END = _taper_h(REACH_TAPER)
+_H_IN = _H_END - _taper_h(1.0)  # the whole taper's integral (in 1 / R)
+
 
 @njit(cache=True)
 def fade(rho, kinv):
     """Shares of the plain inverse-square pull and of its potential left at softened distance rho when gravity
-    reaches about 1 / kinv cells (kinv = 0: all the way): (1 + rho kinv) e^(-rho kinv) and e^(-rho kinv), the pull
-    being the slope of that potential."""
-    e = np.exp(-rho * kinv)
-    return e * (1.0 + rho * kinv), e
+    reaches 1 / kinv cells (kinv = 0: all the way): the whole pull out to there, then smoothly less to none at
+    REACH_TAPER times as far; the potential is what that pull climbs out of (S / rho x this share), none beyond."""
+    u = rho * kinv
+    if u <= 1.0:
+        return 1.0, 1.0 - u + u * _H_IN
+    if u >= REACH_TAPER:
+        return 0.0, 0.0
+    t = (u - 1.0) / _TL
+    return 1.0 - t * t * (3.0 - 2.0 * t), u * (_H_END - _taper_h(u))
 
 
 @njit(cache=True)

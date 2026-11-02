@@ -49,9 +49,10 @@ def _spread_masses(rng, count, total):
 
 def disk(world, count=None):
     """A heavy dust disk of every mass from 1 to thousands (DISK_MASS in all) turning with the clockwise global
-    orbit in a round universe, held together by its own gravity (no central well)."""
+    orbit in a round universe, held together by its own gravity (no central well), gravity reaching DISK_REACH."""
     world.set_round(True)
     world.reset()
+    world.set_reach(config.DISK_REACH)               # tuned for it: reaching everywhere it runs twice as slowly
     world.set_orbit(1)
     world.set_self_gravity(True)
     w, h = world.w, world.h
@@ -108,8 +109,58 @@ def binary(world, count=None):
     _ring(world, w / 2, h / 2, 0.36 * s, 0.47 * s, count, [1, 2, 4], [0.6, 0.3, 0.1], 2 * strength)
 
 
+def systems(world, count=None):
+    """A super well in the middle with SYSTEM_CENTRE_STARS stars orbiting it, and SYSTEM_OTHERS more scattered at
+    random round it with SYSTEM_OTHER_STARS each: the stable orbits of SYSTEM_* (pour-mass stars SYSTEM_STAR_RADIUS
+    across in radius, SYSTEM_ORBIT out round SYSTEM_WELL wells), each star set off at the circular speed with its
+    well taking the opposite momentum (World.add_star(orbit=True)). Systems are at least SYSTEM_SPACING x the orbit
+    apart (centre to centre), their stars inside the edge, and placed where their pulls on the middle one roughly
+    cancel (SYSTEM_BALANCE), so they don't disturb each other at once - gravity reaching everywhere, they do after
+    twenty seconds or so. In a universe too small for that it is all scaled down (lengths x k, masses x k^2, which
+    keeps the tides and orbits alike), down to SYSTEM_MIN_SCALE, and then the systems are closer together."""
+    world.set_round(True)
+    world.reset()
+    rng = world.rng
+    c = world.cell
+    cx, cy = world.w / 2, world.h / 2
+    room = min(world.w, world.h) / 2 - config.SYSTEM_EDGE   # how far out a star may reach (cells)
+    spacing = config.SYSTEM_SPACING
+    size = config.SYSTEM_ORBIT + config.SYSTEM_STAR_RADIUS          # how far a system's stars reach (cells)
+    k = min(1.0, room / (spacing * config.SYSTEM_ORBIT + size))
+    if k < config.SYSTEM_MIN_SCALE:                  # smaller stars wouldn't hold together: closer systems instead
+        k = config.SYSTEM_MIN_SCALE
+        spacing = max(1.5, (room / k - size) / config.SYSTEM_ORBIT)
+    orbit, star_r = config.SYSTEM_ORBIT * k, config.SYSTEM_STAR_RADIUS * k
+
+    def system(x, y, stars):
+        world.add_super_well(x * c, y * c, config.SYSTEM_WELL * k * k)
+        a0 = rng.uniform(0, 2 * np.pi)
+        for a in a0 + 2 * np.pi * np.arange(stars) / stars:
+            world.add_star((x + orbit * np.cos(a)) * c, (y + orbit * np.sin(a)) * c, star_r * c,
+                           config.SYSTEM_POUR, orbit=True)
+
+    system(cx, cy, config.SYSTEM_CENTRE_STARS)
+    near, far = spacing * orbit, max(spacing * orbit, room - size * k)
+    n = rng.integers(config.SYSTEM_OTHERS[0], config.SYSTEM_OTHERS[1] + 1)
+    best, best_pull = None, np.inf
+    for _ in range(2000):                            # random spots clear of each other whose pulls on the middle
+        r = np.sqrt(rng.uniform(near ** 2, far ** 2, n))     # one roughly cancel (else it drags the middle one's
+        a = rng.uniform(0, 2 * np.pi, n)                     # stars off their orbits: its well responds less)
+        xs, ys = r * np.cos(a), r * np.sin(a)
+        if np.hypot(xs[:, None] - xs, ys[:, None] - ys)[np.triu_indices(n, 1)].min(initial=np.inf) < near:
+            continue
+        pull = np.hypot((xs / r ** 3).sum(), (ys / r ** 3).sum()) * near ** 2
+        if pull < best_pull:
+            best, best_pull = (xs, ys), pull
+        if pull < config.SYSTEM_BALANCE:
+            break
+    if best is not None:
+        for x, y in zip(*best):
+            system(cx + x, cy + y, rng.integers(config.SYSTEM_OTHER_STARS[0], config.SYSTEM_OTHER_STARS[1] + 1))
+
+
 def empty(world, count=None):
     world.reset()
 
 
-PRESETS = {"rain": rain, "disk": disk, "cloud": cloud, "binary": binary, "empty": empty}
+PRESETS = {"rain": rain, "disk": disk, "cloud": cloud, "binary": binary, "systems": systems, "empty": empty}

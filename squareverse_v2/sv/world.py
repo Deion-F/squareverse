@@ -9,7 +9,7 @@ import numpy as np
 
 from . import config, kernels, palette
 from .gpu import Chooser
-from .gravity import SelfGravity, external_field, fade, order_buckets, reach_for
+from .gravity import SelfGravity, external_field, fade, order_buckets, reach_for, tide_share
 
 # Global gravity directions, clockwise on screen starting from "down" (sand.py).
 DIRS = [(0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0), (1, 1)]
@@ -80,6 +80,16 @@ class Blast:
 
 
 @dataclass(eq=False, slots=True)
+class Binary:
+    """Two super wells whose ranges overlap, circling each other as they spiral in (World._spiral)."""
+    a: object
+    b: object
+    way: int                    # 1: they circle clockwise, -1: counterclockwise
+    omega: float = 0.0          # how fast they circled last tick (rad/tick)
+    age: int = 0                # ticks since they were caught
+
+
+@dataclass(eq=False, slots=True)
 class Well:
     """A gravity well, in cell units. Its pull is G * mass, the same constant particles attract each other with.
 
@@ -105,6 +115,10 @@ class Well:
     calm_until: int = 0         # super well: it can't go supernova before this tick (just merged or got too heavy)
     heavy: bool = False         # super well: over the supernova mass (World.explode_mass) when last checked
     auto_spin: bool = False     # super well: its spin follows its mass (World.mass_spin) while spin_follows_mass
+    ring: float = 0.0           # super well just merged: how stretched its core still is (World._ring_down) ...
+    ring_angle: float = 0.0     #   ... along this angle, turning by ...
+    ring_omega: float = 0.0     #   ... this a tick (> 0 clockwise) ...
+    ring_gw: float = 0.0        #   ... with this much mass still to radiate as gravitational waves
     built: tuple = (0.0, 0.0, 0.0)   # (x, y, mass) when the field was last built
 
     def pull(self):
@@ -218,6 +232,7 @@ class World:
         self.rng = np.random.default_rng(seed)
         kernels.seed(int(self.rng.integers(2 ** 31)))
         self.wells = []             # Well objects
+        self.binaries = []          # pairs of super wells spiralling into each other (Binary)
         self.stars = []             # Star objects
         self.spawners = []          # Spawner objects
         self.gdir = None if config.GRAVITY_DIR is None else DIR_NAMES.index(config.GRAVITY_DIR)
@@ -257,6 +272,8 @@ class World:
         self.mass_lut = palette.mass_lut()
         self.heat_lut = palette.heat_lut()
         self.heat_color = np.array(config.HEAT_COLOR, np.uint8)
+        self.wave_color = np.array(config.SUPER_GW_COLOR, np.uint8)
+        self.waves_made = 0                        # gravitational waves sent out in the last tick
         self.shade_mul = palette.shade_mul()
         self.bg = np.array(config.BG, np.uint8)
         self.outside = np.array(config.OUTSIDE, np.uint8)
@@ -452,16 +469,25 @@ class World:
         return config.COLLAPSE_MASS / self.g_scale
 
     def rebuild_field(self):
-        bodies = np.array([(wl.x, wl.y, wl.radius, wl.omega, wl.vx, wl.vy) for wl in self.wells if not wl.is_super],
-                          np.float64).reshape(-1, 6)
-        kernels.mark_solid(bodies, self.w, self.h, self.solid, self.gvx, self.gvy, self.mass, self.kin, self.quad,
-                           self.shade, self.stamp, self.flag, self.wrap)   # also pushes out any particle inside
-        self._mark_rim(full=bool(bodies.size))     # a body over the rim leaves its own velocity there
+        """Mark the solid wells' ground and the super wells' cores, and work out the field: global gravity and the
+        pull of the solid wells and repulsors, per cell. The super wells aren't on it: they move all the time, and a
+        field that only followed them now and then pulled towards where they had been (pumping energy into anything
+        orbiting close), so the kernels work out their pull exactly from where they are every tick (whirls()). When
+        only super wells have moved or grown, just their cores are marked again and what is near them woken."""
+        grid = self.field_dirty or any(not wl.is_super for wl in self.changed_wells)
+        if grid:
+            bodies = np.array([(wl.x, wl.y, wl.radius, wl.omega, wl.vx, wl.vy) for wl in self.wells
+                               if not wl.is_super], np.float64).reshape(-1, 6)
+            kernels.mark_solid(bodies, self.w, self.h, self.solid, self.gvx, self.gvy, self.mass, self.kin,
+                               self.quad, self.shade, self.stamp, self.flag, self.wrap)   # also pushes out any inside
+            self._mark_rim(full=bool(bodies.size))     # a body over the rim leaves its own velocity there
         self._mark_holes()          # also swallows particles already inside a core
-        rows = [(wl.x, wl.y, self.g_scale * wl.pull(), self.softening(wl)) for wl in self.wells]
-        self.field_serial += 1
-        self.fx, self.fy, self.phi = (self.field_way or external_field)(self.w, self.h, rows, self.gravity_vector(),
-                                                                        self.wrap, self.kinv)
+        if grid:
+            rows = [(wl.x, wl.y, self.g_scale * wl.pull(), self.softening(wl)) for wl in self.wells if not wl.is_super]
+            self.field_serial += 1
+            self.fx, self.fy, self.phi = (self.field_way or external_field)(self.w, self.h, rows,
+                                                                            self.gravity_vector(), self.wrap,
+                                                                            self.kinv)
         if self.field_dirty:
             self.wake_all()
         else:                       # only wells moved or grew: just the particles in their reach can notice
@@ -676,28 +702,129 @@ class World:
         """The size (cells) of a placed solid well (repulsor) of this mass: its area x WELL_DENSITY is its mass."""
         return max(1.0, math.sqrt(mass / (math.pi * config.WELL_DENSITY)))
 
-    def add_star(self, px, py, radius_px, pour_mass=1, mass=None, vx=0.0, vy=0.0, ghost=False):
+    def add_star(self, px, py, radius_px, pour_mass=1, mass=None, vx=0.0, vy=0.0, ghost=False, orbit=False):
         """A star at a pixel position filling the brush circle of radius_px, moving at (vx, vy). Its core is made of
         pour_mass particles (a number, or a (min, max) range: random masses in it) and its outer layers of lighter
         ones in proportion (_layer_masses), so the pour sets what it is made of and how heavy it is. Given a mass
         instead, it holds that much, shared out heavy in the middle and light outside (_fill_star). Its free cells are
         filled; particles already there become part of it. ghost: it arrives as a GhostStar instead, landing
-        GHOST_TICKS later (pour mass only). Returns it (None if there was no room)."""
+        GHOST_TICKS later (pour mass only). orbit: instead of (vx, vy) it sets off on a circular orbit round the
+        super well pulling hardest there (orbit_velocity), and that well takes the opposite momentum so the two
+        don't drift off together (put_in_orbit). Returns it (None if there was no room)."""
         c = self.cell
         cx, cy, r = px / c, py / c, max(1.0, radius_px / c)
+        well = self.orbit_well(cx, cy) if orbit else None
+        if well is not None:
+            vx, vy = self.orbit_velocity(well, cx, cy)
         if mass is not None:
             idx = self._fill_star(cx, cy, r, mass, vx, vy)
-            return self._new_star(idx) if idx.size else None
-        xs, ys, dx, dy = self._disk_cells(cx, cy, r)
-        masses = self._layer_masses(np.hypot(dx, dy) / r, pour_mass)
-        if ghost:
-            gs = GhostStar(cx, cy, float(vx), float(vy), r, dx, dy, masses)
-            self.ghost_stars.append(gs)
-            return gs
-        self.place_many(xs, ys, masses, vx, vy)
-        idx = ys * self.w + xs
-        idx = idx[(self.mass[idx] > 0) & (self.owner[idx] == 0)]
-        return self._new_star(idx) if idx.size else None
+            star = self._new_star(idx) if idx.size else None
+        else:
+            xs, ys, dx, dy = self._disk_cells(cx, cy, r)
+            masses = self._layer_masses(np.hypot(dx, dy) / r, pour_mass)
+            if ghost:
+                star = GhostStar(cx, cy, float(vx), float(vy), r, dx, dy, masses)
+                self.ghost_stars.append(star)
+            else:
+                self.place_many(xs, ys, masses, vx, vy)
+                idx = ys * self.w + xs
+                idx = idx[(self.mass[idx] > 0) & (self.owner[idx] == 0)]
+                star = self._new_star(idx) if idx.size else None
+        if well is not None and star is not None:
+            m = float(star.masses.sum()) if isinstance(star, GhostStar) else star.mass
+            self.put_in_orbit(well, m, vx - well.vx, vy - well.vy)
+        return star
+
+    def brush_star(self, radius_px, pour_mass):
+        """The radius (cells) and mass of the star add_star would place with this brush and pour mass (a random pour
+        counted as its middle)."""
+        r = max(1.0, radius_px / self.cell)
+        n = int(r) + 1
+        dy, dx = np.mgrid[-n:n + 1, -n:n + 1]
+        d = np.hypot(dx, dy)
+        pour = round(sum(pour_mass) / 2) if isinstance(pour_mass, tuple) else pour_mass
+        return r, float(self._layer_masses(d[d <= r] / r, pour).sum())
+
+    def orbit_band(self, wl, radius, mass):
+        """Where (distance from super well wl, cells) a star of this radius and mass can orbit it: (inner, outer), or
+        None when nowhere. Inner: outside the dotted circle, and far enough out that its own pull at its surface
+        (softened as a star's is) is ORBIT_BAND_HOLD x the tide across it (with the orbit's own share). Outer: where
+        the pull, fading, falls as fast as 1 / r^ORBIT_BAND_STABLE (none is stable much beyond), half its Hill radius
+        against any other super well that reaches it (and 0.6 of the way to where their pulls balance), the edge."""
+        S, soft, kinv = self.g_scale * wl.pull(), self.softening(wl), self.kinv
+
+        def pull(d):
+            rho = math.sqrt(d * d + soft * soft)
+            return S * d / rho ** 3 * fade(rho, kinv)[0]
+
+        star_soft = config.STAR_SOFTENING * radius
+        hold = self.g_scale * config.G * mass * radius / (radius * radius + star_soft * star_soft) ** 1.5
+        outer = (self.reach_len * kernels.REACH_TAPER) if kinv else math.inf
+        for b in self.wells:
+            if b is wl or not b.is_super:
+                continue
+            gap = self.distance(wl.x, wl.y, b.x, b.y)
+            if kinv and gap >= 3.2 * self.reach_len:  # it doesn't reach a star there
+                continue
+            balance = gap / (1.0 + math.sqrt(b.mass / wl.mass))
+            outer = min(outer, 0.5 * gap * (wl.mass / (3.0 * b.mass)) ** (1 / 3), 0.6 * balance)
+        if self.round:
+            outer = min(outer, self.w / 2 - self.distance(wl.x, wl.y, self.w / 2, self.h / 2) - radius)
+        elif not self.wrap:
+            outer = min(outer, wl.x - radius, self.w - 1 - wl.x - radius, wl.y - radius, self.h - 1 - wl.y - radius)
+        else:                                            # round the border it would meet itself
+            outer = min(outer, min(self.w, self.h) / 2 - radius)
+        d = self.well_range(wl) + radius + 1.0
+        step = 0.5
+        inner = None
+        while d < outer:
+            if kinv:                                     # how fast the pull falls here: past ORBIT_BAND_STABLE no
+                a1, a2 = pull(d), pull(d * 1.01)         # orbit holds, and further out it only gets steeper
+                if a2 <= 0.0 or -math.log(a2 / a1) / math.log(1.01) >= config.ORBIT_BAND_STABLE:
+                    outer = d
+                    break
+            if inner is None and hold >= config.ORBIT_BAND_HOLD * 1.5 * (pull(d - radius) - pull(d)):
+                inner = d
+                if not kinv:
+                    break
+            d += step
+            step = max(0.5, 0.01 * d)
+        if inner is None or inner >= outer:
+            return None
+        return inner, outer
+
+    def orbit_well(self, x, y):
+        """The super well a body at (x, y) (cells) would orbit: the one pulling hardest there, or None."""
+        best, best_a = None, 0.0
+        for wl in self.wells:
+            if wl.is_super:
+                d = self.distance(x, y, wl.x, wl.y)
+                rho = math.sqrt(d * d + self.softening(wl) ** 2)
+                a = wl.pull() * d / rho ** 3 * fade(rho, self.kinv)[0]
+                if best is None or a > best_a:
+                    best, best_a = wl, a
+        return best
+
+    def orbit_velocity(self, wl, x, y):
+        """The velocity (cells/tick) of a circular orbit round super well wl through (x, y): as fast as its pull there
+        (softened and faded) holds a body in a circle, the way it spins, on top of its own motion."""
+        dx, dy = self.delta(wl.x, wl.y, x, y)
+        d = math.hypot(dx, dy)
+        if d < 1e-6:
+            return wl.vx, wl.vy
+        rho = math.sqrt(d * d + self.softening(wl) ** 2)
+        v = math.sqrt(self.g_scale * wl.pull() * d * d / rho ** 3 * fade(rho, self.kinv)[0])
+        way = 1.0 if wl.spin >= 0 else -1.0             # > 0: clockwise on screen, as kernels.whirl
+        return wl.vx - way * v * dy / d, wl.vy + way * v * dx / d
+
+    def put_in_orbit(self, wl, mass, rvx, rvy):
+        """A body of `mass` has been set moving at (rvx, rvy) against super well wl to orbit it: the well takes the
+        opposite momentum - as much as it responds to that body's pull (Well.fall), so their common centre stays
+        put - unless it is being dragged."""
+        if wl is not self.held:
+            k = mass * wl.fall() / wl.mass
+            wl.vx -= k * rvx
+            wl.vy -= k * rvy
 
     def _layer_masses(self, d, pour_mass):
         """Particle masses for a placed star's cells at d x its radius out: pour_mass in its core, and the lighter
@@ -764,9 +891,9 @@ class World:
 
     def _body_accel(self, b):
         """What moves a spawner or ghost star at (b.x, b.y) moving at (b.vx, b.vy) as it would a particle there: the
-        wells' field and global gravity, self-gravity, the global orbit, the super wells' whirlpools and the stars."""
-        i = min(int(b.y), self.h - 1) * self.w + min(int(b.x), self.w - 1)
-        ax, ay = float(self.fx[i]), float(self.fy[i])
+        wells' field and global gravity, the super wells' pull, self-gravity, the global orbit, the super wells'
+        whirlpools and the stars."""
+        ax, ay = self.field_at(b.x, b.y)
         if self.sg_on:
             gx, gy = self.sg_accel(b.x, b.y)
             ax += gx
@@ -782,6 +909,20 @@ class World:
             ox, oy = self._stars_accel(b.x, b.y)
             ax += ox
             ay += oy
+        return ax, ay
+
+    def field_at(self, x, y):
+        """The wells' pull and global gravity at (x, y) (cells): the field there, and each super well's pull worked out
+        exactly from where it is now (they aren't on the field: see rebuild_field)."""
+        i = min(max(int(y), 0), self.h - 1) * self.w + min(max(int(x), 0), self.w - 1)
+        ax, ay = float(self.fx[i]), float(self.fy[i])
+        for wl in self.wells:
+            if wl.is_super:
+                dx, dy = self.delta(x, y, wl.x, wl.y)
+                rho = math.sqrt(dx * dx + dy * dy + self.softening(wl) ** 2)
+                f = self.g_scale * wl.pull() / rho ** 3 * fade(rho, self.kinv)[0]
+                ax += dx * f
+                ay += dy * f
         return ax, ay
 
     def _fill_star(self, cx, cy, r, mass, vx, vy, k=-1):
@@ -830,7 +971,10 @@ class World:
             if b is st or (isinstance(b, Well) and not b.is_super) or b.mass <= 0:
                 continue
             d = self.distance(st.x, st.y, b.x, b.y)
-            lobe = d * roche_lobe(max(st.mass, 1.0) / (b.mass * self.tide_share(d)))
+            share = self.tide_share(d)
+            if share <= 0.0:                             # gravity doesn't reach that far: no tide
+                continue
+            lobe = d * roche_lobe(max(st.mass, 1.0) / (b.mass * share))
             r = min(r, lobe)
             if lobe < st.radius and b.mass > st.mass:
                 st.tide = b
@@ -840,9 +984,9 @@ class World:
 
     def tide_share(self, d):
         """How much of the plain inverse-square tide (the change of a pull across a body) is left at distance d as
-        gravity fades: e^(-x) (1 + x + x^2 / 2), x = d / reach. A faraway companion hardly stretches a star."""
-        x = d * self.kinv
-        return math.exp(-x) * (1.0 + x + 0.5 * x * x)
+        gravity fades (gravity.tide_share): all of it within the reach, none past the taper, so a faraway companion
+        doesn't stretch a star at all."""
+        return tide_share(d, self.kinv)
 
     def carry_stars(self):
         """Move each star as a whole at its velocity - the momentum of its body (the particles packed together, not
@@ -1152,6 +1296,10 @@ class World:
         ys = np.array([wl.y for wl in wells])
         pulls = self.g_scale * np.array([wl.pull() for wl in wells])
         soft = np.array([self.softening(wl) for wl in wells])
+        partner = {}                                    # a pair's pull on each other is their orbit (_spiral)
+        for bn in self.binaries:
+            partner[bn.a], partner[bn.b] = bn.b, bn.a
+        index = {wl: k for k, wl in enumerate(wells)}
         for wl in wells:                                # turn (for drawing)
             if wl.is_super:
                 if self.spin_follows_mass and wl.auto_spin:
@@ -1170,6 +1318,8 @@ class World:
             rho = np.sqrt(d2 + soft * soft)
             f = pulls / rho ** 3 * fade(rho, self.kinv)[0]
             f[k] = 0.0
+            if partner.get(wl) in index:
+                f[index[partner[wl]]] = 0.0
             ax, ay = float((dx * f).sum()), float((dy * f).sum())
             if self.stars:
                 sx, sy = self._stars_accel(wl.x, wl.y)
@@ -1196,7 +1346,7 @@ class World:
             if speed > vmax:
                 wl.vx *= vmax / speed
                 wl.vy *= vmax / speed
-        self._draw_supers_together()
+        self._inspiral()
         for wl in wells:
             if wl is self.held:
                 continue
@@ -1216,6 +1366,7 @@ class World:
             if self.distance(wl.x, wl.y, wl.built[0], wl.built[1]) > moved:
                 self.changed_wells.append(wl)
         self._swallow_wells()
+        self._ring_down()
         for wl in [wl for wl in self.wells if wl.is_super]:
             heavy = wl.mass >= self.explode_mass
             if heavy and not wl.heavy:  # just got too heavy, however (merging, swallowing, fed by collapse): it waits
@@ -1454,40 +1605,170 @@ class World:
             ys %= self.h
         self.place_many(xs, ys, masses, sp.vx, sp.vy)
 
-    def _draw_supers_together(self):
-        """Super wells whose ranges overlap are drawn together, whatever their mass, until their cores touch and they
-        merge. They close faster and faster: the pull between them grows the nearer they are (SUPER_MERGE_ACCEL x the
-        sum of their ranges / their distance, per tick), up to SUPER_MERGE_MAX_SPEED. Their sideways motion round each
-        other fades (SUPER_MERGE_SPIRAL), so they spiral in. The lighter one covers more of the gap (about their common
-        centre of mass); one being dragged stays put and the other comes to it."""
+    def _inspiral(self):
+        """Super wells whose ranges overlap pair up, whatever their mass - nearest first, and a pair stays one while
+        they overlap - and spiral in round each other (_spiral) until their cores touch and they merge
+        (_swallow_wells). One that overlaps a pair it isn't in waits its turn."""
         supers = [wl for wl in self.wells if wl.is_super]
         for wl in supers:
             wl.merging = False
-        for i, a in enumerate(supers):
-            for b in supers[i + 1:]:
-                reach = self.well_range(a) + self.well_range(b)
-                gap = self.distance(a.x, a.y, b.x, b.y)
-                if gap >= reach or gap <= 0:
-                    continue
-                a.merging = b.merging = True
-                bdx, bdy = self.delta(a.x, a.y, b.x, b.y)   # b as seen from a (round the border if shorter)
-                ux, uy = bdx / gap, bdy / gap
-                rvx, rvy = b.vx - a.vx, b.vy - a.vy
-                closing = -(rvx * ux + rvy * uy)
-                tx, ty = rvx + closing * ux, rvy + closing * uy             # sideways part
-                pull = config.SUPER_MERGE_ACCEL * reach / max(gap, a.core() + b.core())
-                closing = min(max(closing, 0.0) + pull, config.SUPER_MERGE_MAX_SPEED, gap)
-                keep = 1.0 - config.SUPER_MERGE_SPIRAL
-                rvx, rvy = -closing * ux + keep * tx, -closing * uy + keep * ty
-                if a is self.held or b is self.held:
-                    moving, sign = (b, 1.0) if a is self.held else (a, -1.0)
-                    moving.vx, moving.vy = sign * rvx, sign * rvy
-                    continue
-                total = a.mass + b.mass
-                cvx = (a.vx * a.mass + b.vx * b.mass) / total
-                cvy = (a.vy * a.mass + b.vy * b.mass) / total
-                a.vx, a.vy = cvx - rvx * b.mass / total, cvy - rvy * b.mass / total
-                b.vx, b.vy = cvx + rvx * a.mass / total, cvy + rvy * a.mass / total
+        pairs, paired = [], set()
+        for bn in self.binaries:
+            if bn.a in supers and bn.b in supers and self._overlap(bn.a, bn.b):
+                pairs.append(bn)
+                paired |= {bn.a, bn.b}
+        near = sorted((self.distance(a.x, a.y, b.x, b.y), i, j) for i, a in enumerate(supers)
+                      for j, b in enumerate(supers[i + 1:], i + 1) if self._overlap(a, b))
+        for _, i, j in near:
+            a, b = supers[i], supers[j]
+            if a not in paired and b not in paired:
+                pairs.append(Binary(a, b, self._orbit_way(a, b)))
+                paired |= {a, b}
+        self.binaries = pairs
+        for bn in pairs:
+            self._spiral(bn)
+
+    def _unpair(self, wl):
+        """wl is gone: the pair it was in is no more."""
+        self.binaries = [bn for bn in self.binaries if wl is not bn.a and wl is not bn.b]
+
+    def _overlap(self, a, b):
+        return 0 < self.distance(a.x, a.y, b.x, b.y) < self.well_range(a) + self.well_range(b)
+
+    def _orbit_way(self, a, b):
+        """Which way a pair just caught circles (1 clockwise, -1 counterclockwise): the way they were already going
+        round each other, or when they were coming nearly head-on, the way the heavier one spins."""
+        dx, dy = self.delta(a.x, a.y, b.x, b.y)
+        turn = (dx * (b.vy - a.vy) - dy * (b.vx - a.vx)) / math.hypot(dx, dy)   # sideways speed, > 0 clockwise
+        if abs(turn) > 0.01:
+            return 1 if turn > 0 else -1
+        return 1 if (a if a.mass >= b.mass else b).spin >= 0 else -1
+
+    def _spiral(self, bn):
+        """One tick of a pair's inspiral. They circle their common centre of mass (or the one being dragged) ever
+        faster: SUPER_INSPIRAL_SPIN when their ranges just touch, then ~ gap ^ -1.5 as they near, up to
+        SUPER_INSPIRAL_SPIN_MAX and never faster than VMAX against each other. Their gap closes ~ (sum of ranges /
+        gap) ^ SUPER_INSPIRAL_SHRINK, so slowly at first and ever faster, from ranges just touching to merging in
+        about SUPER_INSPIRAL_TICKS, ending in a plunge (at most SUPER_INSPIRAL_PLUNGE of the gap a tick). A pair just
+        caught settles onto that orbit over 1 / SUPER_INSPIRAL_GRIP ticks. With radiation on they send out the
+        binding energy they give up as gravitational waves (SUPER_GW_INSPIRAL; ~ 1 / gap, so ever more each tick), in
+        two beams along the line through them that turn as they circle."""
+        a, b = bn.a, bn.b
+        a.merging = b.merging = True
+        dx, dy = self.delta(a.x, a.y, b.x, b.y)            # b as seen from a (round the border if shorter)
+        gap = math.hypot(dx, dy)
+        reach = self.well_range(a) + self.well_range(b)
+        end = a.core() + b.core()
+        n = config.SUPER_INSPIRAL_SHRINK
+        close = reach / ((n + 1) * config.SUPER_INSPIRAL_TICKS) * (reach / gap) ** n
+        new_gap = gap - min(close, config.SUPER_INSPIRAL_PLUNGE * gap)
+        omega = min(config.SUPER_INSPIRAL_SPIN * (reach / gap) ** 1.5, config.SUPER_INSPIRAL_SPIN_MAX,
+                    config.VMAX / gap)
+        c, s, k = math.cos(bn.way * omega), math.sin(bn.way * omega), new_gap / gap
+        nx, ny = k * (c * dx - s * dy), k * (s * dx + c * dy)        # where b should be from a next tick
+        grip = min(1.0, (bn.age + 1) * config.SUPER_INSPIRAL_GRIP)
+        rvx, rvy = b.vx - a.vx, b.vy - a.vy
+        rvx += grip * (nx - dx - rvx)
+        rvy += grip * (ny - dy - rvy)
+        bn.omega = omega
+        bn.age += 1
+        total = a.mass + b.mass
+        if self.radiation_on:
+            share = config.SUPER_GW_INSPIRAL * 4 * a.mass * b.mass / (total * total)
+            amount = share * total * end * (1 / max(new_gap, end) - 1 / max(gap, end))
+            cx, cy = a.x + dx * b.mass / total, a.y + dy * b.mass / total
+            r0 = max(gap * b.mass / total + a.core(), gap * a.mass / total + b.core()) + 2.0
+            self._radiate_waves([a, b], cx, cy, r0, math.atan2(ny, nx), amount, config.SUPER_GW_SPREAD,
+                                config.SUPER_GW_PIECES)
+        if a is self.held or b is self.held:
+            moving, sign = (b, 1.0) if a is self.held else (a, -1.0)
+            moving.vx, moving.vy = sign * rvx, sign * rvy
+            return
+        cvx = (a.vx * a.mass + b.vx * b.mass) / total
+        cvy = (a.vy * a.mass + b.vy * b.mass) / total
+        a.vx, a.vy = cvx - rvx * b.mass / total, cvy - rvy * b.mass / total
+        b.vx, b.vy = cvx + rvx * a.mass / total, cvy + rvy * a.mass / total
+
+    def _radiate_waves(self, wells, x, y, r0, angle, amount, spread, most):
+        """Send `amount` of the wells' mass (taken from each by its mass, rounded at random) out as gravitational
+        waves: up to `most` particles (heavier when there is more; ghosts tagged kernels.WAVE_TAG) starting r0 from
+        (x, y) in two opposite beams along `angle`, spread `spread` radians, flying straight at SUPER_GW_SPEED for
+        SUPER_GW_TICKS (_fly_waves). Returns the mass sent."""
+        held = sum(wl.mass for wl in wells)
+        sent = min(int(amount + self.rng.uniform()), int(held) - len(wells))   # never all of it
+        if sent <= 0:
+            return 0
+        n = min(sent, max(most, -(-sent // config.MAX_MASS)))
+        masses = np.full(n, sent // n, np.int64)
+        masses[:sent % n] += 1
+        a = angle + math.pi * self.rng.integers(0, 2, n) + self.rng.normal(0.0, spread, n)
+        cos, sin = np.cos(a), np.sin(a)
+        self.add_ghosts(x + r0 * cos, y + r0 * sin, masses, config.SUPER_GW_SPEED * cos,
+                        config.SUPER_GW_SPEED * sin, tag=kernels.WAVE_TAG, age=config.GHOST_TICKS - config.SUPER_GW_TICKS)
+        left = sent
+        for wl in wells[:-1]:                            # in whole units, so whole masses stay whole
+            part = min(round(sent * wl.mass / held), left)
+            wl.mass -= part
+            left -= part
+        wells[-1].mass -= left
+        self.waves_made += n
+        return sent
+
+    def _ring_down(self):
+        """A merged super well settles: its core, left stretched into a bar along the line the two came together on,
+        turns on as fast as they circled at the end and rounds off, e times less stretched every
+        SUPER_RINGDOWN_TICKS, radiating the rest of its waves (SUPER_GW_RINGDOWN) as it goes - ~ the bar's stretch
+        squared, so fading twice as fast - in two beams along the bar."""
+        fade_by = math.exp(-1.0 / config.SUPER_RINGDOWN_TICKS)
+        for wl in self.wells:
+            if not wl.ring:
+                continue
+            wl.ring_angle += wl.ring_omega
+            wl.ring *= fade_by
+            done = wl.ring < 0.02 * config.SUPER_RINGDOWN
+            if wl.ring_gw > 0 and self.radiation_on:
+                amount = wl.ring_gw if done else wl.ring_gw * (1.0 - fade_by * fade_by)
+                wl.ring_gw -= amount
+                self._radiate_waves([wl], wl.x, wl.y, wl.core() + 2.0, wl.ring_angle, amount,
+                                    config.SUPER_GW_SPREAD, config.SUPER_GW_PIECES)
+            if done:
+                wl.ring = wl.ring_gw = 0.0
+                self.changed_wells.append(wl)           # it is lighter by what it radiated
+
+    def _merged(self, wl, angle, omega, eta):
+        """Two super wells have just merged into wl along `angle`, circling at omega (rad/tick, > 0 clockwise), eta =
+        4 m1 m2 / M^2 (1 for equal masses): with radiation on it sends out a burst of gravitational waves
+        (SUPER_GW_MERGER), broad but strongest along that line, and keeps SUPER_GW_RINGDOWN to radiate as its core
+        rings down (_ring_down)."""
+        wl.ring, wl.ring_angle, wl.ring_omega = config.SUPER_RINGDOWN, angle, omega
+        wl.ring_gw = 0.0
+        if self.radiation_on:
+            self._radiate_waves([wl], wl.x, wl.y, wl.core() + 2.0, angle, config.SUPER_GW_MERGER * eta * wl.mass,
+                                config.SUPER_GW_BURST_SPREAD, 8 * config.SUPER_GW_PIECES)
+            wl.ring_gw = config.SUPER_GW_RINGDOWN * eta * wl.mass
+
+    def well_shape(self, wl):
+        """How a super well's core is drawn: (stretch, angle) - stretched towards the one it is spiralling into
+        (SUPER_STRETCH x (their cores' radii added up / gap) ^ 2), or along the bar a merger left it as while it
+        rings down; (0, 0): round."""
+        for bn in self.binaries:
+            if wl is bn.a or wl is bn.b:
+                other = bn.b if wl is bn.a else bn.a
+                dx, dy = self.delta(wl.x, wl.y, other.x, other.y)
+                gap = max(math.hypot(dx, dy), 1e-9)
+                return config.SUPER_STRETCH * min(1.0, (wl.core() + other.core()) / gap) ** 2, math.atan2(dy, dx)
+        return wl.ring, wl.ring_angle
+
+    def bridges(self):
+        """Pairs about to merge, drawn joined: (a, b, how far the bridge has filled in, 0..1) for each pair whose gap is
+        under SUPER_BRIDGE x their cores' radii added up."""
+        out = []
+        for bn in self.binaries:
+            end = bn.a.core() + bn.b.core()
+            gap = self.distance(bn.a.x, bn.a.y, bn.b.x, bn.b.y)
+            if gap < config.SUPER_BRIDGE * end:
+                out.append((bn.a, bn.b, min(1.0, (config.SUPER_BRIDGE * end - gap) / ((config.SUPER_BRIDGE - 1) * end))))
+        return out
 
     def _random_masses(self, amount):
         """Particle masses drawn uniformly from EJECT_MASS, the last one trimmed so they add up to exactly amount."""
@@ -1548,8 +1829,9 @@ class World:
 
     def _swallow_wells(self):
         """A super well swallows a solid well touching its core, and two super wells merge when their cores touch:
-        mass adds up and momentum is conserved. A merger sends out a shock (merge_shock) and can't go supernova for
-        SUPER_MERGE_GRACE ticks (more mergers in that time don't make it longer)."""
+        mass adds up and momentum is conserved. A merger radiates a burst of gravitational waves and rings down
+        (_merged), sends out a shock (merge_shock) and can't go supernova for SUPER_MERGE_GRACE ticks (more mergers in
+        that time don't make it longer)."""
         merged = True
         while merged:
             merged = False
@@ -1580,7 +1862,12 @@ class World:
                     big.mass -= lost_big
                     small.mass -= lost_small
                     total = big.mass + small.mass
+                    eta = 4 * big.mass * small.mass / (total * total)
                     sdx, sdy = self.delta(big.x, big.y, small.x, small.y)
+                    pair = next((bn for bn in self.binaries if {bn.a, bn.b} == {big, small}), None)
+                    # the bar they leave turns the way they circled (or, meeting head-on, the way big spins)
+                    way = pair.way if pair else (1 if big.spin >= 0 else -1)
+                    omega = way * (pair.omega if pair else config.SUPER_INSPIRAL_SPIN_MAX)
                     big.x += sdx * small.mass / total
                     big.y += sdy * small.mass / total
                     if self.wrap:
@@ -1594,10 +1881,12 @@ class World:
                     if self.held is small:
                         self.held = None
                     self.wells.remove(small)
+                    self._unpair(small)
                     if loss:
                         self.eject(big, loss)
                     if self.tick_count >= big.calm_until:   # a window already open isn't stretched by more mergers
                         big.calm_until = self.tick_count + config.SUPER_MERGE_GRACE
+                    self._merged(big, math.atan2(sdy, sdx), omega, eta)
                     self.merge_shock(big)
                     self.field_dirty = True
                     merged = True
@@ -1628,7 +1917,7 @@ class World:
 
     def _whirl_accel(self, body, x, y, vx, vy):
         """The super wells' whirlpools on a well or spawner at (x, y). Not on a super well: one is only inside another's
-        whirlpool when their ranges overlap, and then they are being drawn together (_draw_supers_together)."""
+        whirlpool when their ranges overlap, and then they are spiralling into each other (_inspiral)."""
         ax = ay = 0.0
         if getattr(body, "is_super", False):
             return ax, ay
@@ -1672,7 +1961,7 @@ class World:
         cut_only: the potential hasn't changed, only turn the orbit's cut (cheap: no re-ranking)."""
         self.order_tick = self.tick_count
         if not self.orbit:
-            self._set_buckets(order_buckets(np.asarray(self.phi, np.float32), self.rng, cores=self.cores))
+            self._set_buckets(order_buckets(np.asarray(self._order_phi(), np.float32), self.rng, cores=self.cores))
             self.order_dirty = False
             return
         nb = 4096
@@ -1682,8 +1971,9 @@ class World:
             self.angle_rank = order_buckets(angle, self.rng, nb, self.cores).astype(np.int32)
             self.angle_key = (self.w, self.h)
         if not cut_only or self.phi_rank is None:
-            flat = float(self.phi.max() - self.phi.min()) <= 1e-9
-            self.phi_rank = None if flat else order_buckets(self.phi, self.rng, nb, self.cores).astype(np.int32)
+            phi = self._order_phi()
+            flat = float(phi.max() - phi.min()) <= 1e-9
+            self.phi_rank = None if flat else order_buckets(phi, self.rng, nb, self.cores).astype(np.int32)
             self.order_dirty = False
         # Ranked by angle there is a cut where the rank jumps from last to first: flow crossing it is processed
         # trailing-first and jams into a visible line. So the cut is turned a little every re-rank (a cyclic shift of
@@ -1693,6 +1983,13 @@ class World:
         ahead = (ahead + int(self.cut / (2 * math.pi) * nb)) % nb
         # the sum of two ranks already orders the cells; its 2 x 4096 levels fit the bucket sort as they are
         self._set_buckets((ahead if self.phi_rank is None else self.phi_rank + ahead).astype(np.uint16))
+
+    def _order_phi(self):
+        """The potential cells are ranked by: the field's, and the super wells' (which aren't on it)."""
+        rows = [(wl.x, wl.y, self.g_scale * wl.pull(), self.softening(wl)) for wl in self.wells if wl.is_super]
+        if not rows:
+            return self.phi
+        return self.phi + external_field(self.w, self.h, rows, None, self.wrap, self.kinv)[2]
 
     def _set_buckets(self, bucket):
         self.bucket_base = bucket
@@ -1745,7 +2042,7 @@ class World:
             tl = self.strips
             heat = [tl["heat"][t, :c] for t, c in enumerate(tl["stats"][:, kernels.S_HEAT]) if c]
         self.n_awake = ran
-        self.heat_made = self.fused = 0
+        self.heat_made = self.fused = self.waves_made = 0
         if self.radiation_on:
             if self.stars:
                 heat.append(self._fuse())
@@ -1754,9 +2051,11 @@ class World:
             self._step_ghosts(params, whirls)
             self._cool_blasts()
             if self.radiation_on:
-                kernels.heat_push(self.ghost_x, self.ghost_y, self.ghost_vx, self.ghost_vy, self.ghost_m,
-                                  self.ghost_tag, config.HEAT_COUPLING, config.HEAT_MIN_SPEED, config.VMAX, self.w,
-                                  self.h, self.mass, self.kin, self.owner, self.flag)
+                for tag, coupling in ((kernels.HEAT_TAG, config.HEAT_COUPLING),
+                                      (kernels.WAVE_TAG, config.SUPER_GW_COUPLING)):
+                    kernels.heat_push(self.ghost_x, self.ghost_y, self.ghost_vx, self.ghost_vy, self.ghost_m,
+                                      self.ghost_tag, tag, coupling, config.HEAT_MIN_SPEED, config.VMAX, self.w,
+                                      self.h, self.mass, self.kin, self.owner, self.flag)
         # what a star's pull on its own particles adds up to is taken back from them next tick
         for st, (fx, fy, m) in zip(self.stars, self.star_f):
             st.fix = (-fx / m, -fy / m) if m > 0 else (0.0, 0.0)
@@ -1857,13 +2156,15 @@ class World:
             kernels.paint(self.rim, self.outside, self.rgb.reshape(-1, 3))
         if self.ghost_m.size:
             kernels.render_ghosts(self.ghost_x, self.ghost_y, self.ghost_m, self.ghost_tag, self.w, self.h,
-                                  self.mass_lut, self.ghost_tint, self.heat_color, self.rgb.reshape(-1, 3))
+                                  self.mass_lut, self.ghost_tint, self.heat_color, self.wave_color,
+                                  self.rgb.reshape(-1, 3))
         for gs in self.ghost_stars:
             gx, gy = gs.x + gs.dx, gs.y + gs.dy
             if self.wrap:
                 gx, gy = gx % self.w, gy % self.h
             kernels.render_ghosts(gx, gy, gs.masses, np.zeros(gs.masses.size, np.int64), self.w, self.h,
-                                  self.mass_lut, self.ghost_tint, self.heat_color, self.rgb.reshape(-1, 3))
+                                  self.mass_lut, self.ghost_tint, self.heat_color, self.wave_color,
+                                  self.rgb.reshape(-1, 3))
         return self.rgb
 
     # --- ghosts -----------------------------------------------------------------------------------
@@ -1913,11 +2214,17 @@ class World:
         super wells swallow those that reach a core, and land the ones GHOST_TICKS old as ordinary particles where
         they are (see kernels.land_ghosts)."""
         g = (self.ghost_x, self.ghost_y, self.ghost_vx, self.ghost_vy, self.ghost_m, self.ghost_age)
+        waves = np.flatnonzero(self.ghost_tag == kernels.WAVE_TAG)
+        wave_m = self.ghost_m[waves]
+        self.ghost_m[waves] = 0                          # massless, the step passes them by: they fly straight
         step = self.ghost_way or kernels.step_ghosts
         self.stats[kernels.S_ABSORBED] += step(*g, self.w, self.h, params, self.fx, self.fy, self.sg.gx, self.sg.gy,
                                                self.sg.block, self.sg.cw, self.hole, self.absorbed, whirls,
                                                self.star_pulls, self.sfx, self.sfy, config.STAR_FIELD_BLOCK, self.scw,
                                                self.sch)
+        if waves.size:
+            self.ghost_m[waves] = wave_m
+            self._fly_waves(waves)
         kernels.land_ghosts(*g, config.GHOST_TICKS, config.GHOST_LAND_NEAR, config.GHOST_LAND_PATIENCE,
                             max(self.w, self.h), config.MAX_MASS, self.w, self.h, self.mass, self.kin, self.quad,
                             self.shade, self.stamp, self.flag, self.solid, self.hole, self.wrap)
@@ -1925,6 +2232,38 @@ class World:
         if not keep.all():
             for name in ("ghost_x", "ghost_y", "ghost_vx", "ghost_vy", "ghost_m", "ghost_age", "ghost_tag"):
                 setattr(self, name, getattr(self, name)[keep])
+
+    def _fly_waves(self, k):
+        """Move gravitational waves (ghosts k) one tick: straight on, unbent by gravity, the orbit or the whirlpools.
+        One crossing a super well's core is swallowed; one reaching the edge of the universe stops there and lands."""
+        x, y, vx, vy = self.ghost_x[k], self.ghost_y[k], self.ghost_vx[k], self.ghost_vy[k]
+        m, age = self.ghost_m[k], self.ghost_age[k]
+        steps = max(1, int(np.ceil(np.hypot(vx, vy).max())))   # a cell at a time, so none jumps over a small core
+        flying = np.ones(k.size, bool)
+        for s in range(1, steps + 1):
+            nx, ny = x + vx * (s / steps), y + vy * (s / steps)
+            if self.wrap:
+                nx, ny = nx % self.w, ny % self.h
+            edge = (nx < 0) | (nx > self.w - 1) | (ny < 0) | (ny > self.h - 1)
+            nx, ny = np.clip(nx, 0, self.w - 1), np.clip(ny, 0, self.h - 1)
+            cell = np.floor(ny + 0.5).astype(np.int64) * self.w + np.floor(nx + 0.5).astype(np.int64)
+            if self.rim_mask is not None:
+                edge |= self.rim_mask[cell] != 0
+            hole = self.hole[cell]
+            gone = flying & (hole > 0)
+            if gone.any():
+                np.add.at(self.absorbed, hole[gone] - 1, m[gone])
+                self.stats[kernels.S_ABSORBED] += int(gone.sum())
+                m[gone] = 0
+            stop = flying & edge & ~gone
+            if stop.any():
+                age[stop] = config.GHOST_TICKS           # lands next to where it stopped
+                vx[stop] = vy[stop] = 0.0
+            move = flying & ~edge & ~gone                # one stopping stays on the last cell inside
+            self.ghost_x[k[move]], self.ghost_y[k[move]] = nx[move], ny[move]
+            flying &= ~gone & ~stop
+        self.ghost_vx[k], self.ghost_vy[k], self.ghost_m[k] = vx, vy, m
+        self.ghost_age[k] = age + 1
 
     def _fuse(self):
         """Fusion in every star (kernels.star_fuse). Returns the heat it shed, as rows like kernels._shed's."""
@@ -1958,6 +2297,10 @@ class World:
     def heat_count(self):
         """Heat particles in flight."""
         return int(np.count_nonzero(self.ghost_tag == kernels.HEAT_TAG))
+
+    def wave_count(self):
+        """Gravitational waves in flight."""
+        return int(np.count_nonzero(self.ghost_tag == kernels.WAVE_TAG))
 
     def ghost_count(self):
         return int(self.ghost_m.size)
@@ -2009,6 +2352,7 @@ class World:
         """Empty world with default settings (used by presets)."""
         self.clear()
         self.wells.clear()
+        self.binaries.clear()
         self.spawners.clear()
         self.held = None
         self.gdir = None if config.GRAVITY_DIR is None else DIR_NAMES.index(config.GRAVITY_DIR)
@@ -2282,6 +2626,7 @@ class World:
 
     def remove_well(self, wl):
         self.wells.remove(wl)
+        self._unpair(wl)
         if self.held is wl:
             self.held = None
         self.field_dirty = True

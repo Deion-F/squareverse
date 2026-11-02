@@ -22,7 +22,9 @@ INFO = {
              "draw, so the frame rate drops in big scenes. The step time is what one tick costs. Keys: + / -.",
     "presets": "Starting scenes. Rain: mixed masses falling under gravity. Disk: a self-gravitating dust disk turning "
                "with the global rotation in a round universe, which forms stars. Cloud: a turning cloud that "
-               "clumps. Binary: two stars orbiting each other inside a ring. Empty: nothing. Keys: F1-F4.",
+               "clumps. Binary: two stars orbiting each other inside a ring. Systems: a black hole in the middle "
+               "orbited by three stars, and a few more round it with a star or two each. Empty: nothing. "
+               "Keys: F1-F5.",
     "tool": "What a left click on the universe does. Pour / Ghosts / Erase work while you hold the button down; the "
             "others act once per click, at the brush's size. Ghosts are particles that pass through everything for "
             f"{config.GHOST_TICKS} ticks, then land. A star is a ball of particles held together by its own gravity; "
@@ -43,11 +45,11 @@ INFO = {
             "arrows, Q / E to turn it, 0 for off.",
     "strength": "Scales all gravity: the direction above, stars, wells, super wells and self-gravity. Stronger "
                 "gravity also lowers the mass at which dense matter collapses into a super well. Keys: < / >.",
-    "reach": "How far gravity reaches, in cells. Every pull - stars, wells, super wells, self-gravity - is as strong "
-             "as ever close in but fades away beyond about this distance, so things must come near each other to "
-             "interact strongly and a heavy body can't pull the whole universe. It also shrinks super wells' "
-             "spinning ranges and stars' capture rings. Orbits further out than about 1.6x it aren't stable. All the "
-             "way to the right, gravity reaches everywhere (plain inverse-square).",
+    "reach": "How far gravity reaches, in cells. Every pull - stars, wells, super wells, self-gravity - is at full "
+             "strength out to this distance, then fades to nothing at twice it, so things must come near each other "
+             "to interact and bodies further apart don't feel each other at all. Orbits within it are stable, beyond "
+             "about 1.16x it they aren't. It also limits super wells' spinning ranges (to half of it across) and "
+             "stars' capture rings. All the way to the right, gravity reaches everywhere (plain inverse-square).",
     "sg": "Particles pull each other (computed on a coarse mesh every few ticks), so clouds clump and disks form "
           "arms. Stars always pull and are pulled, whether this is on or not. Key: S.",
     "orbit": "Turns the whole universe round its centre like a galaxy: everything is carried round at the same "
@@ -81,9 +83,13 @@ INFO = {
     "radiation": "Merging and splitting lose {:.0%} of the mass involved as heat: a few light, fast particles that fly "
                  "through everything for {} ticks, blowing light matter they pass away (a heavy particle barely "
                  "moves and soaks the heat up), then land as ordinary light particles. Stars fuse their light "
-                 "particles into heavier ones, losing {:.0%} as heat, so they blow a wind of light matter away. No "
-                 "mass is lost: heat is mass, carried off as light particles.".format(
-                     config.HEAT_SHARE, config.HEAT_TICKS, config.FUSION_HEAT_SHARE),
+                 "particles into heavier ones, losing {:.0%} as heat, so they blow a wind of light matter away. Super "
+                 "wells spiralling into each other send out gravitational waves: two beams along the line "
+                 "through them that turn as they circle, ever stronger as they near, then a burst as they merge "
+                 "that fades as the merged core settles - up to {:.1%} of their mass, flying straight through "
+                 "everything at the speed limit. Both glow pale blue. No mass is lost: heat and waves are mass, "
+                 "carried off as particles.".format(config.HEAT_SHARE, config.HEAT_TICKS, config.FUSION_HEAT_SHARE,
+                                     config.SUPER_GW_INSPIRAL + config.SUPER_GW_MERGER + config.SUPER_GW_RINGDOWN),
     "merge": "Particles colliding fast enough sometimes merge into one heavier particle (mass and momentum are "
              "kept). Key: M.",
     "split": "Particles hit hard enough break in two. Key: P.",
@@ -118,6 +124,13 @@ INFO = {
                    f"gravity, for {config.GHOST_TICKS} ticks, then land as a star where it got to (any of its "
                    "particles whose cell is taken land nearby as ordinary particles). Shift+click with the Star tool "
                    "always places one; with this on, so do a click and G.",
+    "orbit_stars": "A placed star sets off on a circular orbit round the super well pulling hardest on it, the way "
+                   "that well spins, and the well takes the opposite push so the two don't drift off together. To "
+                   "last, put it outside the dotted circle (inside, the whirlpool tears it up) and far enough out "
+                   "that the tide doesn't strip it: a pour-16 star from the default brush holds about 130 cells "
+                   "from an 80,000 well (B at pour mass 1), with gravity reaching everywhere. Off: it starts at "
+                   "rest. With the Star tool picked, a green band round each super well shows where the star "
+                   "the brush and pour mass would place can orbit; none means nowhere. Key: T.",
     "body_mass": "Make it lighter or heavier. A star is rebuilt as a fresh layered ball as dense as it is, growing "
                  "or shrinking with the square root of the change; a repulsor takes the size a freshly placed one of "
                  "that mass has, so its pull and reach match one made at that mass. Keys: , / .",
@@ -157,8 +170,8 @@ def draw_menu(ui, app, fps):
                                         INFO["speed"], "{} per frame", integer=True, step=1,
                                         note=f"step {w.step_ms:.1f} ms")
         hit = ui.choice("presets", "Presets", [(p, p.capitalize()) for p in ("rain", "disk", "cloud", "binary",
-                                                                              "empty")], None, INFO["presets"],
-                        columns=5)
+                                                                              "systems", "empty")], None,
+                        INFO["presets"], columns=3)
         if hit:
             PRESETS[hit](w)
             app.selected = None
@@ -171,6 +184,7 @@ def draw_menu(ui, app, fps):
         app.pour_mass = ui.choice("pour", "Pour mass", POUR_OPTIONS, app.pour_mass, INFO["pour"], columns=6)
         app.ghost_stars = ui.toggle("ghost_stars", "Stars arrive as ghosts", app.ghost_stars, INFO["ghost_stars"],
                                     note=f"{len(w.ghost_stars)} arriving" if w.ghost_stars else None)
+        app.orbit_stars = ui.toggle("orbit_stars", "Stars start in orbit", app.orbit_stars, INFO["orbit_stars"])
         ui.gap()
 
     body = app.selected
@@ -266,7 +280,7 @@ def draw_menu(ui, app, fps):
                   ("exploded", f"{w.star_explosions}"), ("torn apart", f"{w.stars_torn}")])
         w.star_form_on = ui.toggle("formation", "Star formation", w.star_form_on, INFO["formation"])
         w.radiation_on = ui.toggle("radiation", "Radiation (heat)", w.radiation_on, INFO["radiation"],
-                                   note=f"{w.heat_count():,} in flight" if w.radiation_on else None)
+                                   note=f"{w.heat_count() + w.wave_count():,} in flight" if w.radiation_on else None)
         w.collapse_on = ui.toggle("collapse", "Collapse into super wells", w.collapse_on, INFO["collapse"],
                                   note=f"at {w.collapse_threshold():,.0f}")
         step = config.SUPER_EXPLODE_STEP
@@ -306,6 +320,7 @@ def draw_menu(ui, app, fps):
                       ("splits", f"{s[3]:,}"), ("sinks", f"{s[4]:,}"), ("absorbed", f"{s[5]:,}")])
             ui.stats([("heat sent out", f"{w.heat_made:,}"), ("fusions", f"{w.fused:,}"),
                       ("heat in flight", f"{w.heat_count():,}")])
+            ui.stats([("waves sent out", f"{w.waves_made:,}"), ("waves in flight", f"{w.wave_count():,}")])
             ui.stats([("ghosts", f"{w.ghost_count():,} (mass {w.ghost_mass():,})"),
                       ("repulsors", f"{sum(not wl.is_super for wl in w.wells)}"),
                       ("spawners", f"{len(w.spawners)}")])
