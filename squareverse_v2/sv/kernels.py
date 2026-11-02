@@ -1108,6 +1108,44 @@ def paint(idx, color, rgb):
 
 
 @njit(cache=True)
+def fly_waves(k, steps, gx, gy, gvx, gvy, gm, gage, w, h, hole, rim_mask, absorbed, life, wrap):
+    """Move gravitational waves (ghosts k) one tick, `steps` steps of a cell or less: straight on, unbent by anything.
+    One crossing a super well's core is swallowed (its mass goes to absorbed); one reaching the edge of the universe
+    (rim_mask: a round one's outside, or empty) stops on the last cell inside, its age set to `life` so it lands.
+    Every one ages a tick. Returns how many were swallowed. (World._fly_waves.)"""
+    swallowed = 0
+    for n in range(k.size):
+        g = k[n]
+        x, y, vx, vy = gx[g], gy[g], gvx[g], gvy[g]
+        for s in range(1, steps + 1):
+            nx = x + vx * (s / steps)
+            ny = y + vy * (s / steps)
+            if wrap:
+                nx = nx % w
+                ny = ny % h
+            edge = nx < 0 or nx > w - 1 or ny < 0 or ny > h - 1
+            nx = min(max(nx, 0.0), w - 1.0)
+            ny = min(max(ny, 0.0), h - 1.0)
+            i = int(np.floor(ny + 0.5)) * w + int(np.floor(nx + 0.5))
+            if rim_mask.size and rim_mask[i] != 0:
+                edge = True
+            if hole[i] > 0:
+                absorbed[hole[i] - 1] += gm[g]
+                gm[g] = 0
+                swallowed += 1
+                break
+            if edge:
+                gage[g] = life
+                gvx[g] = 0.0
+                gvy[g] = 0.0
+                break
+            gx[g] = nx
+            gy[g] = ny
+        gage[g] += 1
+    return swallowed
+
+
+@njit(cache=True)
 def heat_push(gx, gy, gvx, gvy, gm, gtag, tag, coupling, min_speed, vmax, w, h, mass, kin, owner, flag):
     """Radiation pressure: each ghost tagged `tag` (heat or waves) still faster than min_speed against the free
     particle in its cell (not a star's) pushes it the way it is going, handing over `coupling` of what a head-on

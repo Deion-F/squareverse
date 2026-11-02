@@ -155,7 +155,8 @@ class Renderer:
         self.overlay_key = None
         self._glows = {}            # star coronas by (radius, colour)
         self._arms = {}             # super well id -> (its phase last frame, the angle its arms are drawn at)
-        self._band_layer = None     # see-through layer the stable-orbit bands are shaded on
+        self._band_layer = None     # see-through layer the stable-orbit bands are shaded on ...
+        self._band_rect = None      # ... where they were last drawn on it
 
     def draw_world(self, world, mode):
         """The cells the camera sees, scaled to the window (averaged when zoomed out past a px per cell)."""
@@ -191,8 +192,11 @@ class Renderer:
         size = self.screen.get_size()
         if self._band_layer is None or self._band_layer.get_size() != size:
             self._band_layer = pygame.Surface(size, pygame.SRCALPHA)
+            self._band_rect = None
         layer, cam, k = self._band_layer, self.cam, self.cam.k
-        layer.fill((0, 0, 0, 0))
+        if self._band_rect:         # only what was drawn last time needs clearing, and only what is drawn now blitting
+            layer.fill((0, 0, 0, 0), self._band_rect)
+        drawn = None
         pw, ph = world.w * k, world.h * k
         shifts = [(sx, sy) for sx in (-pw, 0, pw) for sy in (-ph, 0, ph)] if world.wrap else [(0, 0)]
         shade, edge = (*config.ORBIT_BAND_COLOR, 34), (*config.ORBIT_BAND_COLOR, 160)
@@ -207,7 +211,11 @@ class Renderer:
                 pygame.draw.circle(layer, (0, 0, 0, 0), c, ri)      # (the layer's pixels are set, not blended)
                 pygame.draw.circle(layer, edge, c, ro, 1)
                 pygame.draw.circle(layer, edge, c, ri, 1)
-        self.screen.blit(layer, (0, 0))
+                box = pygame.Rect(c[0] - ro - 2, c[1] - ro - 2, 2 * ro + 5, 2 * ro + 5)
+                drawn = box if drawn is None else drawn.union(box)
+        self._band_rect = drawn.clip(layer.get_rect()) if drawn else None
+        if self._band_rect:
+            self.screen.blit(layer, self._band_rect.topleft, self._band_rect)
 
     def draw_wells(self, world):
         cam, k = self.cam, self.cam.k

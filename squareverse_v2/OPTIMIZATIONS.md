@@ -159,3 +159,48 @@ Files involved:
 - **Visual check:** run the app at cell 1 and cell 8 with wrap and orbit on, and look for seams at strip boundaries.
 - Breakdown by phase: time each call in `World.step` separately: `rebuild_field`, `rebuild_order`, `sg.update`,
   `wake_blocks`, `kernels.step`, `check_collapse`, `step_wells`, `render`.
+
+## 2026-11-02: exact super-well gravity, the tapered fade and the inspiral (commit `4a8102a`)
+
+Measured headless at 1920×990, cell 2 (the user's maximized window: a round universe 1082 cells across), all cores,
+no GPU. Each figure is the median ms per `World.step` (wall clock), and each row is the median of runs taken
+alternating old / `4a8102a` / now.
+
+| scene | `036e118` | `4a8102a` | now | runs |
+|---|---|---|---|---|
+| disk, reach 20, ticks 50–150 (~18 super wells, no pairs) | 34.6 | 43.2 | 38.2 | 5 each |
+| disk, reach 20, ticks 170–470 (~30–37 super wells, ~10 pairs spiralling in) | 39.6 | 60.4 | 26.2 | 3 each |
+| systems (default), ticks 100–400 | – | 5.6 | 5.4 | 3 each |
+| Star tool picked, systems: `draw_orbit_bands` per frame | – | 7.7 | 0.9 | 2 each |
+
+What `4a8102a` cost, and what fixed it:
+
+- **The new `gravity.fade` on a single number** went through about 12 numpy calls (10 µs). `reach_for`'s 50-step
+  bisection called it at every step, so every cache miss cost 0.5 ms, and super wells miss every time their mass
+  changes (about 19 a tick in the disk). That came to 7 ms in `step_wells`, 2 ms in `whirls()` and 2 ms in
+  `step_stars`, and `orbit_band` took 5 ms a frame. Now a single number takes a `math` path with the same arithmetic
+  (0.35 µs, bit-identical; `math.log` and `np.log` agree on this machine), and `reach_for` works out the pull's share
+  inline (a miss now takes 11 µs).
+- **Super wells moving every tick** (the inspiral) left the kernels nearly unchanged (`_step_strips` is within noise
+  with 18 exact `_pull`s per particle), but it added per-tick Python costs:
+  - `step_wells` makes one matrix `fade()` call instead of one per well.
+  - `_inspiral` and `_swallow_wells` prefilter all the pairs in numpy (`_maybe_overlapping`, `_maybe_touching`,
+    with a margin for numpy's `hypot`) before their exact per-pair checks.
+  - The waves are flown by a numba kernel (`kernels.fly_waves`), not by ~160 numpy calls a tick, and the pairs'
+    waves are added to the ghost arrays in one go (`World._batch_ghosts`).
+  - A moved well wakes a small disc on one core (`WAKE_PAR_RADIUS`). On all cores a 39-cell disc took 16 µs at the
+    median and up to 7 ms in the tail, against 14 µs on one core.
+- **`draw_orbit_bands`** clears and blits only the part of its full-screen layer it drew on. The full-screen blit
+  alone was 1.3 ms.
+
+Tried and ruled out:
+
+- A potential-only copy of `kernels.field` for `_order_phi`. It gave identical results, but only cut one re-rank from
+  10.3 to 8 ms (31 wells) and from 4.1 to 2.2 ms (3 wells). Instead `_order_phi` now just adds in place.
+- Merging the two `heat_push` passes: the wave pass costs next to nothing, and one pass would change the order of
+  the pushes.
+
+Checks: every change is bit-identical. Seeded single-core runs of disk and systems (400 ticks), and of wrapped and
+round scenes with super-well mergers, swallowed wells, a held well and waves, hash to the same state as `4a8102a`
+every 25–50 ticks. The band overlay renders the same pixels. (All-cores runs don't repeat even at `4a8102a`: use
+`--cpu` for such checks.)

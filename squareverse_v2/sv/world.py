@@ -2,6 +2,7 @@
 
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numba
@@ -493,9 +494,10 @@ class World:
         else:                       # only wells moved or grew: just the particles in their reach can notice
             for wl in self.changed_wells:
                 r = self.reach(wl) + 1.0
+                par = self.cores and r > config.WAKE_PAR_RADIUS     # (waking a small disc isn't worth the cores)
                 for x, y in ((wl.x, wl.y), wl.built[:2]):
-                    (kernels.wake_disk_par if self.cores else kernels.wake_disk)(x, y, r, self.w, self.h, self.mass,
-                                                                                 self.flag, self.wrap)
+                    (kernels.wake_disk_par if par else kernels.wake_disk)(x, y, r, self.w, self.h, self.mass,
+                                                                          self.flag, self.wrap)
         for wl in self.wells:
             wl.built = (wl.x, wl.y, wl.mass)
         self.field_dirty = False
@@ -1307,16 +1309,17 @@ class World:
                 wl.phase += self.whirl_omega(wl)
             else:
                 wl.phase += wl.omega
+        # every well's pull on every other at once (row k: on well k), one fade() for them all
+        dxs, dys = xs[None, :] - xs[:, None], ys[None, :] - ys[:, None]
+        if self.wrap:
+            dxs -= self.w * np.floor(dxs / self.w + 0.5)
+            dys -= self.h * np.floor(dys / self.h + 0.5)
+        rhos = np.sqrt(dxs * dxs + dys * dys + soft * soft)
+        fs = pulls / rhos ** 3 * fade(rhos, self.kinv)[0]
         for k, wl in enumerate(wells):
             if wl is self.held or wl.sign < 0:
                 continue
-            dx, dy = xs - wl.x, ys - wl.y
-            if self.wrap:
-                dx -= self.w * np.floor(dx / self.w + 0.5)
-                dy -= self.h * np.floor(dy / self.h + 0.5)
-            d2 = dx * dx + dy * dy
-            rho = np.sqrt(d2 + soft * soft)
-            f = pulls / rho ** 3 * fade(rho, self.kinv)[0]
+            dx, dy, f = dxs[k], dys[k], fs[k]
             f[k] = 0.0
             if partner.get(wl) in index:
                 f[index[partner[wl]]] = 0.0
@@ -1617,16 +1620,17 @@ class World:
             if bn.a in supers and bn.b in supers and self._overlap(bn.a, bn.b):
                 pairs.append(bn)
                 paired |= {bn.a, bn.b}
-        near = sorted((self.distance(a.x, a.y, b.x, b.y), i, j) for i, a in enumerate(supers)
-                      for j, b in enumerate(supers[i + 1:], i + 1) if self._overlap(a, b))
+        near = sorted((self.distance(supers[i].x, supers[i].y, supers[j].x, supers[j].y), i, j)
+                      for i, j in self._maybe_overlapping(supers) if self._overlap(supers[i], supers[j]))
         for _, i, j in near:
             a, b = supers[i], supers[j]
             if a not in paired and b not in paired:
                 pairs.append(Binary(a, b, self._orbit_way(a, b)))
                 paired |= {a, b}
         self.binaries = pairs
-        for bn in pairs:
-            self._spiral(bn)
+        with self._batch_ghosts():                      # their waves
+            for bn in pairs:
+                self._spiral(bn)
 
     def _unpair(self, wl):
         """wl is gone: the pair it was in is no more."""
@@ -1634,6 +1638,23 @@ class World:
 
     def _overlap(self, a, b):
         return 0 < self.distance(a.x, a.y, b.x, b.y) < self.well_range(a) + self.well_range(b)
+
+    def _maybe_overlapping(self, supers):
+        """The pairs (i, j), i < j, of these super wells that might overlap, in order: all of them at once in numpy,
+        with a little to spare (its hypot can differ from math's in the last bit), so _overlap need only look at
+        these rather than at every pair."""
+        if len(supers) < 2:
+            return []
+        xs = np.array([wl.x for wl in supers])
+        ys = np.array([wl.y for wl in supers])
+        ranges = np.array([self.well_range(wl) for wl in supers])
+        dx, dy = xs[None, :] - xs[:, None], ys[None, :] - ys[:, None]
+        if self.wrap:
+            dx -= self.w * np.floor(dx / self.w + 0.5)
+            dy -= self.h * np.floor(dy / self.h + 0.5)
+        near = np.hypot(dx, dy) < (ranges[None, :] + ranges[:, None]) * (1.0 + 1e-9) + 1e-6
+        i, j = np.nonzero(np.triu(near, 1))
+        return zip(i.tolist(), j.tolist())
 
     def _orbit_way(self, a, b):
         """Which way a pair just caught circles (1 clockwise, -1 counterclockwise): the way they were already going
@@ -1832,7 +1853,7 @@ class World:
         mass adds up and momentum is conserved. A merger radiates a burst of gravitational waves and rings down
         (_merged), sends out a shock (merge_shock) and can't go supernova for SUPER_MERGE_GRACE ticks (more mergers in
         that time don't make it longer)."""
-        merged = True
+        merged = self._maybe_touching()
         while merged:
             merged = False
             for a in self.wells:
@@ -1893,6 +1914,24 @@ class World:
                     break
                 if merged:
                     break
+
+    def _maybe_touching(self):
+        """Whether any super well might be touching another well (core to core, or core to a solid well's edge), as
+        _swallow_wells sees it: all pairs at once in numpy, with a little to spare (its hypot can differ from math's
+        in the last bit), so that the pair by pair look only runs when one might."""
+        wells = [wl for wl in self.wells if wl.sign >= 0]
+        if len(wells) < 2 or not any(wl.is_super for wl in wells):
+            return False
+        xs = np.array([wl.x for wl in wells])
+        ys = np.array([wl.y for wl in wells])
+        size = np.array([wl.core() if wl.is_super else wl.radius for wl in wells])
+        dx, dy = xs[None, :] - xs[:, None], ys[None, :] - ys[:, None]
+        if self.wrap:
+            dx -= self.w * np.floor(dx / self.w + 0.5)
+            dy -= self.h * np.floor(dy / self.h + 0.5)
+        touch = np.hypot(dx, dy) <= (size[None, :] + size[:, None]) * (1.0 + 1e-9) + 1e-6
+        np.fill_diagonal(touch, False)
+        return bool(touch[np.array([wl.is_super for wl in wells])].any())
 
     def merge_shock(self, wl):
         """Two super wells have just merged into wl: a shock front runs out from it (moving with it) to
@@ -1989,7 +2028,9 @@ class World:
         rows = [(wl.x, wl.y, self.g_scale * wl.pull(), self.softening(wl)) for wl in self.wells if wl.is_super]
         if not rows:
             return self.phi
-        return self.phi + external_field(self.w, self.h, rows, None, self.wrap, self.kinv)[2]
+        phi = external_field(self.w, self.h, rows, None, self.wrap, self.kinv)[2]
+        phi += self.phi             # (in place: a new full-grid array is a millisecond)
+        return phi
 
     def _set_buckets(self, bucket):
         self.bucket_base = bucket
@@ -2180,6 +2221,7 @@ class World:
         self.ghost_m = np.zeros(0, np.int64)
         self.ghost_age = np.zeros(0, np.int64)
         self.ghost_tag = np.zeros(0, np.int64)       # > 0: debris of that blast (see _cool_blasts)
+        self.ghost_batch = None                     # ghosts waiting to be added (_batch_ghosts)
 
     def pour_ghosts(self, px, py, radius_px, m):
         """Pour ghost particles in a circle around a pixel, at the brush's rate, anywhere in it (they overlap
@@ -2193,21 +2235,40 @@ class World:
         lo, hi = m if isinstance(m, tuple) else (m, m)
         self.add_ghosts(xs[pick], ys[pick], self.rng.integers(lo, hi + 1, n))
 
+    GHOST_COLUMNS = ("ghost_x", "ghost_y", "ghost_vx", "ghost_vy", "ghost_m", "ghost_age", "ghost_tag")
+
     def add_ghosts(self, xs, ys, masses, vx=0.0, vy=0.0, tag=0, age=0):
         """Add ghosts at positions in cells (arrays) with masses (an array or one mass), velocity (a number or an
-        array), a blast tag and an age."""
+        array), a blast tag and an age. While ghosts are being batched (_batch_ghosts) they are only added at the end
+        of the batch, all at once."""
         n = len(xs)
         if self.wrap:
             xs, ys = np.mod(xs, self.w), np.mod(ys, self.h)
         else:
             xs, ys = np.clip(xs, 0, self.w - 1), np.clip(ys, 0, self.h - 1)
-        self.ghost_x = np.concatenate([self.ghost_x, np.asarray(xs, np.float64)])
-        self.ghost_y = np.concatenate([self.ghost_y, np.asarray(ys, np.float64)])
-        self.ghost_vx = np.concatenate([self.ghost_vx, np.broadcast_to(np.float64(vx), n)])
-        self.ghost_vy = np.concatenate([self.ghost_vy, np.broadcast_to(np.float64(vy), n)])
-        self.ghost_m = np.concatenate([self.ghost_m, np.broadcast_to(np.asarray(masses, np.int64), n)])
-        self.ghost_age = np.concatenate([self.ghost_age, np.broadcast_to(np.asarray(age, np.int64), n)])
-        self.ghost_tag = np.concatenate([self.ghost_tag, np.full(n, tag, np.int64)])
+        new = (np.asarray(xs, np.float64), np.asarray(ys, np.float64), np.broadcast_to(np.float64(vx), n),
+               np.broadcast_to(np.float64(vy), n), np.broadcast_to(np.asarray(masses, np.int64), n),
+               np.broadcast_to(np.asarray(age, np.int64), n), np.full(n, tag, np.int64))
+        if self.ghost_batch is not None:
+            self.ghost_batch.append(new)
+        else:
+            self._join_ghosts([new])
+
+    def _join_ghosts(self, added):
+        for k, name in enumerate(self.GHOST_COLUMNS):
+            setattr(self, name, np.concatenate([getattr(self, name)] + [cols[k] for cols in added]))
+
+    @contextmanager
+    def _batch_ghosts(self):
+        """Ghosts added inside this are added in one go at its end, in the same order (copying the ghost arrays once
+        rather than for every few added). Nothing inside may look at the ghosts."""
+        self.ghost_batch = []
+        try:
+            yield
+        finally:
+            added, self.ghost_batch = self.ghost_batch, None
+            if added:
+                self._join_ghosts(added)
 
     def _step_ghosts(self, params, whirls):
         """Move the ghosts (feeling every gravity but each other's: they aren't in the self-gravity mesh), let the
@@ -2234,36 +2295,15 @@ class World:
                 setattr(self, name, getattr(self, name)[keep])
 
     def _fly_waves(self, k):
-        """Move gravitational waves (ghosts k) one tick: straight on, unbent by gravity, the orbit or the whirlpools.
-        One crossing a super well's core is swallowed; one reaching the edge of the universe stops there and lands."""
-        x, y, vx, vy = self.ghost_x[k], self.ghost_y[k], self.ghost_vx[k], self.ghost_vy[k]
-        m, age = self.ghost_m[k], self.ghost_age[k]
-        steps = max(1, int(np.ceil(np.hypot(vx, vy).max())))   # a cell at a time, so none jumps over a small core
-        flying = np.ones(k.size, bool)
-        for s in range(1, steps + 1):
-            nx, ny = x + vx * (s / steps), y + vy * (s / steps)
-            if self.wrap:
-                nx, ny = nx % self.w, ny % self.h
-            edge = (nx < 0) | (nx > self.w - 1) | (ny < 0) | (ny > self.h - 1)
-            nx, ny = np.clip(nx, 0, self.w - 1), np.clip(ny, 0, self.h - 1)
-            cell = np.floor(ny + 0.5).astype(np.int64) * self.w + np.floor(nx + 0.5).astype(np.int64)
-            if self.rim_mask is not None:
-                edge |= self.rim_mask[cell] != 0
-            hole = self.hole[cell]
-            gone = flying & (hole > 0)
-            if gone.any():
-                np.add.at(self.absorbed, hole[gone] - 1, m[gone])
-                self.stats[kernels.S_ABSORBED] += int(gone.sum())
-                m[gone] = 0
-            stop = flying & edge & ~gone
-            if stop.any():
-                age[stop] = config.GHOST_TICKS           # lands next to where it stopped
-                vx[stop] = vy[stop] = 0.0
-            move = flying & ~edge & ~gone                # one stopping stays on the last cell inside
-            self.ghost_x[k[move]], self.ghost_y[k[move]] = nx[move], ny[move]
-            flying &= ~gone & ~stop
-        self.ghost_vx[k], self.ghost_vy[k], self.ghost_m[k] = vx, vy, m
-        self.ghost_age[k] = age + 1
+        """Move gravitational waves (ghosts k) one tick: straight on, unbent by gravity, the orbit or the whirlpools,
+        a cell at a time so none jumps over a small core (kernels.fly_waves). One crossing a super well's core is
+        swallowed; one reaching the edge of the universe stops there and lands."""
+        steps = max(1, int(np.ceil(np.hypot(self.ghost_vx[k], self.ghost_vy[k]).max())))
+        rim = self.rim_mask if self.rim_mask is not None else np.zeros(0, np.uint8)
+        self.stats[kernels.S_ABSORBED] += kernels.fly_waves(k, steps, self.ghost_x, self.ghost_y, self.ghost_vx,
+                                                            self.ghost_vy, self.ghost_m, self.ghost_age, self.w,
+                                                            self.h, self.hole, rim, self.absorbed, config.GHOST_TICKS,
+                                                            self.wrap)
 
     def _fuse(self):
         """Fusion in every star (kernels.star_fuse). Returns the heat it shed, as rows like kernels._shed's."""

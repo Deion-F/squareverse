@@ -11,6 +11,15 @@ from . import config, kernels
 def fade(rho, kinv):
     """Shares of the plain inverse-square pull and of its potential left at softened distance rho (a number or an
     array) when gravity reaches 1 / kinv cells (kinv = 0: all the way). As kernels.fade."""
+    if isinstance(rho, (float, int)):           # one distance (asked for often from Python): the same sums in math
+        u = float(rho) * kinv
+        t = min(max((u - 1.0) / kernels._TL, 0.0), 1.0)
+        if u <= 1.0:
+            return 1.0 - t * t * (3.0 - 2.0 * t), 1.0 - u + u * kernels._H_IN
+        taper = min(u, kernels.REACH_TAPER)
+        return (1.0 - t * t * (3.0 - 2.0 * t),
+                taper * (kernels._H_END - (-kernels._A0 / taper + kernels._A1 * math.log(taper) + kernels._A2 * taper
+                                           + 0.5 * kernels._A3 * taper * taper)))
     u = np.asarray(rho, np.float64) * kinv
     t = np.clip((u - 1.0) / kernels._TL, 0.0, 1.0)
     pull = 1.0 - t * t * (3.0 - 2.0 * t)
@@ -47,7 +56,8 @@ def reach_for(strength, accel, kinv):
     lo, hi = 1.0 / kinv, kernels.REACH_TAPER / kinv
     for _ in range(50):                         # in the taper the pull falls steadily to nothing: halve the interval
         mid = 0.5 * (lo + hi)
-        if strength / (mid * mid) * fade(mid, kinv)[0] > accel:
+        t = min(max((mid * kinv - 1.0) / kernels._TL, 0.0), 1.0)      # fade's share of the pull there, inline
+        if strength / (mid * mid) * (1.0 - t * t * (3.0 - 2.0 * t)) > accel:
             lo = mid
         else:
             hi = mid

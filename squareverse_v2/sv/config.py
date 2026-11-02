@@ -11,6 +11,8 @@ MAX_TICKS_PER_FRAME = 8
 STRIP_SIZE = 20                        # cells: on all cores the particles run in strips at least this thick, and
                                        #   at least 2 x (MAX_STEPS + 2) so two running together never meet; thinner
                                        #   strips share clumps of matter out more evenly
+WAKE_PAR_RADIUS = 64.0                 # cells: a moved well wakes the particles in its reach on all cores only when
+                                       #   that is wider than this (starting the cores costs more than a small disc)
 
 # --- Starting state of the app ----------------------------------------------
 DEFAULT_PRESET = "systems"             # rain, disk, cloud, binary, systems or empty (--preset overrides)
