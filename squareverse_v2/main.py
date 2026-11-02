@@ -40,7 +40,28 @@ def parse_args():
     p.add_argument("--particles", type=int, help="particle count for the preset (default: fills its region)")
     p.add_argument("--seed", type=int, help="random seed for a reproducible run")
     p.add_argument("--benchmark", type=int, metavar="TICKS", help="run TICKS ticks headless and print timings")
+    speed = p.add_mutually_exclusive_group()
+    speed.add_argument("--cpu", action="store_true",
+                       help="run as before acceleration: the particles on one core, no GPU (a --seed run repeats)")
+    speed.add_argument("--no-gpu", action="store_true", help="use all CPU cores, but not the GPU")
+    speed.add_argument("--gpu", action="store_true",
+                       help="always give the GPU the work it can do, even where the CPU cores measure faster")
+    p.add_argument("--gpu-name", metavar="NAME", help="use the GPU whose name contains NAME (default: the best one)")
     return p.parse_args()
+
+
+def accelerate(world, args):
+    """Share the work out over all CPU cores and the best GPU there is (see World.accelerate), unless --cpu."""
+    if args.cpu:
+        print("acceleration off (--cpu): one core, no GPU")
+        return
+    gpu = None
+    if not args.no_gpu:
+        from sv.gpu import open_device
+        gpu, why = open_device(args.gpu_name)
+        print(f"GPU: {gpu}" + ("" if args.gpu else ", where it is faster than the CPU cores") if gpu
+              else f"GPU: off, {why}")
+    world.accelerate(cores=True, gpu=gpu, force_gpu=args.gpu)
 
 
 def benchmark(world, ticks):
@@ -60,6 +81,7 @@ def benchmark(world, ticks):
     step = np.array(step[1:] or step)
     grav = np.array(grav[1:] or grav)
     print(f"{world.particle_count():,} particles on {world.w}x{world.h} cells, {ticks} ticks")
+    print("work: " + ", ".join(f"{job} on {where}" for job, where, _ in world.where_work_runs()))
     print(f"step     mean {step.mean():6.2f} ms   max {step.max():6.2f} ms")
     print(f"gravity  mean {grav.mean():6.2f} ms   max {grav.max():6.2f} ms")
     print(f"render   mean {render_ms:6.2f} ms (kernel + blit + scale)")
@@ -72,9 +94,10 @@ def main():
     pw, ph = (int(v) for v in args.size.lower().split("x"))
     t = time.perf_counter()
     print("compiling kernels (first run only, cached afterwards)...", end=" ", flush=True)
-    warmup()
+    warmup(cores=not args.cpu)
     print(f"{time.perf_counter() - t:.1f} s")
     world = World(pw, ph, args.cell, seed=args.seed)
+    accelerate(world, args)
     PRESETS[args.preset](world, args.particles)
 
     if args.benchmark is not None:

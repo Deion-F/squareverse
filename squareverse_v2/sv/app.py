@@ -6,21 +6,25 @@ import time
 import pygame
 
 from . import config
+from .menu import draw_menu
 from .presets import PRESETS
 from .render import Renderer
+from .ui import UI
+from .usage import Usage
 from .world import VIEW_MODES
 
 PRESET_KEYS = {pygame.K_F1: "rain", pygame.K_F2: "disk", pygame.K_F3: "cloud", pygame.K_F4: "binary"}
 ARROWS = {pygame.K_DOWN: 0, pygame.K_LEFT: 2, pygame.K_UP: 4, pygame.K_RIGHT: 6}
 POUR_KEYS = {pygame.K_1 + k: m for k, m in enumerate(config.POUR_MASSES)}
 POUR_KEYS[pygame.K_1 + len(config.POUR_MASSES)] = tuple(config.RANDOM_MASS)   # random mass in a range
+HOLD_TOOLS = ("pour", "ghosts", "erase")         # mouse tools that act while the button is held; the rest once a click
 
 
 class App:
     def __init__(self, world, fullscreen=False):
         self.world = world
         self.fullscreen = fullscreen
-        self.windowed_size = (world.pw, world.ph)
+        self.windowed_size = (world.vpw, world.vph)
         self.screen = self.renderer = None
         self.paused = False
         self.show_help = config.HELP_ON
@@ -29,14 +33,30 @@ class App:
         self.ticks_per_frame = config.TICKS_PER_FRAME
         self.pour_mass = tuple(config.RANDOM_MASS) if config.POUR_MASS == "random" else config.POUR_MASS
         self.brush_px = config.BRUSH_PX
+        self.ghost_stars = config.GHOST_STARS   # placed stars arrive as ghost stars
         self.render_ms = 0.0
-        self.dragging = None        # the well or spawner being dragged
+        self.dragging = None        # the body being dragged
+        self.tool = "pour"          # what a left click on the universe does (see menu.TOOLS)
+        self.selected = None        # the body picked with the select tool
+        self.pressing = False       # the left button went down on the universe (not the menu) and is still down
+        self.panning = False        # the view is being dragged (middle button, or alt + left)
+        self.ui = None
+        self.usage = None
+
+    @property
+    def cam(self):
+        return self.renderer.cam
+
+    def mouse_world(self, pos=None):
+        """The universe px (at zoom 1, as the World takes) under the mouse, or under a window px."""
+        return self.cam.to_world(*(pos or pygame.mouse.get_pos()))
 
     def run(self):
         pygame.init()
         world = self.world
         pygame.display.set_caption("Squareverse")
         self.set_display_mode()
+        self.usage = Usage().start()
         clock = pygame.time.Clock()
 
         running = True
@@ -49,33 +69,63 @@ class App:
                     new_size = (e.w, e.h)   # applied once below, after a burst of resize events (sand.py)
                 elif e.type == pygame.KEYDOWN:
                     running = self.on_key(e)
+                elif self.ui.handle(e):     # the menu's: it never reaches the universe
+                    continue
                 elif e.type == pygame.MOUSEWHEEL:
-                    self.brush_px = max(2, min(160, self.brush_px + e.y * 4))
-                elif (e.type == pygame.MOUSEBUTTONDOWN and e.button == 1
-                      and pygame.key.get_mods() & pygame.KMOD_SHIFT):
-                    self.dragging = world.held = world.body_at(*e.pos)
-                elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+                    if pygame.key.get_mods() & pygame.KMOD_CTRL:
+                        self.cam.zoom_at(config.ZOOM_STEP ** e.y, *pygame.mouse.get_pos())
+                    else:
+                        self.brush_px = max(2, min(160, self.brush_px + e.y * 4))
+                elif e.type == pygame.MOUSEBUTTONDOWN and (e.button == 2 or e.button == 1
+                                                           and pygame.key.get_mods() & pygame.KMOD_ALT):
+                    self.panning = True
+                elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                    self.pressing = True
+                    body = None
+                    if pygame.key.get_mods() & pygame.KMOD_SHIFT:   # shift+click drags a body, else pours ghosts
+                        body = world.body_at(*self.mouse_world(e.pos))
+                        if body is None and self.tool == "star":     # ...or with the Star tool places a ghost star
+                            self.place("ghost star", *self.mouse_world(e.pos))
+                            self.pressing = False
+                    elif self.tool not in HOLD_TOOLS:
+                        body = self.click_tool(*self.mouse_world(e.pos))
+                    self.dragging = world.held = body
+                elif e.type == pygame.MOUSEBUTTONUP and e.button in (1, 2):
+                    if self.panning:
+                        self.panning = False
+                        continue
+                    self.pressing = False
                     self.dragging = world.held = None
+                elif e.type == pygame.MOUSEMOTION and self.panning:
+                    self.cam.pan(*e.rel)
                 elif e.type == pygame.MOUSEMOTION and self.dragging is not None:
-                    world.move_body(self.dragging, *e.pos)
-            if new_size and not self.fullscreen and new_size != (world.pw, world.ph):
+                    world.move_body(self.dragging, *self.mouse_world(e.pos))
+            if new_size and not self.fullscreen and new_size != (world.vpw, world.vph):
                 self.windowed_size = new_size
-                self.screen = self.renderer.screen = pygame.display.get_surface()
+                self.screen = self.renderer.screen = self.ui.screen = pygame.display.get_surface()
                 world.resize(*self.screen.get_size())
             screen, renderer = self.screen, self.renderer
-            if self.dragging is not None and self.dragging not in world.wells + world.spawners:   # swallowed
+            bodies = world.stars + world.wells + world.spawners
+            if self.dragging is not None and self.dragging not in bodies:   # gone (swallowed, merged, exploded)
                 self.dragging = world.held = None
+            if self.selected is not None and self.selected not in bodies:
+                self.selected = None
 
+            self.cam.update(world, self.screen.get_size())
             buttons = pygame.mouse.get_pressed()
-            mx, my = pygame.mouse.get_pos()
+            mx, my = pygame.mouse.get_pos()          # window px; (wx, wy) the universe px under them
+            wx, wy = self.mouse_world((mx, my))
+            on_menu = self.ui.captures((mx, my))
             shift = pygame.key.get_mods() & pygame.KMOD_SHIFT
-            if buttons[0] and self.dragging is None:   # shift+click on a well or spawner drags it instead
-                if shift:
-                    world.pour_ghosts(mx, my, self.brush_px, self.pour_mass)
-                else:
-                    world.brush(mx, my, self.brush_px, self.pour_mass)
-            elif buttons[2]:
-                world.brush(mx, my, self.brush_px, 0)
+            if buttons[0] and self.pressing and self.dragging is None and not on_menu:
+                if shift or self.tool == "ghosts":
+                    world.pour_ghosts(wx, wy, self.brush_px, self.pour_mass)
+                elif self.tool == "pour":
+                    world.brush(wx, wy, self.brush_px, self.pour_mass)
+                elif self.tool == "erase":
+                    world.brush(wx, wy, self.brush_px, 0)
+            elif buttons[2] and not on_menu:
+                world.brush(wx, wy, self.brush_px, 0)
 
             if not self.paused:
                 for _ in range(self.ticks_per_frame):
@@ -85,21 +135,70 @@ class App:
             renderer.draw_world(world, self.view)
             self.render_ms = (time.perf_counter() - t) * 1000
             renderer.draw_wells(world)
-            pygame.draw.circle(screen, (70, 76, 90), (mx, my), self.brush_px, 1)
-            renderer.draw_compass(world.gdir, (world.pw - 34, 34))
-            renderer.draw_hud(world, self, clock.get_fps())
-            if self.inspector:
-                body = world.body_at(mx, my)
-                info = world.particle_at(mx, my)
+            if self.selected is not None:
+                renderer.draw_selection(world, self.selected)
+            if not on_menu and not self.panning:
+                renderer.draw_brush(self.tool, (mx, my), max(1, round(self.tool_radius_px() * self.cam.zoom)))
+            sw = screen.get_width()
+            renderer.draw_compass(world.gdir, (sw - 34, 34))
+            renderer.draw_usage(world, self.usage, None if self.ui.open else sw - 64)
+            if self.inspector and not on_menu:
+                body = world.body_at(wx, wy)
+                info = world.particle_at(wx, wy)
                 if body is not None:
                     renderer.draw_body_inspector(world, body, (mx, my))
                 elif info:
                     renderer.draw_inspector(info, (mx, my))
+            renderer.draw_status(world, self, clock.get_fps())
             if self.show_help:
                 renderer.draw_help()
+            draw_menu(self.ui, self, clock.get_fps())
             pygame.display.flip()
             clock.tick(config.FPS)
+        self.usage.stop()
         pygame.quit()
+
+    def zoom(self, factor):
+        """Zoom by factor at the mouse (or the window's centre when it is over the menu or outside)."""
+        pos = pygame.mouse.get_pos()
+        if self.ui.captures(pos) or not pygame.mouse.get_focused():
+            pos = (self.screen.get_width() / 2, self.screen.get_height() / 2)
+        self.cam.zoom_at(factor, *pos)
+
+    def place(self, what, mx, my):
+        """Put a body of the brush's size at a pixel: a star (a ghost star if what says so, or ghost_stars is on), a
+        repulsor, a super well (as heavy as a brush-sized well, and never lighter than what collapse would make), or
+        a spawner (locked or not)."""
+        w = self.world
+        if what in ("star", "ghost star"):
+            return w.add_star(mx, my, self.brush_px, self.pour_mass, ghost=what == "ghost star" or self.ghost_stars)
+        if what == "repulsor":
+            return w.add_sized_well(mx, my, self.brush_px, self.pour_mass, -1)
+        if what == "super":
+            return w.add_super_well(mx, my, max(w.collapse_threshold(), w.brush_mass(self.brush_px, self.pour_mass)))
+        return w.add_spawner(mx, my, self.brush_px, self.pour_mass, locked=what == "locked")
+
+    def tool_radius_px(self):
+        """How big what the mouse tool places will be (px): a repulsor is as big as its mass makes it (the brush at
+        pour mass 1, bigger for heavier pours); anything else, a star included, the brush."""
+        w = self.world
+        if self.tool == "repulsor":
+            return w.well_radius(w.brush_mass(self.brush_px, self.pour_mass)) * w.cell
+        return self.brush_px
+
+    def click_tool(self, mx, my):
+        """A left click on the universe with a one-click tool. Returns the body to drag, if any."""
+        w = self.world
+        if self.tool == "select":
+            self.selected = w.body_at(mx, my)
+            return self.selected
+        if self.tool == "delete":
+            body = w.body_at(mx, my)
+            if body is not None:
+                w.remove_body(body)
+            return None
+        self.place(self.tool, mx, my)
+        return None
 
     def set_display_mode(self):
         """Open the window (resizable) or go fullscreen at the desktop resolution; the world follows its size."""
@@ -109,9 +208,11 @@ class App:
             self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
         if self.renderer is None:
             self.renderer = Renderer(self.screen)
-        self.renderer.screen = self.screen
-        if self.screen.get_size() != (self.world.pw, self.world.ph):
+            self.ui = UI(self.screen)
+        self.renderer.screen = self.ui.screen = self.screen
+        if self.screen.get_size() != (self.world.vpw, self.world.vph):
             self.world.resize(*self.screen.get_size())
+        self.renderer.cam.update(self.world, self.screen.get_size())
 
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
@@ -121,10 +222,12 @@ class App:
         w = self.world
         k = e.key
         shift = e.mod & pygame.KMOD_SHIFT
-        mx, my = pygame.mouse.get_pos()
+        mx, my = self.mouse_world()                  # universe px under the mouse
         if k == pygame.K_ESCAPE:
             if self.show_help:
                 self.show_help = False
+            elif self.ui.open:
+                self.ui.open = False
             elif self.fullscreen:
                 self.toggle_fullscreen()
             else:
@@ -132,6 +235,8 @@ class App:
             return True
         if k == pygame.K_F11:
             self.toggle_fullscreen()
+        elif k == pygame.K_TAB:
+            self.ui.open = not self.ui.open
         elif k in ARROWS:
             w.set_gravity(ARROWS[k])
         elif k in (pygame.K_q, pygame.K_e):
@@ -141,12 +246,12 @@ class App:
         elif k in POUR_KEYS:
             self.pour_mass = POUR_KEYS[k]
         elif k == pygame.K_g:
-            w.add_sized_well(mx, my, self.brush_px, self.pour_mass, -1 if shift else 1)
+            self.place("repulsor" if shift else "star", mx, my)
         elif k == pygame.K_b:
             if shift:
                 w.collapse_on = not w.collapse_on
-            else:   # as heavy as a brush-sized well, and never lighter than what collapse would make
-                w.add_super_well(mx, my, max(w.collapse_threshold(), w.brush_mass(self.brush_px, self.pour_mass)))
+            else:
+                self.place("super", mx, my)
         elif k == pygame.K_x:
             nearest = w.nearest_body(mx, my)
             if nearest is not None:
@@ -167,9 +272,18 @@ class App:
         elif k == pygame.K_s:
             w.set_self_gravity(not w.sg_on)
         elif k == pygame.K_f:
-            w.add_spawner(mx, my, self.brush_px, self.pour_mass, locked=bool(shift))
+            self.place("locked" if shift else "spawner", mx, my)
         elif k == pygame.K_w:
             w.set_wrap(not w.wrap)
+        elif k == pygame.K_u:
+            w.set_round(not w.round)
+        elif k == pygame.K_z:
+            self.zoom(config.ZOOM_STEP if shift else 1 / config.ZOOM_STEP)
+        elif k == pygame.K_r:
+            if shift:
+                self.cam.fit()
+            else:
+                self.cam.reset()
         elif k == pygame.K_o:
             w.set_orbit({0: 1, 1: -1, -1: 0}[w.orbit])
         elif k in (pygame.K_k, pygame.K_l):
@@ -199,6 +313,7 @@ class App:
             w.step()
         elif k in PRESET_KEYS:
             PRESETS[PRESET_KEYS[k]](w)
+            self.selected = None
         elif k == pygame.K_c:
             w.clear()
         elif k == pygame.K_h:

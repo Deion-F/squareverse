@@ -1,36 +1,43 @@
-"""pygame drawing: the particle grid (one buffer blit, as in sand.py), wells, HUD, help and inspector."""
+"""pygame drawing: the particle grid (one buffer blit, as in sand.py, through the camera), wells, help, inspector and
+the usage readout."""
 
 import math
 
 import pygame
 
 from . import config
-from .world import DIR_NAMES, DIRS, VIEW_MODES, Well
+from .world import DIRS, VIEW_MODES, Star, Well
 
 HELP = [
-    ("LMB / RMB / wheel", "pour / erase / brush size"),
+    ("menu button / Tab", "open the control menu (bottom right): every setting, with an (i) explaining it"),
+    ("LMB / RMB / wheel", "use the mouse tool (pour by default; pick one in the menu) / erase / brush size"),
     ("shift+LMB", f"pour ghosts: feel gravity but pass through everything for {config.GHOST_TICKS} ticks"),
     ("1-5 / 6", "pour mass " + " / ".join(str(m) for m in config.POUR_MASSES)
      + " / random {}-{}".format(*config.RANDOM_MASS)),
-    ("G / shift+G", "place star / repulsor: brush size, solid, weighs its area x pour mass"),
+    ("G / shift+G", "place star (a ball of particles, core of pour-mass particles, held by its own gravity) / solid "
+                    "repulsor"),
+    ("shift+LMB, Star tool", "place a ghost star: flies through everything, lands as a star"),
     ("F / shift+F", "place particle spawner: brush size sets the rate; shift locks it in place"),
     ("B", "place super well (swallows what touches its core; overlapping ones merge)"),
     ("shift+B", "collapse: dense mass becomes a super well, on/off"),
-    ("shift+drag on a body", "move a well or spawner (wells attract each other; heavy super wells are slow)"),
-    ("X", "delete nearest well or spawner"),
-    (", / .", "lighter / heavier nearest well"),
+    ("shift+drag on a body", "move a well or spawner, or pull a star along (heavy super wells are slow)"),
+    ("X", "delete nearest star (and its particles), well or spawner"),
+    (", / .", "lighter / heavier nearest star or repulsor (it resizes to match its new mass)"),
     ("; / '", "nearest super well spins slower / faster"),
     ("< / >", "all gravity weaker / stronger (collapse threshold follows)"),
     ("arrows, Q/E, 0", "global gravity direction, rotate, off"),
     ("S", "self-gravity on/off"),
     ("O", "global orbit: off / clockwise / counterclockwise"),
-    ("W", "continuous borders (leave one side, enter the opposite) on/off"),
+    ("W", "continuous borders (leave one side, enter the opposite) on/off; not in a round universe"),
     ("K / L", "global orbit slower / faster"),
     ("M / P", "merging / splitting on/off"),
     ("J", "children steer their parent on/off"),
     ("V", "view: " + " / ".join(VIEW_MODES)),
     ("I", "inspector (hover a particle)"),
     ("[ / ]", "square size"),
+    ("ctrl+wheel, Z / shift+Z", "zoom out / in at the mouse (the whole universe, not the square size)"),
+    ("middle drag, alt+drag", "pan the view; R resets it (1x, centred), shift+R fits the whole universe"),
+    ("U", "universe: the window's rectangle / round, reaching past the window (rotation stays on its circles)"),
     ("+ / -", "ticks per frame"),
     ("space / N", "pause / single tick"),
     ("F1-F4", "presets: rain, disk, cloud, binary"),
@@ -57,42 +64,144 @@ def grid_overlay(world):
     return surf
 
 
+class Camera:
+    """Where the window looks into the universe: zoom (window px per universe px; 1 shows the squares at their size)
+    and the universe point at the window's centre, as an offset (universe px) from the universe's centre. It never
+    zooms out past where the whole universe fits, nor pans past its edges."""
+
+    def __init__(self):
+        self.zoom = 1.0
+        self.ox = self.oy = 0.0
+        self.sw = self.sh = self.upw = self.uph = 1
+        self.cell = 1
+
+    def update(self, world, screen_size):
+        self.sw, self.sh = screen_size
+        self.cell = world.cell
+        self.upw, self.uph = world.w * world.cell, world.h * world.cell
+        self.clamp()
+
+    @property
+    def k(self):
+        """Window px per cell."""
+        return self.cell * self.zoom
+
+    def min_zoom(self):
+        return min(1.0, self.sw / self.upw, self.sh / self.uph)
+
+    def clamp(self):
+        self.zoom = min(max(self.zoom, self.min_zoom()), config.ZOOM_MAX)
+        lx = max(0.0, (self.upw - self.sw / self.zoom) / 2)
+        ly = max(0.0, (self.uph - self.sh / self.zoom) / 2)
+        self.ox, self.oy = min(max(self.ox, -lx), lx), min(max(self.oy, -ly), ly)
+
+    def to_world(self, sx, sy):
+        """The universe px (at zoom 1, as the World's methods take) under a window px."""
+        return (self.upw / 2 + self.ox + (sx - self.sw / 2) / self.zoom,
+                self.uph / 2 + self.oy + (sy - self.sh / 2) / self.zoom)
+
+    def point(self, x, y):
+        """The window px of a point in cells."""
+        return (self.sw / 2 + (x * self.cell - self.upw / 2 - self.ox) * self.zoom,
+                self.sh / 2 + (y * self.cell - self.uph / 2 - self.oy) * self.zoom)
+
+    def zoom_at(self, factor, sx, sy):
+        """Zoom by factor keeping the universe point under window px (sx, sy) where it is."""
+        wx, wy = self.to_world(sx, sy)
+        self.zoom *= factor
+        if abs(self.zoom - 1.0) < 0.02:                  # land on 1 exactly: the squares at their own size
+            self.zoom = 1.0
+        self.zoom = min(max(self.zoom, self.min_zoom()), config.ZOOM_MAX)
+        self.ox = wx - self.upw / 2 - (sx - self.sw / 2) / self.zoom
+        self.oy = wy - self.uph / 2 - (sy - self.sh / 2) / self.zoom
+        self.clamp()
+
+    def pan(self, dx, dy):
+        """Drag the view by (dx, dy) window px."""
+        self.ox -= dx / self.zoom
+        self.oy -= dy / self.zoom
+        self.clamp()
+
+    def reset(self):
+        self.zoom, self.ox, self.oy = 1.0, 0.0, 0.0
+        self.clamp()
+
+    def fit(self):
+        self.zoom, self.ox, self.oy = self.min_zoom(), 0.0, 0.0
+        self.clamp()
+
+
 class Renderer:
     def __init__(self, screen):
         self.screen = screen
+        self.cam = Camera()
         self.font = pygame.font.Font(None, 20)
         self.small = pygame.font.Font(None, 18)
         self.overlay = None
         self.overlay_key = None
         self._glows = {}            # star coronas by (radius, colour)
+        self._arms = {}             # super well id -> (its phase last frame, the angle its arms are drawn at)
 
     def draw_world(self, world, mode):
+        """The cells the camera sees, scaled to the window (averaged when zoomed out past a px per cell)."""
+        cam = self.cam
         world.render(mode)
+        self.screen.fill(config.OUTSIDE)
         small = pygame.image.frombuffer(world.rgb, (world.w, world.h), "RGB")
-        self.screen.fill(config.BG)
-        self.screen.blit(pygame.transform.scale(small, (world.w * world.cell, world.h * world.cell)), (0, 0))
-        key = (world.cell, world.w, world.h)
-        if self.overlay_key != key:
-            self.overlay, self.overlay_key = grid_overlay(world), key
-        if self.overlay:
-            self.screen.blit(self.overlay, (0, 0))
+        k = cam.k
+        (ax, ay), (bx, by) = cam.to_world(0, 0), cam.to_world(cam.sw, cam.sh)
+        x0, y0 = max(0, int(ax // world.cell)), max(0, int(ay // world.cell))
+        x1, y1 = min(world.w, int(-(-bx // world.cell))), min(world.h, int(-(-by // world.cell)))
+        if x1 <= x0 or y1 <= y0:
+            return
+        sub = small.subsurface((x0, y0, x1 - x0, y1 - y0))
+        size = (max(1, round((x1 - x0) * k)), max(1, round((y1 - y0) * k)))
+        scale = pygame.transform.smoothscale if k < 1 else pygame.transform.scale
+        corner = tuple(round(c) for c in cam.point(x0, y0))
+        self.screen.blit(scale(sub, size), corner)
+        if cam.zoom == 1.0:                              # the lines between squares, at their own size only
+            key = (world.cell, world.w, world.h)
+            if self.overlay_key != key:
+                self.overlay, self.overlay_key = grid_overlay(world), key
+            if self.overlay:
+                self.screen.blit(self.overlay, tuple(round(c) for c in cam.point(0, 0)))
 
     def draw_wells(self, world):
+        cam, k = self.cam, self.cam.k
+        sw, sh = self.screen.get_size()
         # with continuous borders a well near an edge shows on the other side too
-        pw, ph = world.w * world.cell, world.h * world.cell
+        pw, ph = world.w * k, world.h * k
         shifts = [(sx, sy) for sx in (-pw, 0, pw) for sy in (-ph, 0, ph)] if world.wrap else [(0, 0)]
+
+        def at(b, sx, sy):
+            x, y = cam.point(b.x, b.y)
+            return int(x + sx), int(y + sy)
+
+        def visible(c, r):
+            return -r <= c[0] <= sw + r and -r <= c[1] <= sh + r
+
+        for st in world.stars:
+            ring = int(st.ring * k)
+            for sx, sy in shifts:
+                center = at(st, sx, sy)
+                if visible(center, ring):
+                    self._draw_star_marks(st, center, ring)
+        arms = {}
         for wl in world.wells:
-            radius = max(3, int(world.well_radius_px(wl)))
-            extent = max(radius, world.well_range(wl) * world.cell) + 2
+            if wl.is_super:
+                arms[id(wl)] = self._arm_angle(wl)
+            radius = max(3, int(world.well_radius_px(wl) * cam.zoom))
+            extent = max(radius, world.well_range(wl) * k) + 2
             for sx, sy in shifts:
-                center = (int(wl.x * world.cell) + sx, int(wl.y * world.cell) + sy)
-                if (-extent <= center[0] <= pw + extent and -extent <= center[1] <= ph + extent):
+                center = at(wl, sx, sy)
+                if visible(center, extent):
                     self._draw_well(world, wl, center, radius)
+        self._arms = {key: self._arms[key] for key in arms}
         for sp in world.spawners:
-            radius = max(3, int(sp.radius * world.cell))
+            radius = max(3, int(sp.radius * k))
             for sx, sy in shifts:
-                center = (int(sp.x * world.cell) + sx, int(sp.y * world.cell) + sy)
-                if -radius <= center[0] <= pw + radius and -radius <= center[1] <= ph + radius:
+                center = at(sp, sx, sy)
+                if visible(center, radius):
                     self._draw_spawner(sp, center, radius)
 
     def _draw_spawner(self, sp, center, radius):
@@ -113,50 +222,43 @@ class Renderer:
         screen = self.screen
         if wl.is_super:
             # dotted circle round its range (strong pull and spin), then the black core with a faint rim
-            reach = world.well_range(wl) * world.cell
+            reach = world.well_range(wl) * self.cam.k
             dots = max(24, int(2 * math.pi * reach / 9))
             for d in range(dots):
                 a = 2 * math.pi * d / dots
                 pos = (int(center[0] + reach * math.cos(a)), int(center[1] + reach * math.sin(a)))
                 pygame.draw.circle(screen, config.SUPER_RANGE_COLOR, pos, 1)
-            self._draw_spin_arms(wl, center, radius)
+            self._draw_spin_arms(wl, center, radius, self._arms[id(wl)][1])
             pygame.draw.circle(screen, (0, 0, 0), center, radius)
             pygame.draw.circle(screen, config.SUPER_RIM_COLOR, center, radius + 1, 1)
-        elif wl.wave >= 0:
-            self._draw_star_glow(wl, center, radius)
-            # dissolving: drawn on its own surface with the swept part cut out and the wave front glowing
-            surf = pygame.Surface((2 * radius + 2, 2 * radius + 2), pygame.SRCALPHA)
-            local = (radius + 1, radius + 1)
-            self._draw_star(surf, wl, local, radius)
-            cell = world.cell
-            ex, ey = local[0] + wl.wave_dx * cell, local[1] + wl.wave_dy * cell
-            er = wl.wave * cell
-            pygame.draw.circle(surf, (0, 0, 0, 0), (ex, ey), er)
-            steps = max(24, int(er))
-            for s in range(steps):
-                a0, a1 = 2 * math.pi * s / steps, 2 * math.pi * (s + 1) / steps
-                p0 = (ex + er * math.cos(a0), ey + er * math.sin(a0))
-                p1 = (ex + er * math.cos(a1), ey + er * math.sin(a1))
-                if all(math.hypot(px - local[0], py - local[1]) <= radius for px, py in (p0, p1)):
-                    pygame.draw.line(surf, config.DISSOLVE_COLOR, p0, p1, 2)
-            screen.blit(surf, (center[0] - local[0], center[1] - local[1]))
         else:
             self._draw_star_glow(wl, center, radius)
             self._draw_star(screen, wl, center, radius)
 
+    def _draw_star_marks(self, st, center, ring):
+        """A star is its particles; on top of them a small dot marks its centre of mass and a faint ring the reach of
+        its capture, both in its colour."""
+        color = self._star_color(st)
+        faint = tuple(int(b + (c - b) * config.STAR_RING_FADE) for b, c in zip(config.BG, color))
+        if ring > 3:
+            pygame.draw.circle(self.screen, faint, center, ring, 1)
+        pygame.draw.circle(self.screen, config.BG, center, 3)
+        pygame.draw.circle(self.screen, tuple(c + (255 - c) // 2 for c in color), center, 2)
+
     def _star_color(self, wl):
-        """A star's surface colour: red-orange when light, through yellow and white to blue-white when very heavy;
-        a repulsor glows cold blue."""
-        if wl.sign < 0:
+        """A star's colour: red-orange when light, through yellow and white to blue-white when very heavy; a
+        repulsor glows cold blue."""
+        if getattr(wl, "sign", 1) < 0:
             return config.REPULSOR_COLOR
-        t = min(1.0, max(0.0, (math.log10(max(wl.mass, 1.0)) - 3.5) / 3.5)) * (len(config.STAR_COLORS) - 1)
+        lo, hi = config.STAR_COLOR_MASS
+        t = min(1.0, max(0.0, (math.log10(max(wl.mass, 1.0)) - lo) / (hi - lo))) * (len(config.STAR_COLORS) - 1)
         k = min(int(t), len(config.STAR_COLORS) - 2)
         f = t - k
         a, b = config.STAR_COLORS[k], config.STAR_COLORS[k + 1]
         return tuple(int(a[c] + (b[c] - a[c]) * f) for c in range(3))
 
     def _draw_star_glow(self, wl, center, radius):
-        """The star's corona: a soft glow round its body, added onto whatever is behind it."""
+        """A solid well's corona: a soft glow round its body, added onto whatever is behind it."""
         color = self._star_color(wl)
         key = (radius, color)
         glow = self._glows.get(key)
@@ -173,8 +275,8 @@ class Renderer:
         self.screen.blit(glow, (center[0] - half, center[1] - half), special_flags=pygame.BLEND_RGB_ADD)
 
     def _draw_star(self, surf, wl, center, radius):
-        """A star's glowing body: brightest at the middle and darker towards the edge (limb darkening), with sunspots
-        turning with its spin."""
+        """A solid well's glowing body: brightest at the middle and darker towards the edge (limb darkening), with
+        spots turning with its spin."""
         color = self._star_color(wl)
         hot = tuple(c + (255 - c) // 2 for c in color)
         edge = tuple(int(c * 0.8) for c in color)
@@ -192,15 +294,26 @@ class Renderer:
                 pos = (center[0] + radius * dist * math.cos(a), center[1] + radius * dist * math.sin(a))
                 pygame.draw.circle(surf, spot, pos, max(1, int(radius * size)))
 
-    def _draw_spin_arms(self, wl, center, core):
-        """Three spiral arms round a super well's core, trailing like a whirlpool and turning with its spin, each
-        tipped with an arrowhead in the direction it turns; brighter and turning faster the faster it spins."""
+    def _arm_angle(self, wl):
+        """The angle to draw a super well's arms at this frame: turned on by as much as the well has turned since the
+        last frame (World.whirl_omega each tick) - eased to under SUPER_SPIN_FRAME_MAX when that is more, which
+        keeps the faster one spinning still looking faster without seeming to turn backwards."""
+        last, angle = self._arms.get(id(wl), (wl.phase, wl.phase))
+        cap = config.SUPER_SPIN_FRAME_MAX
+        angle += cap * math.tanh((wl.phase - last) / cap)
+        self._arms[id(wl)] = (wl.phase, angle)
+        return angle
+
+    def _draw_spin_arms(self, wl, center, core, angle):
+        """Three spiral arms round a super well's core at angle, trailing like a whirlpool and turning as fast as it
+        carries matter round, each tipped with an arrowhead in the direction it turns; brighter the faster it
+        spins."""
         way = 1 if wl.spin >= 0 else -1
         outer, inner = core * 3.0 + 16, core * 1.3 + 2
         k = 0.45 + 0.55 * min(1.0, abs(wl.spin))
         color = tuple(int(c * k) for c in config.SUPER_SPIN_COLOR)
         for arm in range(3):
-            base = wl.phase + arm * 2 * math.pi / 3
+            base = angle + arm * 2 * math.pi / 3
             pts = []
             for s in range(9):
                 t = s / 8                                # 0 at the outer end, 1 at the core
@@ -249,36 +362,58 @@ class Renderer:
             ty += s.get_height() + 2
         return pw, ph
 
-    def draw_hud(self, world, app, fps):
-        on = lambda flag: "ON" if flag else "off"
-        s = world.stats
-        grav = "off" if world.gdir is None else DIR_NAMES[world.gdir]
-        supers = sum(wl.is_super for wl in world.wells)
-        orbit = {0: "off", 1: "clockwise", -1: "counterclockwise"}[world.orbit]
-        if world.orbit:
-            orbit += f" ({world.orbit_edge_speed():.1f} cells/tick at the edge)"
-        lines = [
-            (f"particles {world.particle_count():,}   awake {world.awake_count():,}   mass {world.total_mass():,}"
-             f"   tick {world.tick_count:,}   {fps:.0f} fps" + ("   PAUSED" if app.paused else ""), config.FG),
-            (f"step {world.step_ms:.1f} ms   gravity {world.gravity_ms:.1f} ms   render {app.render_ms:.1f} ms"
-             f"   ticks/frame {app.ticks_per_frame}   square {world.cell}px   view {VIEW_MODES[app.view]}",
-             config.FG),
-            (f"gravity {grav}   strength x{world.g_scale:.2f}   orbit {orbit}"
-             f"   borders {'wrap' if world.wrap else 'solid'}   self-gravity {on(world.sg_on)}"
-             f"   merge {on(world.merge_on)}   split {on(world.split_on)}   lean {on(world.lean_on)}"
-             f"   pour mass {pour_label(app.pour_mass)}", config.FG),
-            (f"wells {sum(not wl.is_super for wl in world.wells)}   spawners {len(world.spawners)}"
-             f"   ghosts {world.ghost_count():,} (mass {world.ghost_mass():,})"
-             f"   super wells {supers}"
-             f" holding {world.super_mass():,}   collapse {on(world.collapse_on)}"
-             f" at {world.collapse_threshold():,.0f} mass   explode at {config.SUPER_EXPLODE_MASS:,}"
-             f" ({world.explosions} so far)   stars formed {world.stars_formed}", config.FG),
-            (f"last tick: moved {s[0]:,}  collisions {s[1]:,}  merges {s[2]:,}  splits {s[3]:,}  sinks {s[4]:,}"
-             f"  absorbed {s[5]:,}", config.DIM),
-        ]
-        if not app.show_help:
-            lines.append(("H for controls", config.DIM))
-        self.panel(lines, (10, 10))
+    def draw_selection(self, world, body):
+        """A bright dashed circle round the selected body."""
+        cam = self.cam
+        r = max(8, int((world.well_radius_px(body) * cam.zoom if isinstance(body, Well) else body.radius * cam.k) + 6))
+        c = tuple(int(v) for v in cam.point(body.x, body.y))
+        steps = max(16, int(2 * math.pi * r / 8))
+        for d in range(0, steps, 2):
+            a0, a1 = 2 * math.pi * d / steps, 2 * math.pi * (d + 1) / steps
+            pygame.draw.line(self.screen, (120, 190, 255), (c[0] + r * math.cos(a0), c[1] + r * math.sin(a0)),
+                             (c[0] + r * math.cos(a1), c[1] + r * math.sin(a1)), 2)
+
+    def draw_brush(self, tool, pos, radius):
+        """The brush circle at the mouse, coloured by what a click will do: pour, erase, or place a body."""
+        if tool in ("select", "delete"):
+            color = (120, 190, 255) if tool == "select" else (230, 110, 110)
+            pygame.draw.circle(self.screen, color, pos, 6, 1)
+            return
+        color = {"erase": (150, 80, 80), "star": (230, 150, 80), "repulsor": config.REPULSOR_COLOR,
+                 "super": config.SUPER_RANGE_COLOR, "spawner": config.SPAWNER_COLOR,
+                 "locked": config.SPAWNER_COLOR}.get(tool, (70, 76, 90))
+        pygame.draw.circle(self.screen, color, pos, radius, 1)
+
+    def draw_status(self, world, app, fps):
+        """Always in the top-left corner: how many particles there are, how many ticks run per second, and the frame
+        rate (and the zoom, when not 1x)."""
+        rate = 0.0 if app.paused else fps * app.ticks_per_frame
+        text = f"particles {world.particle_count():,}   tick rate {rate:,.0f}/s   {fps:.0f} fps"
+        if self.cam.zoom != 1.0:
+            text += f"   zoom {self.cam.zoom:.2f}x"
+        if app.paused:
+            text += "   PAUSED"
+        surf = self.font.render(text, True, config.FG)
+        bg = pygame.Surface((surf.get_width() + 16, surf.get_height() + 10), pygame.SRCALPHA)
+        bg.fill((*config.BG, 190))
+        self.screen.blit(bg, (8, 8))
+        self.screen.blit(surf, (16, 13))
+
+    def draw_usage(self, world, usage, right=None):
+        """Always shown: in the top-right corner, ending at x = right, or (right None: the menu is open there) under
+        the status line. CPU use (the machine's, and the simulation's share of all its cores), GPU use (the busiest
+        engine, every process) and all the mass in the universe."""
+        def pct(v, none="..."):
+            return none if v is None else f"{v:.0f}%"
+        cpu = f"CPU {pct(usage.cpu)}" + (f" (sim {pct(usage.sim)})" if usage.sim is not None else "")
+        gpu = f"GPU {pct(usage.gpu, usage.gpu_note)}"
+        text = f"{cpu}   {gpu}   mass {world.universe_mass():,}"
+        surf = self.font.render(text, True, config.FG)
+        bg = pygame.Surface((surf.get_width() + 16, surf.get_height() + 10), pygame.SRCALPHA)
+        bg.fill((*config.BG, 190))
+        x, y = (8, 40) if right is None else (right - bg.get_width(), 8)
+        self.screen.blit(bg, (x, y))
+        self.screen.blit(surf, (x + 8, y + 5))
 
     def draw_help(self):
         keys = [self.small.render(k, True, (255, 220, 120)) for k, _ in HELP]
@@ -292,16 +427,29 @@ class Renderer:
         for i, (k, d) in enumerate(zip(keys, descs)):
             panel.blit(k, (8, 6 + i * line_h))
             panel.blit(d, (key_w, 6 + i * line_h))
-        sw, sh = self.screen.get_size()
-        self.screen.blit(panel, (sw - width - 10, sh - height - 10))
+        self.screen.blit(panel, (10, 40))
 
     def draw_body_inspector(self, world, body, pos):
+        if isinstance(body, Star):
+            return self.draw_star_inspector(world, body, pos)
         if isinstance(body, Well):
             return self.draw_well_inspector(world, body, pos)
         lines = [
             (f"{'locked ' if body.locked else ''}spawner   {body.rate * config.FPS:,.0f} particles/s"
              f"   mass {pour_label(body.masses)}", config.FG),
             (f"cell ({body.x:.0f}, {body.y:.0f})   v ({body.vx:+.2f}, {body.vy:+.2f})", config.FG),
+        ]
+        self.panel(lines, (pos[0] + 16, pos[1] + 16), self.small)
+
+    def draw_star_inspector(self, world, st, pos):
+        hold = st.smooth / st.peak if st.peak > 0 else 1.0
+        lines = [
+            (f"star   mass {st.mass:,.0f} in {st.count:,} particles   cell ({st.x:.0f}, {st.y:.0f})", config.FG),
+            (f"v ({st.vx:+.3f}, {st.vy:+.3f})   radius {st.radius:.1f}   capture ring {st.ring:.1f} cells", config.FG),
+            (f"holds {hold:.0%} of the most it held lately (unstable below {config.STAR_UNSTABLE_SHARE:.0%})"
+             f"   spin {abs(st.omega) * config.FPS:.2f} rad/s"
+             + (f"   tide from a {'super well' if isinstance(st.tide, Well) else 'star'}" if st.tide else ""),
+             config.DIM),
         ]
         self.panel(lines, (pos[0] + 16, pos[1] + 16), self.small)
 
