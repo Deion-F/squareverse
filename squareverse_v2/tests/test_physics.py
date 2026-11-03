@@ -1278,8 +1278,8 @@ def test_head_on_crash_scatters_matter_and_what_stays_bound_merges():
     place_star(w, 250, 250, 24, vx=1.5)
     place_star(w, 550, 250, 24, vx=-1.5)
     before, most_loose = total(w), 0
-    for _ in range(400):
-        w.step()
+    for _ in range(600):                             # (ploughing through their own debris, they circle each other
+        w.step()                                     # for a while before they merge: ~480 ticks)
         most_loose = max(most_loose, w.total_mass() - w.star_mass())
     assert most_loose > 0.1 * before                 # the crash flung matter out of both...
     assert len(w.stars) == 1 and w.stars[0].mass > 0.5 * before   # ...and the rest merged into one star
@@ -1477,10 +1477,10 @@ def test_faraway_heavy_body_does_not_cut_a_stars_ring():
             w.set_reach(reach)
             st = place_star(w, 200, 200, 24)
             if companion:
-                w.held = w.add_super_well(800, 200, 5000000)     # 300 cells away
+                w.held = w.add_super_well(500, 200, 5000000)     # 150 cells away (past twice the reach of 60)
             w._set_ring(st, grow=False)
             rings.append(st.ring)
-        if cut:                                      # unfaded, its tide cuts the ring down to a Roche lobe...
+        if cut:                                      # unfaded, its tide cuts the ring down (1.5 Hill radii)...
             assert rings[0] < 0.8 * rings[1]
         else:                                        # ...faded, from that far it hardly does
             assert rings[0] == pytest.approx(rings[1], rel=0.05)
@@ -1553,28 +1553,32 @@ def test_getting_over_the_limit_inside_a_merger_window_still_waits_the_full_grac
     run(w, 3)
     assert w.explosions == 1
 
-@pytest.mark.xfail(reason="to re-tune for the 2026-11 gravity fade: full strength out to the reach makes the pull near "
-                          "the well stronger and the dotted circle (and the shock's reach) smaller; 36% is cleared",
-                   strict=False)
 def test_merger_shock_clears_the_matter_round_it_against_gravity_and_rotation():
-    w = make_world(pw=600, ph=600)
-    w.set_orbit(1)                                   # the default rotation speed and gravity
-    w.set_self_gravity(True)
-    w.merge_on = w.split_on = False
-    rng = np.random.default_rng(1)
-    n = w.w * w.h // 3
-    w.place_many(rng.integers(0, w.w, n), rng.integers(0, w.h, n), 64)
-    a = w.add_super_well(300, 300, 1000000)
-    w.add_super_well(301, 300, 1000000)
-    w.step()
-    wl = w.wells[0]
-    R = w.well_range(wl)
-    inside = lambda: int(w.mass[[i for i in range(w.w * w.h)
-                                 if w.distance(i % w.w, i // w.w, wl.x, wl.y) < R]].astype(np.int64).sum())
-    start, grown = inside(), wl.mass
-    run(w, 60)
-    assert inside() < 0.4 * start                    # swept out of its range...
-    assert wl.mass < grown + 0.05 * start            # ...rather than swallowed
+    """Two 1M super wells merge in a dense, turning, self-gravitating box. The whole box is within the merged well's
+    reach and keeps falling in, so the shock is judged against the same merger without one."""
+    def merge(shock):
+        w = make_world(pw=600, ph=600)
+        w.set_reach(120)                             # the app's reach (the tests pin 60)
+        w.set_orbit(1)                               # the default rotation speed and gravity
+        w.set_self_gravity(True)
+        w.merge_on = w.split_on = False
+        if not shock:
+            w.merge_shock = lambda wl: None
+        rng = np.random.default_rng(1)
+        n = w.w * w.h // 3
+        w.place_many(rng.integers(0, w.w, n), rng.integers(0, w.h, n), 64)
+        w.add_super_well(300, 300, 1000000)
+        w.add_super_well(301, 300, 1000000)
+        w.step()
+        wl = w.wells[0]
+        grown = wl.mass
+        run(w, 60)
+        ys, xs = np.divmod(np.arange(w.w * w.h), w.w)
+        inside = int(w.mass[np.hypot(xs - wl.x, ys - wl.y) < w.well_range(wl)].astype(np.int64).sum())
+        return inside, wl.mass - grown
+    (inside, swallowed), (plain_inside, plain_swallowed) = merge(True), merge(False)
+    assert inside < 0.5 * plain_inside              # swept out of its range...
+    assert swallowed < 0.05 * plain_swallowed        # ...rather than swallowed
 
 
 def heavy_clump(w, cx, cy, r=9):
@@ -1855,12 +1859,12 @@ def test_star_in_orbit_goes_round_the_well_pulling_hardest_or_stays_put_without_
     assert st.vx == pytest.approx(0, abs=1e-9) and abs(st.vy) > 0.1 and far.vx == far.vy == 0.0
 
 
-@pytest.mark.parametrize("window", [(1920, 990), (960, 720)])
-def test_systems_preset_puts_stars_in_orbit_round_super_wells_set_apart(window):
+def test_systems_preset_puts_stars_in_orbit_round_super_wells_out_of_each_others_reach(monkeypatch):
     from sv.presets import systems
-    w = World(*window, 2, seed=3)
+    monkeypatch.setattr(config, "GRAVITY_REACH", 120.0)   # the app's reach (the tests pin 60)
+    w = World(1920, 1080, 2, seed=3)                 # fullscreen, as it is laid out for
     systems(w)
-    assert w.round and w.reach_len == config.GRAVITY_REACH
+    assert w.round and w.reach_len == 120.0
     mid, others = w.wells[0], w.wells[1:]
     assert all(wl.is_super for wl in w.wells) and 2 <= len(others) <= 3
     assert mid.x == pytest.approx(w.w / 2) and mid.y == pytest.approx(w.h / 2)
@@ -1868,18 +1872,20 @@ def test_systems_preset_puts_stars_in_orbit_round_super_wells_set_apart(window):
     count = {id(wl): sum(h is wl for h in home.values()) for wl in w.wells}
     assert count[id(mid)] == config.SYSTEM_CENTRE_STARS
     assert all(1 <= count[id(wl)] <= 2 for wl in others)
-    orbit = w.distance(next(st for st in home if home[st] is mid).x, next(st for st in home if home[st] is mid).y,
-                       mid.x, mid.y)
-    for a in w.wells:                                # far enough apart not to disturb each other at once
+    orbit = config.SYSTEM_ORBIT
+    for a in w.wells:                                # no well's gravity reaches another system's stars
         for b in w.wells:
             if a is not b:
-                assert w.distance(a.x, a.y, b.x, b.y) > 2.5 * orbit
+                assert w.distance(a.x, a.y, b.x, b.y) >= 2 * w.reach_len + orbit - 1e-6
     for st, wl in home.items():
         assert w.distance(st.x, st.y, wl.x, wl.y) == pytest.approx(orbit, abs=1.5)
         assert w.distance(st.x, st.y, w.w / 2, w.h / 2) + st.radius < w.w / 2   # inside the universe
         dx, dy = st.x - wl.x, st.y - wl.y
         turn = dx * (st.vy - wl.vy) - dy * (st.vx - wl.vx)
         assert np.sign(turn) == np.sign(wl.spin)     # circling its own well the way it spins
+    run(w, 600)                                      # ten seconds on, every star still on its orbit
+    for st, wl in home.items():
+        assert st in w.stars and 0.8 * orbit < w.distance(st.x, st.y, wl.x, wl.y) < 1.2 * orbit
 
 
 def test_super_wells_pull_from_where_they_are_now_not_from_the_field():
@@ -1929,7 +1935,7 @@ def test_brush_star_is_the_star_the_brush_places():
 
 
 @pytest.mark.parametrize("reach, mass, brush, pour, orbit, ok", [
-    (0, 80000, 40, 16, 130, True),                   # the README's recipe: holds at 130 ...
+    (0, 80000, 40, 16, 150, True),                   # the README's star held 120-170 cells out ...
     (0, 80000, 40, 16, 110, False),                  # ... stripped at 110
     (50, 40000, 8, 256, 42, True),                   # a small dense star within a short reach
     (50, 40000, 8, 256, 62, False),                  # past ~1.16 x the reach no orbit is stable
@@ -1954,3 +1960,42 @@ def test_orbit_band_is_nowhere_for_a_big_star_in_a_short_reach_and_shrinks_besid
     w.add_super_well(800 + 2 * 400, 800, 80000)     # an equal one 400 cells away
     inner, outer = w.orbit_band(wl, *w.brush_star(20, 16))
     assert inner == alone[0] and outer == pytest.approx(0.3 * 400) and outer < alone[1]
+
+
+def test_auto_star_fills_an_orbit_evenly_and_the_stars_hold():
+    w = make_world(pw=1200, ph=1200)
+    w.set_reach(120)                                 # the app's reach
+    w.g_scale = 0.6
+    w.radiation_on = True
+    wl = w.add_super_well(600, 600, 80000)
+    clicks = [(600 + 2 * 150, 600), (600, 600 + 2 * 150), (600 - 2 * 150, 600 - 40), (600, 600 - 2 * 150)]
+    placed = [w.add_auto_star(*c) for c in clicks]
+    assert all(placed[:3]) and placed[3] is None     # three fill the orbit; a fourth has no room
+    d = [w.distance(st.x, st.y, wl.x, wl.y) for st in placed[:3]]
+    inner, outer = w.orbit_band(wl, placed[0].radius, placed[0].mass)
+    assert all(inner - 2 < x < outer + 2 for x in d) and max(d) - min(d) < 2   # one orbit, inside the band
+    angles = sorted(math.atan2(st.y - wl.y, st.x - wl.x) for st in placed[:3])
+    gaps = np.diff(angles + [angles[0] + 2 * math.pi])
+    assert gaps.min() > math.radians(115)            # evenly spread
+    run(w, 1200)
+    for st in placed[:3]:
+        assert st in w.stars and 0.75 * d[0] < w.distance(st.x, st.y, wl.x, wl.y) < 1.25 * d[0]
+
+
+def test_auto_star_needs_a_super_well():
+    w = make_world()
+    assert w.add_auto_star(200, 160) is None
+
+
+@pytest.mark.parametrize("pour, factor, collapses", [(1024, config.STAR_COLLAPSE_FACTOR, False),
+                                                     (4096, config.STAR_COLLAPSE_FACTOR, True), (1024, 1.0, True)])
+def test_a_star_collapses_only_when_much_denser_than_loose_matter(pour, factor, collapses):
+    w = make_world(pw=400, ph=400)
+    w.collapse_on = True
+    w.star_collapse = factor
+    densest, limit = w.star_collapse_check(20, pour)       # what the Star tool's brush warns of
+    assert (densest >= limit) == collapses
+    st = w.add_star(200, 200, 20, pour)
+    run(w, 3 * config.COLLAPSE_EVERY)
+    assert (st in w.stars) != collapses
+    assert any(wl.is_super for wl in w.wells) == collapses

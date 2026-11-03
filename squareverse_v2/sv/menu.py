@@ -9,10 +9,12 @@ from .presets import PRESETS
 from .world import DIRS, VIEW_MODES, Spawner, Star
 
 # the mouse tools: what a left click on the universe does
-TOOLS = [("pour", "Pour"), ("ghosts", "Ghosts"), ("erase", "Erase"), ("star", "Star"), ("repulsor", "Repulsor"),
+TOOLS = [("pour", "Pour"), ("ghosts", "Ghosts"), ("erase", "Erase"), ("star", "Star"), ("auto", "Auto star"),
+         ("repulsor", "Repulsor"),
          ("super", "Super well"), ("spawner", "Spawner"), ("locked", "Locked spawner"), ("select", "Select / move"),
          ("delete", "Delete")]
-POUR_OPTIONS = [(m, str(m)) for m in config.POUR_MASSES] + [(tuple(config.RANDOM_MASS), "Random")]
+POUR_OPTIONS = ([(m, str(m)) for m in config.POUR_MASSES] + [(tuple(config.RANDOM_MASS), "Random")]     # 6 a row:
+                + [(m, str(m)) for m in config.HEAVY_POUR_MASSES] + [(tuple(config.RANDOM_HEAVY_MASS), "Rnd heavy")])
 REACH_MIN, REACH_MAX = 10, 400                   # the Reach slider (cells); at its top end gravity reaches everywhere
 
 INFO = {
@@ -28,6 +30,9 @@ INFO = {
     "tool": "What a left click on the universe does. Pour / Ghosts / Erase work while you hold the button down; the "
             "others act once per click, at the brush's size. Ghosts are particles that pass through everything for "
             f"{config.GHOST_TICKS} ticks, then land. A star is a ball of particles held together by its own gravity; "
+            "Auto star puts a star in a stable orbit round the super well clicked near, choosing its size, density, "
+            "orbit and spot itself (up to three evenly spaced on one orbit; the green band shows where, a red "
+            "note when there's no room); "
             "a repulsor pushes everything away; a super well (black hole) swallows what touches its core; a "
             "spawner pours particles (a locked one stays put). Select / move: click a body to see and change it, "
             "drag it to move it. Right click always erases; shift+click pours ghosts (with the Star tool, places a "
@@ -39,7 +44,9 @@ INFO = {
             "mass from {} to {} each. A placed star fills the brush circle with a core of particles of this mass, "
             "its outer layers lighter in proportion (3/8, then 1/8 of it), so this sets what it is made of and how "
             "heavy it is. A repulsor weighs the brush's area x this, its size following its mass: the brush's size "
-            "at pour mass 1, bigger for heavier pours. Keys: 1-6.".format(
+            "at pour mass 1, bigger for heavier pours. The second row is heavy matter (up to the heaviest a "
+            "particle can be), for dense stars that hold together near big super wells. Keys: 1-6, shift+1-4 and "
+            "shift+6 for the second row.".format(
                 *config.RANDOM_MASS),
     "gdir": "Uniform gravity pulling everything one way, like the ground in a sand game; off for space scenes. Keys: "
             "arrows, Q / E to turn it, 0 for off.",
@@ -73,9 +80,15 @@ INFO = {
              "explodes, or is torn apart by a heavier neighbour's tide.",
     "formation": "Every second, dense round knots of matter with a heavy core inside a lighter envelope that hold "
                  "themselves together become stars. Off: only stars you place appear.",
-    "collapse": "Matter (stars included) packed densely enough collapses into a super well: a black hole that "
-                "swallows what touches its core. The threshold is the mass in a 20 x 20 cell window, and falls as "
-                "gravity gets stronger. A super well reaching the supernova mass (below) explodes. Key: shift+B.",
+    "collapse": "Matter packed densely enough collapses into a super well: a black hole that swallows what touches "
+                "its core. The threshold is the mass in a 20 x 20 cell window, and falls as gravity gets stronger; "
+                "stars need to be denser still (Stars collapse at, below). A super well reaching the supernova mass "
+                "(below) explodes. Key: shift+B.",
+    "star_collapse": "How much denser than loose matter a star must be to collapse into a super well: its own "
+                     "particles count this many times less in the collapse check (x1: the same as loose matter). "
+                     "The figure in brackets is what a star must hold in a 20 x 20 cell window. With the Star tool "
+                     "picked, the brush turns amber when the star it would place is near that and red (with a "
+                     "note) when it would collapse at once; a smaller brush or lighter pour keeps it a star.",
     "explode": "How heavy a super well gets before it goes supernova: all its mass blasts out as a ring of heavy "
                "debris that cools and lands as particles. Higher lets super wells grow bigger and hold more of the "
                "universe before they blow; lower makes supernovae more frequent. A well already over a lowered "
@@ -127,10 +140,11 @@ INFO = {
     "orbit_stars": "A placed star sets off on a circular orbit round the super well pulling hardest on it, the way "
                    "that well spins, and the well takes the opposite push so the two don't drift off together. To "
                    "last, put it outside the dotted circle (inside, the whirlpool tears it up) and far enough out "
-                   "that the tide doesn't strip it: a pour-16 star from the default brush holds about 130 cells "
-                   "from an 80,000 well (B at pour mass 1), with gravity reaching everywhere. Off: it starts at "
-                   "rest. With the Star tool picked, a green band round each super well shows where the star "
-                   "the brush and pour mass would place can orbit; none means nowhere. Key: T.",
+                   "that the tide doesn't strip it (heavier wells need smaller, denser stars; wells over about 5M "
+                   "can't hold any at the default reach): a pour-16 star from a 20 px brush holds 114-135 cells from an 80,000 "
+                   "well (B at pour mass 1). Off: it starts at rest. With the Star tool picked, a green band round "
+                   "each super well shows where the star the brush and pour mass would place can orbit; none means "
+                   "nowhere. Auto star picks the star and the spot for you. Key: T.",
     "body_mass": "Make it lighter or heavier. A star is rebuilt as a fresh layered ball as dense as it is, growing "
                  "or shrinking with the square root of the change; a repulsor takes the size a freshly placed one of "
                  "that mass has, so its pull and reach match one made at that mass. Keys: , / .",
@@ -283,6 +297,10 @@ def draw_menu(ui, app, fps):
                                    note=f"{w.heat_count() + w.wave_count():,} in flight" if w.radiation_on else None)
         w.collapse_on = ui.toggle("collapse", "Collapse into super wells", w.collapse_on, INFO["collapse"],
                                   note=f"at {w.collapse_threshold():,.0f}")
+        w.star_collapse = ui.slider("star_collapse", "Stars collapse at", w.star_collapse,
+                                    *config.STAR_COLLAPSE_RANGE, INFO["star_collapse"],
+                                    lambda v: f"x{v:.1f} ({w.collapse_threshold() * v / 1000:,.0f}k)", log=True,
+                                    step=0.5)
         step = config.SUPER_EXPLODE_STEP
         boom = ui.slider("explode", "Supernova at", w.explode_mass, *config.SUPER_EXPLODE_RANGE, INFO["explode"],
                          lambda v: f"{v / 1e6:g}M mass", log=True, step=step)

@@ -86,3 +86,42 @@ def test_star_tool_shades_the_stable_orbit_band():
         assert band[1] > band[0] and band[1] > 0 and hole == (0, 0, 0)   # greenish in the band, nothing inside
     finally:
         pygame.quit()
+
+
+def test_auto_star_tool_draws_its_band_and_preview():
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    try:
+        from sv.render import Renderer
+        from sv.world import World
+        w = World(800, 600, 2, seed=1)
+        w.set_reach(120)
+        w.g_scale = 0.6
+        wl = w.add_super_well(400, 300, 80000)
+        r = Renderer(screen)
+        r.cam.update(w, (800, 600))
+        screen.fill((0, 0, 0))
+        r.draw_auto_star(w, wl.x + 50, wl.y)
+        _, _, (inner, outer), _, _ = w.auto_star_plan(wl)
+        x, y = r.cam.point(wl.x, wl.y)
+        band = screen.get_at((round(x), round(y - (inner + outer) / 2 * r.cam.k)))[:3]
+        assert band[1] > band[0]                     # the band is shaded green
+    finally:
+        pygame.quit()
+
+
+def test_star_brush_turns_red_when_the_star_would_collapse():
+    pygame.init()
+    screen = pygame.display.set_mode((400, 300))
+    try:
+        from sv import config
+        from sv.render import Renderer
+        r = Renderer(screen)
+        for collapse, over in (((50000.0, 266667.0), False), ((300000.0, 266667.0), True)):
+            screen.fill((0, 0, 0))
+            r.draw_brush("star", (200, 100), 20, collapse)
+            edge = {tuple(screen.get_at((x, 100))[:3]) for x in range(217, 222)}   # (pygame draws it just inside)
+            assert (tuple(config.ORBIT_BAND_NONE_COLOR) in edge) == over
+            assert any(screen.get_at((x, 130))[:3] != (0, 0, 0) for x in range(100, 300)) == over   # the note
+    finally:
+        pygame.quit()

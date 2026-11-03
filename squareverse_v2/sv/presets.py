@@ -3,7 +3,7 @@ rectangle; the space scenes are round universes reaching past the window (World.
 
 import numpy as np
 
-from . import config
+from . import config, kernels
 from .gravity import fade
 
 
@@ -111,52 +111,48 @@ def binary(world, count=None):
 
 def systems(world, count=None):
     """A super well in the middle with SYSTEM_CENTRE_STARS stars orbiting it, and SYSTEM_OTHERS more scattered at
-    random round it with SYSTEM_OTHER_STARS each: the stable orbits of SYSTEM_* (pour-mass stars SYSTEM_STAR_RADIUS
-    across in radius, SYSTEM_ORBIT out round SYSTEM_WELL wells), each star set off at the circular speed with its
-    well taking the opposite momentum (World.add_star(orbit=True)). Systems are at least SYSTEM_SPACING x the orbit
-    apart (centre to centre), their stars inside the edge, and placed where their pulls on the middle one roughly
-    cancel (SYSTEM_BALANCE), so they don't disturb each other at once - gravity reaching everywhere, they do after
-    twenty seconds or so. In a universe too small for that it is all scaled down (lengths x k, masses x k^2, which
-    keeps the tides and orbits alike), down to SYSTEM_MIN_SCALE, and then the systems are closer together."""
+    random round it with SYSTEM_OTHER_STARS each: pour-mass stars SYSTEM_STAR_RADIUS in radius, SYSTEM_ORBIT out
+    round SYSTEM_WELL wells, each set off at the circular speed with its well taking the opposite momentum
+    (World.add_star(orbit=True)), their stars inside the edge. With gravity reaching R, the others are placed at least
+    2 R + SYSTEM_ORBIT from the middle one and from each other, so no system's well reaches another's stars (nor do the
+    stars each other): they don't disturb each other at all. In a universe too small for that, or with gravity
+    reaching everywhere, they are kept as far apart as fits (at most SYSTEM_SPACING x the orbit asked for) and placed
+    where their pulls on the middle one roughly cancel (SYSTEM_BALANCE). Laid out for a fullscreen window (1920 x 1080,
+    cell size 2); a much smaller one hasn't room to keep the systems apart."""
     world.set_round(True)
     world.reset()
     rng = world.rng
     c = world.cell
     cx, cy = world.w / 2, world.h / 2
     room = min(world.w, world.h) / 2 - config.SYSTEM_EDGE   # how far out a star may reach (cells)
-    spacing = config.SYSTEM_SPACING
-    size = config.SYSTEM_ORBIT + config.SYSTEM_STAR_RADIUS          # how far a system's stars reach (cells)
-    k = min(1.0, room / (spacing * config.SYSTEM_ORBIT + size))
-    if k < config.SYSTEM_MIN_SCALE:                  # smaller stars wouldn't hold together: closer systems instead
-        k = config.SYSTEM_MIN_SCALE
-        spacing = max(1.5, (room / k - size) / config.SYSTEM_ORBIT)
-    orbit, star_r = config.SYSTEM_ORBIT * k, config.SYSTEM_STAR_RADIUS * k
+    orbit, star_r = config.SYSTEM_ORBIT, config.SYSTEM_STAR_RADIUS
 
     def system(x, y, stars):
-        world.add_super_well(x * c, y * c, config.SYSTEM_WELL * k * k)
+        world.add_super_well(x * c, y * c, config.SYSTEM_WELL)
         a0 = rng.uniform(0, 2 * np.pi)
         for a in a0 + 2 * np.pi * np.arange(stars) / stars:
             world.add_star((x + orbit * np.cos(a)) * c, (y + orbit * np.sin(a)) * c, star_r * c,
                            config.SYSTEM_POUR, orbit=True)
 
     system(cx, cy, config.SYSTEM_CENTRE_STARS)
-    near, far = spacing * orbit, max(spacing * orbit, room - size * k)
+    apart = (kernels.REACH_TAPER * world.reach_len if world.reach_len else config.SYSTEM_SPACING * orbit) + orbit
+    far = max(0.0, room - orbit - star_r)            # how far out a system may be
+    near = min(apart, far)
     n = rng.integers(config.SYSTEM_OTHERS[0], config.SYSTEM_OTHERS[1] + 1)
-    best, best_pull = None, np.inf
-    for _ in range(2000):                            # random spots clear of each other whose pulls on the middle
-        r = np.sqrt(rng.uniform(near ** 2, far ** 2, n))     # one roughly cancel (else it drags the middle one's
-        a = rng.uniform(0, 2 * np.pi, n)                     # stars off their orbits: its well responds less)
+    best, best_key = None, None
+    for _ in range(3000):                            # random spots, as far apart as can be, whose pulls on the middle
+        r = np.sqrt(rng.uniform(near ** 2, far ** 2, n)) if far > 0 else np.zeros(n)   # one roughly cancel (else
+        a = rng.uniform(0, 2 * np.pi, n)             # they drag its stars off their orbits: its well responds less)
         xs, ys = r * np.cos(a), r * np.sin(a)
-        if np.hypot(xs[:, None] - xs, ys[:, None] - ys)[np.triu_indices(n, 1)].min(initial=np.inf) < near:
-            continue
-        pull = np.hypot((xs / r ** 3).sum(), (ys / r ** 3).sum()) * near ** 2
-        if pull < best_pull:
-            best, best_pull = (xs, ys), pull
-        if pull < config.SYSTEM_BALANCE:
+        gap = min(np.hypot(xs[:, None] - xs, ys[:, None] - ys)[np.triu_indices(n, 1)].min(initial=np.inf), apart)
+        pull = np.hypot((xs / np.maximum(r, 1) ** 3).sum(), (ys / np.maximum(r, 1) ** 3).sum()) * near ** 2
+        key = (-gap, pull)                           # apart enough first, then balanced
+        if best_key is None or key < best_key:
+            best, best_key = (xs, ys), key
+        if gap >= apart and pull < config.SYSTEM_BALANCE:
             break
-    if best is not None:
-        for x, y in zip(*best):
-            system(cx + x, cy + y, rng.integers(config.SYSTEM_OTHER_STARS[0], config.SYSTEM_OTHER_STARS[1] + 1))
+    for x, y in zip(*best):
+        system(cx + x, cy + y, rng.integers(config.SYSTEM_OTHER_STARS[0], config.SYSTEM_OTHER_STARS[1] + 1))
 
 
 def empty(world, count=None):

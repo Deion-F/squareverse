@@ -29,6 +29,7 @@ N_PARAMS = 38
 S_MOVED, S_COLLISIONS, S_MERGES, S_SPLITS, S_SINKS, S_ABSORBED, S_HEAT = range(7)
 N_STATS = 7
 
+STAR_SHOVE_SHARE = 0.1          # a star shoves loose particles lighter than this share of it aside (star_shift)
 HEAT_TAG = -1                   # ghost tag of heat (radiation): see _shed and heat_push
 WAVE_TAG = -2                   # ghost tag of gravitational waves (World._radiate_waves): they fly straight
 
@@ -126,6 +127,32 @@ def wake_blocks(changed, block, cw, w, h, mass, flag):
 
 
 # --- particle bookkeeping --------------------------------------------------------------------------
+
+@njit(cache=True)
+def _put(src, dst, mass, kin, quad, shade, stamp, owner):
+    """Move the particle in cell src to the empty cell dst (with its star, if any)."""
+    mass[dst] = mass[src]
+    for c in range(4):
+        kin[dst, c] = kin[src, c]
+        quad[dst, c] = quad[src, c]
+    shade[dst] = shade[src]
+    stamp[dst] = stamp[src]
+    owner[dst] = owner[src]
+    _clear(src, mass, kin, quad)
+    owner[src] = 0
+
+
+@njit(cache=True)
+def _swap(a, b, mass, kin, quad, shade, stamp, owner):
+    """Swap the particles in cells a and b."""
+    mass[a], mass[b] = mass[b], mass[a]
+    for c in range(4):
+        kin[a, c], kin[b, c] = kin[b, c], kin[a, c]
+        quad[a, c], quad[b, c] = quad[b, c], quad[a, c]
+    shade[a], shade[b] = shade[b], shade[a]
+    stamp[a], stamp[b] = stamp[b], stamp[a]
+    owner[a], owner[b] = owner[b], owner[a]
+
 
 @njit(cache=True)
 def _clear(i, mass, kin, quad):
@@ -482,10 +509,18 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
         if stars.shape[0] > 0:
             sx_, sy_, px_, py_ = _star_pull(x, y, own, stars, sfx, sfy, s_block, s_cw, s_ch, w, h, wrap, kinv)
             if _held_up(x, y, own, px_, py_, w, h, mass, owner, wrap) >= 0:
-                # its own star's pull doesn't press it into the particle of that star it rests on (a normal force),
-                # so a star keeps its shape, still or moving, while outside pulls (tides) still act
-                sx_ -= px_
-                sy_ -= py_
+                # the particle of its star it rests on pushes back (a normal force) only against what presses it in:
+                # its star's pull plus the outside pull relative to how the star as a whole accelerates (a tide).
+                # Without an outward tug that is the whole of its star's pull, so a star keeps its shape, still or
+                # moving; a tide pulling it outwards is held by that pull, and lifts it off only when stronger
+                p_ = np.sqrt(px_ * px_ + py_ * py_)
+                nx_, ny_ = px_ / p_, py_ / p_
+                press = p_ + (ax + sx_ - px_ - star_v[own - 1, 4]) * nx_ + (ay + sy_ - py_ - star_v[own - 1, 5]) * ny_
+                press = min(max(press, 0.0), p_)
+                sx_ -= press * nx_
+                sy_ -= press * ny_
+                star_f[own - 1, 0] += m * (px_ - press * nx_)    # what is left of its star's pull acts on it
+                star_f[own - 1, 1] += m * (py_ - press * ny_)
             elif own > 0:
                 star_f[own - 1, 0] += m * px_
                 star_f[own - 1, 1] += m * py_
@@ -787,7 +822,8 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
     Heat shed by merging and splitting is noted in heat's first stats[S_HEAT] rows (see _shed).
     Mass swallowed by super well k is added to absorbed[k]. whirls holds each super well's whirlpool (rows of x, y,
     range, spin, pull strength, softening); stars, sfx and sfy the stars' pull (see _star_pull); star_v[k] star k's
-    velocity as it will be after this tick. A star's particles (owner, which follows them as they move) only move
+    velocity as it will be after this tick (and star_v[k, 4:6] its acceleration, for the normal force that holds a
+    particle resting on another of its star against a tide). A star's particles (owner, which follows them as they move) only move
     here as fast as they move relative to it: star_shift carries the star as a whole. Jammed, they count as moving
     with it. A star's pull on its own particles has no reaction, so
     what it adds up to is taken back: star_v[k, 2:4] is added to each of star k's particles (the last tick's total
@@ -1882,11 +1918,16 @@ def star_motion(stars, w, h, mass, kin, owner, out, wrap):
 
 @njit(cache=True)
 def star_shift(k, sx, sy, cx, cy, r, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner, solid, hole,
-               absorbed, wrap):
+               absorbed, push, star_mass, wrap):
     """Carry star k (its particles, owner k + 1, within r of (cx, cy)) one cell along (sx, sy), front first: each
-    particle moves into the next cell if it is free. One that is blocked stays behind - by matter not of the star
-    it collides with it along the way (restitution e), by solid ground or the border it bounces (wall_e) - and its
-    star's pull brings it back. One carried into a super well's core is swallowed. Returns how many moved."""
+    particle moves into the next cell if it is free. Into matter not of the star it collides (restitution e): from
+    loose matter the knock it takes is added to push (momentum, for the star as a whole: World.carry_stars spreads it
+    over all its particles, as pressure would, rather than one front particle being slowed and left behind), from
+    another star's particle it takes it itself, so crashing stars crumple into each other; loose matter lighter
+    than STAR_SHOVE_SHARE of the star (star_mass) is shoved aside - the star moves as one body, so it is the star's
+    mass that shoves, not the one particle's - and anything else blocks it. Blocked, or bouncing off solid ground or the border (wall_e), it stays
+    behind and its star's pull brings it back. One carried into a super well's core is swallowed. Returns how many
+    moved."""
     x0, x1, xmin = _span(cx, r, w, wrap)
     y0, y1, ymin = _span(cy, r, h, wrap)
     cells = np.empty((y1 - y0) * (x1 - x0), np.int64)
@@ -1931,28 +1972,45 @@ def star_shift(k, sx, sy, cx, cy, r, e, wall_e, w, h, mass, kin, quad, shade, st
                 kin[i, 1] -= (1.0 + wall_e) * u * ny_
             continue
         if mass[j] != 0:
-            if owner[j] != k + 1:                        # ploughing into other matter: they collide
-                u -= kin[j, 0] * nx_ + kin[j, 1] * ny_
-                if u > 0.0:
-                    mi, mj = np.float64(mass[i]), np.float64(mass[j])
-                    du_i = -(1.0 + e) * mj * u / (mi + mj)
-                    du_j = (1.0 + e) * mi * u / (mi + mj)
-                    kin[i, 0] += du_i * nx_
+            if owner[j] == k + 1:
+                continue                                 # (its own particle ahead hasn't moved: wait behind it)
+            u -= kin[j, 0] * nx_ + kin[j, 1] * ny_       # ploughing into other matter: they collide
+            if u > 0.0:
+                mi, mj = np.float64(mass[i]), np.float64(mass[j])
+                du_i = -(1.0 + e) * mj * u / (mi + mj)
+                du_j = (1.0 + e) * mi * u / (mi + mj)
+                if owner[j] == 0:                        # loose matter: the star as a whole takes the knock (push,
+                    push[0] += mi * du_i * nx_           # spread over it by the World), not this particle alone
+                    push[1] += mi * du_i * ny_
+                else:                                    # another star's: these particles meet (so crashing stars
+                    kin[i, 0] += du_i * nx_              # crumple into each other rather than bounce off whole)
                     kin[i, 1] += du_i * ny_
-                    kin[j, 0] += du_j * nx_
-                    kin[j, 1] += du_j * ny_
-                    stamp[j] &= ~np.uint32(1)
-                    flag[j] = 1
-            continue
-        mass[j] = mass[i]
-        for c in range(4):
-            kin[j, c] = kin[i, c]
-            quad[j, c] = quad[i, c]
-        shade[j] = shade[i]
-        stamp[j] = stamp[i]
+                kin[j, 0] += du_j * nx_
+                kin[j, 1] += du_j * ny_
+                stamp[j] &= ~np.uint32(1)
+                flag[j] = 1
+            if owner[j] != 0 or mass[j] >= star_mass * STAR_SHOVE_SHARE:
+                continue                                 # another star's, or too heavy to shove: it blocks the way
+            # lighter loose matter is shoved out of the way rather than standing like a wall: ahead or aside into a
+            # free cell if there is one, else it slips past behind (the two swap) - densely poured dust has no room
+            to = -1
+            for ox_, oy_ in ((sx, sy), (-sy, sx), (sy, -sx)):
+                t = _cell(x + ox_, y + oy_, w, h, wrap)
+                if t >= 0 and mass[t] == 0 and not solid[t] and not hole[t]:
+                    to = t
+                    break
+            if to >= 0:
+                _put(j, to, mass, kin, quad, shade, stamp, owner)
+                flag[to] = 1
+            else:
+                _swap(i, j, mass, kin, quad, shade, stamp, owner)
+                flag[i] = 1
+                flag[j] = 1
+                wake_around(i, w, h, mass, flag, wrap)
+                moved += 1
+                continue
+        _put(i, j, mass, kin, quad, shade, stamp, owner)
         owner[j] = k + 1
-        _clear(i, mass, kin, quad)
-        owner[i] = 0
         flag[j] = 1
         wake_around(i, w, h, mass, flag, wrap)
         moved += 1

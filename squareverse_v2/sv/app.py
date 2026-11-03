@@ -18,6 +18,8 @@ PRESET_KEYS = {pygame.K_F1: "rain", pygame.K_F2: "disk", pygame.K_F3: "cloud", p
 ARROWS = {pygame.K_DOWN: 0, pygame.K_LEFT: 2, pygame.K_UP: 4, pygame.K_RIGHT: 6}
 POUR_KEYS = {pygame.K_1 + k: m for k, m in enumerate(config.POUR_MASSES)}
 POUR_KEYS[pygame.K_1 + len(config.POUR_MASSES)] = tuple(config.RANDOM_MASS)   # random mass in a range
+HEAVY_POUR_KEYS = {pygame.K_1 + k: m for k, m in enumerate(config.HEAVY_POUR_MASSES)}   # with shift
+HEAVY_POUR_KEYS[pygame.K_1 + len(config.POUR_MASSES)] = tuple(config.RANDOM_HEAVY_MASS)
 HOLD_TOOLS = ("pour", "ghosts", "erase")         # mouse tools that act while the button is held; the rest once a click
 
 
@@ -138,11 +140,15 @@ class App:
             self.render_ms = (time.perf_counter() - t) * 1000
             if self.tool == "star":                     # where the star it would place could orbit
                 renderer.draw_orbit_bands(world, *world.brush_star(self.brush_px, self.pour_mass))
+            elif self.tool == "auto":                   # where it would put one
+                renderer.draw_auto_star(world, wx / world.cell, wy / world.cell)
             renderer.draw_wells(world)
             if self.selected is not None:
                 renderer.draw_selection(world, self.selected)
             if not on_menu and not self.panning:
-                renderer.draw_brush(self.tool, (mx, my), max(1, round(self.tool_radius_px() * self.cam.zoom)))
+                collapse = (world.star_collapse_check(self.brush_px, self.pour_mass)
+                            if self.tool == "star" and world.collapse_on else None)   # would it collapse at once?
+                renderer.draw_brush(self.tool, (mx, my), max(1, round(self.tool_radius_px() * self.cam.zoom)), collapse)
             sw = screen.get_width()
             renderer.draw_compass(world.gdir, (sw - 34, 34))
             renderer.draw_usage(world, self.usage, None if self.ui.open else sw - 64)
@@ -175,6 +181,8 @@ class App:
         repulsor, a super well (as heavy as a brush-sized well, and never lighter than what collapse would make), or
         a spawner (locked or not)."""
         w = self.world
+        if what == "auto":
+            return w.add_auto_star(mx, my)
         if what in ("star", "ghost star"):
             return w.add_star(mx, my, self.brush_px, self.pour_mass, ghost=what == "ghost star" or self.ghost_stars,
                               orbit=self.orbit_stars)
@@ -249,6 +257,8 @@ class App:
             w.set_gravity(((w.gdir or 0) + (1 if k == pygame.K_e else -1)) % 8)
         elif k in (pygame.K_0, pygame.K_KP0):
             w.set_gravity(None)
+        elif shift and k in HEAVY_POUR_KEYS:
+            self.pour_mass = HEAVY_POUR_KEYS[k]
         elif k in POUR_KEYS:
             self.pour_mass = POUR_KEYS[k]
         elif k == pygame.K_g:

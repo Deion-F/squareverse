@@ -17,15 +17,14 @@ WAKE_PAR_RADIUS = 64.0                 # cells: a moved well wakes the particles
 # --- Starting state of the app ----------------------------------------------
 DEFAULT_PRESET = "systems"             # rain, disk, cloud, binary, systems or empty (--preset overrides)
 SYSTEM_WELL = 80_000                   # the systems preset: super wells this heavy (B at pour mass 1, default brush),
-SYSTEM_ORBIT = 130.0                   #   each orbited this far out (cells) by stars of this size (cells; a 20 px
-SYSTEM_STAR_RADIUS = 10.0              #   brush: three of the default size unsettle each other) and pour mass (see
-SYSTEM_POUR = 16                       #   README: A star orbiting a super well)
+SYSTEM_ORBIT = 120.0                   #   each orbited this far out (cells: the middle of where they can, 92-135 at a
+SYSTEM_STAR_RADIUS = 10.0              #   reach of 120) by stars of this size (cells; a 20 px brush: three of the
+SYSTEM_POUR = 16                       #   default size unsettle each other) and pour mass
 SYSTEM_CENTRE_STARS = 3                # stars round the one in the middle
 SYSTEM_OTHERS = (2, 3)                 # how many more systems are scattered round it (at random, between these) ...
-SYSTEM_OTHER_STARS = (1, 2)            #   ... with this many stars each
-SYSTEM_SPACING = 5.0                   # systems' centres at least this x the orbit apart, their stars clear of the
-SYSTEM_EDGE = 10.0                     #   edge by this (cells; in a smaller universe it is all scaled down: lengths x k,
-SYSTEM_MIN_SCALE = 0.6                 #   masses x k^2, to at most this, then the systems are closer together)
+SYSTEM_OTHER_STARS = (1, 2)            #   ... with this many stars each, out of each other's reach where there is room
+SYSTEM_SPACING = 5.0                   # (with gravity reaching everywhere: at most this x the orbit apart)
+SYSTEM_EDGE = 10.0                     # their stars clear of the edge by this (cells)
 SYSTEM_BALANCE = 0.1                   # where the others' pulls on the middle one cancel to under this share of one's
                                        #   at the nearest they may be (else its stars are dragged off their orbits,
                                        #   as its well responds less: Well.fall)
@@ -58,6 +57,8 @@ GHOST_TINT = (190, 215, 255)           # ghosts are drawn see-through, washed to
 MAX_MASS = 4096                        # merges stop here
 POUR_MASSES = (1, 4, 16, 64, 256)      # keys 1-5
 RANDOM_MASS = (1, 256)                 # key 6: each poured particle gets a uniform random mass in this range
+HEAVY_POUR_MASSES = (512, 1024, 2048, 4096)   # shift + 1-4: a second row, up to MAX_MASS, for heavy stars and pours
+RANDOM_HEAVY_MASS = (512, 4096)        # shift + 6: a random mass in this range
 POUR_CHANCE = 0.25                     # per cell per frame under the brush (sand.py)
 GHOST_TICKS = 180                      # shift+click pours ghosts: they feel gravity (not each other's) but collide
                                        #   with nothing for this many ticks, then land as ordinary particles in
@@ -119,7 +120,7 @@ GRAVITY_DIR = None                     # starting global gravity: None or down, 
 GRAVITY_SCALE = 0.6                    # starting strength of all gravity (< / >)
 G = 0.002                              # gravitational constant: particles, wells and super wells all pull with
                                        #   accel = G * mass * r / (r^2 + soft^2)^1.5, in full out to the softened
-GRAVITY_REACH = 0.0                    #   distance R (this many cells), then fading smoothly to nothing at 2 R
+GRAVITY_REACH = 120.0                  #   distance R (this many cells), then fading smoothly to nothing at 2 R
                                        #   (kernels.fade), so things must come close to interact and further apart
                                        #   don't at all; orbits within R are stable, past ~1.16 R none is (0: it
                                        #   reaches all the way)
@@ -140,6 +141,10 @@ STAR_RING_MIN = 1.0                    #   this x its largest radius lately (or 
 STAR_RING_GROWTH = 0.25                #   and it widens by at most this many cells per tick
                                        # Its particles are those inside the ring whose speed relative to it is
                                        #   below escape speed (bound to it); the most tightly bound star wins.
+STAR_DAMPING = 0.2                     # internal friction: a star's particles' jostling (motion relative to the star
+                                       #   moving and turning as a whole) fades by this share a tick (see
+                                       #   World._damp_stars); without it a tide's shear tore fast-orbiting stars apart
+STAR_HILL_RING = 1.5                   # near a much heavier body a star's capture ring is cut to this x its Hill radius
 STAR_SMOOTH = 0.05                     # its mass is followed smoothly (this share per tick) and compared with the
 STAR_PEAK_HALF_LIFE = 600              #   most it has held lately (forgotten with this half-life, in ticks):
 STAR_UNSTABLE_SHARE = 0.5              #   below this share of it, or lighter than STAR_MIN_MASS (not in its
@@ -158,14 +163,26 @@ STAR_BLAST_PUSH = 0.4                  #   as debris, and it shoves what it pass
 STAR_PLACE_LAYERS = ((0.4, 8.0), (0.7, 3.0), (1.0, 1.0))   # a placed star's particle masses by radius share, against
                                        #   its envelope: its core is made of pour-mass particles, the middle 3/8 and
                                        #   the envelope 1/8 of that (at least 1)
-ORBIT_BAND_HOLD = 2.9                  # the Star tool shows round each super well where the star it would place can
-                                       #   orbit: beyond where its own pull at its surface is this x the tide across
-                                       #   it (1.3 x what it was where a pour-16 star from the 40 px brush was
-                                       #   stripped, 110 cells from an 80,000 well), outside the dotted circle ...
+ORBIT_BAND_HOLD = 6.0                  # the Star tool shows round each super well where the star it would place can
+ORBIT_BAND_HOLD_PER_SPEED = 0.0        #   orbit: outside the dotted circle, beyond where its own pull at its surface is
+                                       #   (this + this x the circular speed) x the tide across it - with star damping
+                                       #   and the normal force that no longer cancels a star's pull against a tide
+                                       #   (2026-11), dense stars 90-130 cells out round
+                                       #   0.3-5M wells kept 98-100% of their mass over 1,500 ticks at 5.9x or more,
+                                       #   92% at 4.7x, and came apart at 4.5x or less, whatever their speed ...
+ORBIT_BAND_MAX_SPEED = 6.0             #   ... and where the circular speed is at most this (cells/tick; VMAX is 8) ...
 ORBIT_BAND_STABLE = 2.8                #   ... out to where the pull falls as fast as 1 / r^this (2.8: 3 is the limit
                                        #   for any stable orbit), within half its Hill radius against any other super
                                        #   well (and 0.6 of the way to where their pulls balance), inside the edge
 ORBIT_BAND_COLOR = (110, 220, 140)
+ORBIT_BAND_NONE_COLOR = (235, 110, 95)  # round a super well the star can't orbit anywhere: a dashed circle
+AUTO_STAR_RECIPES = ((16, 10), (16, 8), (64, 8), (16, 6), (64, 6), (256, 6), (512, 6), (1024, 6), (1024, 4))
+                                       # the Auto star tool's stars, (pour mass, radius in cells), tried in this
+                                       #   order until one can orbit the super well clicked near (skipping any over half
+                                       #   the collapse threshold: it would collapse into a super well itself) ...
+AUTO_STAR_SPACING = 120.0              #   ... round a well with stars already, on their orbit at least this many
+                                       #   degrees from each: up to three, evenly spaced, hold (4 or more, or 60 degrees
+                                       #   apart, were pulled off their orbits within a minute)
 ORBIT_STARS = True                     # a placed star sets off in orbit round the super well pulling hardest on it
                                        #   (menu; T)
 GHOST_STARS = False                    # placed stars arrive as ghost stars, landing GHOST_TICKS later (menu; shift+click
@@ -191,7 +208,7 @@ ORDER_CUT_EVERY = 120                  # ticks between turning the orbit orderin
 ORDER_CUT_STEP = 0.9                   # radians the cut turns each time
 ORDER_BUCKETS = 16384                   # potential buckets for "leading particles first" ordering
 
-SG_ON = False
+SG_ON = True 
 SG_BLOCK = 4                           # cells per side of a self-gravity mesh block
 SG_EVERY = 4                           # ticks between self-gravity field updates
 SG_SOFTENING = 1.0                     # in mesh blocks
@@ -222,6 +239,10 @@ COLLAPSE_ON = True                     # shift+B
 COLLAPSE_MASS = 40000                  # mass in a COLLAPSE_BLOCKS x COLLAPSE_BLOCKS block window that collapses,
 COLLAPSE_BLOCKS = 5                    #   divided by the gravity scale (blocks are SG_BLOCK cells: 20 x 20 cells)
 COLLAPSE_EVERY = 8                     # ticks between collapse checks
+STAR_COLLAPSE_FACTOR = 4.0             # a star's own particles count this many times less in the collapse check, so a
+STAR_COLLAPSE_RANGE = (1.0, 20.0)      #   star becomes a super well only if this many times denser than loose matter
+                                       #   must be (the menu's Stars collapse at, between these)
+STAR_COLLAPSE_WARN = 0.7               # the Star tool's brush turns amber when its star would hold this share of that
 SUPER_RANGE_ACCEL = 0.01               # a well's reach: where its pull drops below this
 SUPER_RANGE_FACTOR = 0.25              # a super well's range (the dotted circle) is this x its reach: it spins
                                        #   space round within it, and overlapping ranges merge. Its pull goes on
@@ -242,7 +263,7 @@ SUPER_SPIN_MAX = 7.0                   # ; / ' spin the nearest super well down 
 SUPER_SPIN_PLACED = 1.5                # spin of a super well placed with B; new ones spin with the global orbit,
                                        #   or either way at random when it is off
 SUPER_SPIN_STEP = 1.25
-SUPER_SPIN_FOLLOWS_MASS = False       # a new super well's spin rises with its mass, in a straight line from its
+SUPER_SPIN_FOLLOWS_MASS = True        # a new super well's spin rises with its mass, in a straight line from its
 SUPER_SPIN_FULL = 3.0                 #   starting spin to this at SUPER_EXPLODE_MASS: the heavier it gets, the more
                                       #   it flings matter out instead of feeding, so it grows steadily (setting
                                       #   its spin by hand stops this for that well)

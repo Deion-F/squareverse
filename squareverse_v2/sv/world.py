@@ -241,6 +241,7 @@ class World:
         self.g_scale = config.GRAVITY_SCALE   # multiplies all gravity: global, wells, super wells, self-gravity
         self.reach_len = config.GRAVITY_REACH   # cells: how far every pull reaches before it fades (0: all the way)
         self.explode_mass = config.SUPER_EXPLODE_MASS   # a super well this heavy goes supernova
+        self.star_collapse = config.STAR_COLLAPSE_FACTOR   # stars must be this much denser than loose matter to collapse
         self.collapse_on = config.COLLAPSE_ON
         self.spin_follows_mass = config.SUPER_SPIN_FOLLOWS_MASS
         self.star_form_on = config.STAR_FORM_ON
@@ -327,7 +328,7 @@ class World:
         self.sfx = np.zeros(self.scw * self.sch)   # the stars' pull at block centres (see kernels._star_pull)
         self.sfy = np.zeros(self.scw * self.sch)
         self.star_pulls = np.zeros((0, 5))
-        self.star_v = np.zeros((0, 4))
+        self.star_v = np.zeros((0, 6))
         self.star_f = np.zeros((0, 3))
         self.order_starred = False              # the ranks round stars were overridden last tick
         self.field_dirty = True                 # rebuild the field and wake everything
@@ -469,6 +470,30 @@ class World:
     def collapse_threshold(self):
         return config.COLLAPSE_MASS / self.g_scale
 
+    def star_collapse_limit(self):
+        """What a star's own matter must hold in a collapse window to collapse into a super well (check_collapse)."""
+        return self.collapse_threshold() * self.star_collapse
+
+    def star_collapse_check(self, radius_px, pour_mass):
+        """For the star add_star would place with this brush and pour mass: (the most it holds in any collapse window
+        - COLLAPSE_BLOCKS x SG_BLOCK cells square - and star_collapse_limit()). Over the limit, it collapses into a
+        super well at the next check."""
+        r = max(1.0, radius_px / self.cell)
+        n = int(r) + 1
+        dy, dx = np.mgrid[-n:n + 1, -n:n + 1]
+        d = np.hypot(dx, dy)
+        pour = round(sum(pour_mass) / 2) if isinstance(pour_mass, tuple) else pour_mass
+        grid = np.zeros(d.shape)
+        inside = d <= r
+        grid[inside] = self._layer_masses(d[inside] / r, pour)
+        k = config.COLLAPSE_BLOCKS * config.SG_BLOCK
+        if grid.shape[0] <= k:
+            return float(grid.sum()), self.star_collapse_limit()
+        c = np.zeros((grid.shape[0] + 1, grid.shape[1] + 1))
+        c[1:, 1:] = grid.cumsum(0).cumsum(1)
+        window = c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]
+        return float(window.max()), self.star_collapse_limit()
+
     def rebuild_field(self):
         """Mark the solid wells' ground and the super wells' cores, and work out the field: global gravity and the
         pull of the solid wells and repulsors, per cell. The super wells aren't on it: they move all the time, and a
@@ -523,13 +548,19 @@ class World:
 
     def check_collapse(self):
         """Collapse the heaviest COLLAPSE_BLOCKS-square window of self-gravity blocks into a super well (or into a
-        super well already close by) when it holds at least the collapse threshold."""
+        super well already close by) when it holds at least the collapse threshold - a star's own particles counting
+        star_collapse (STAR_COLLAPSE_FACTOR) times less, so a star has to be that much denser than loose matter to
+        collapse (star_collapse_check tells beforehand)."""
         sg, k, b = self.sg, config.COLLAPSE_BLOCKS, self.sg.block
         if sg.ch < k or sg.cw < k:
             return
         kernels.bin_mass(self.mass, self.w, self.h, b, sg.cw, sg.rho)
+        rho = sg.rho.copy()
+        if self.stars:                                   # stars' own matter counts star_collapse times less
+            kernels.bin_free_mass(self.mass, self.owner, self.w, self.h, b, sg.cw, sg.rho)
+            rho = sg.rho + (rho - sg.rho) / self.star_collapse
         s = np.zeros((sg.ch + 1, sg.cw + 1))
-        s[1:, 1:] = sg.rho.reshape(sg.ch, sg.cw).cumsum(0).cumsum(1)
+        s[1:, 1:] = rho.reshape(sg.ch, sg.cw).cumsum(0).cumsum(1)
         window = s[k:, k:] - s[:-k, k:] - s[k:, :-k] + s[:-k, :-k]
         by, bx = np.unravel_index(np.argmax(window), window.shape)
         if window[by, bx] < self.collapse_threshold():
@@ -750,7 +781,9 @@ class World:
     def orbit_band(self, wl, radius, mass):
         """Where (distance from super well wl, cells) a star of this radius and mass can orbit it: (inner, outer), or
         None when nowhere. Inner: outside the dotted circle, and far enough out that its own pull at its surface
-        (softened as a star's is) is ORBIT_BAND_HOLD x the tide across it (with the orbit's own share). Outer: where
+        (softened as a star's is) is (ORBIT_BAND_HOLD + ORBIT_BAND_HOLD_PER_SPEED x the circular speed) x the tide
+        across it (with the orbit's own share), and where that speed is at most ORBIT_BAND_MAX_SPEED (faster, a star
+        comes apart). Outer: where
         the pull, fading, falls as fast as 1 / r^ORBIT_BAND_STABLE (none is stable much beyond), half its Hill radius
         against any other super well that reaches it (and 0.6 of the way to where their pulls balance), the edge."""
         S, soft, kinv = self.g_scale * wl.pull(), self.softening(wl), self.kinv
@@ -785,7 +818,9 @@ class World:
                 if a2 <= 0.0 or -math.log(a2 / a1) / math.log(1.01) >= config.ORBIT_BAND_STABLE:
                     outer = d
                     break
-            if inner is None and hold >= config.ORBIT_BAND_HOLD * 1.5 * (pull(d - radius) - pull(d)):
+            v = math.sqrt(d * pull(d))                    # the circular speed: faster, a star needs a firmer hold
+            if inner is None and v <= config.ORBIT_BAND_MAX_SPEED and hold >= (
+                    config.ORBIT_BAND_HOLD + config.ORBIT_BAND_HOLD_PER_SPEED * v) * 1.5 * (pull(d - radius) - pull(d)):
                 inner = d
                 if not kinv:
                     break
@@ -794,6 +829,56 @@ class World:
         if inner is None or inner >= outer:
             return None
         return inner, outer
+
+    def auto_star_plan(self, wl, near=None, angle=None):
+        """The star the Auto star tool would set orbiting super well wl: (pour mass, radius in cells, its band
+        (inner, outer), the orbit's radius, the angle round wl to put it at) or None. It is the first of
+        AUTO_STAR_RECIPES (pour mass, radius) that can orbit wl there (World.orbit_band). With no stars round wl yet,
+        it goes on the orbit in that band nearest `near` cells out (the middle when None), at `angle` (radians, 0
+        when None). With stars round it already, on their orbit - two on orbits near each other in such a narrow band
+        would merge or fling each other out, and so do more than three on one orbit, while up to three spaced evenly
+        on it hold - at least AUTO_STAR_SPACING degrees from each, in the free direction nearest `angle`."""
+        others = [(self.distance(st.x, st.y, wl.x, wl.y), math.atan2(*self.delta(wl.x, wl.y, st.x, st.y)[::-1]),
+                   st.radius) for st in self.stars if self.orbit_well(st.x, st.y) is wl]
+        angle = 0.0 if angle is None else angle
+        for pour, radius in config.AUTO_STAR_RECIPES:
+            r, mass = self.brush_star(radius * self.cell, pour)
+            if self.star_collapse_check(radius * self.cell, pour)[0] > 0.5 * self.star_collapse_limit():
+                continue                                 # (it would collapse into a super well, or nearly)
+            band = self.orbit_band(wl, r, mass)
+            if band is None:
+                continue
+            inner, outer = band
+            if not others:                               # (a little inside its edges)
+                lo, hi = min(inner + 2.0, 0.5 * (inner + outer)), max(outer - 2.0, 0.5 * (inner + outer))
+                return pour, r, band, (0.5 * (inner + outer) if near is None else min(max(near, lo), hi)), angle
+            orbit = float(np.median([d for d, _, _ in others]))
+            if not inner - 3.0 <= orbit <= outer + 3.0:     # (the stars there wobble a little)
+                continue
+            free = []
+            for a in angle + np.radians(np.arange(0.0, 180.5, 0.5)).repeat(2) * np.tile([1, -1], 361):
+                if all(abs((a - oa + math.pi) % (2 * math.pi) - math.pi)
+                       >= math.radians(config.AUTO_STAR_SPACING - 1.0) for _, oa, _ in others):   # (a degree slack)
+                    free.append(a)
+                    break                                # nearest to `angle` first
+            return (pour, r, band, orbit, free[0]) if free else None
+        return None
+
+    def add_auto_star(self, px, py):
+        """Auto star: a star set off in orbit round the super well pulling hardest at a pixel, sized and placed by
+        auto_star_plan (nearest the pixel's distance and direction from the well). Returns it, or None when there is
+        no super well or no star can orbit it (or its orbit is full)."""
+        x, y = px / self.cell, py / self.cell
+        wl = self.orbit_well(x, y)
+        if wl is None:
+            return None
+        dx, dy = self.delta(wl.x, wl.y, x, y)
+        plan = self.auto_star_plan(wl, math.hypot(dx, dy), math.atan2(dy, dx))
+        if plan is None:
+            return None
+        pour, r, _, orbit, a = plan
+        return self.add_star((wl.x + orbit * math.cos(a)) * self.cell, (wl.y + orbit * math.sin(a)) * self.cell,
+                             r * self.cell, pour, orbit=True)
 
     def orbit_well(self, x, y):
         """The super well a body at (x, y) (cells) would orbit: the one pulling hardest there, or None."""
@@ -941,6 +1026,39 @@ class World:
         idx = ys * self.w + xs
         return idx[(self.mass[idx] > 0) & ((self.owner[idx] == 0) | (self.owner[idx] == k + 1))]
 
+    def _damp_stars(self):
+        """Internal friction: each star's particles' motion relative to the star - apart from its moving and turning
+        as a whole - fades by STAR_DAMPING a tick. Its particles bounce off each other nearly elastically (so a star
+        keeps its momentum), and with nothing to calm them a tide's shear (its near side orbiting faster than its far
+        side) set them jostling until the star puffed up and was torn apart; real stars lose that energy. What fades
+        is fitted so the star's momentum stays as it was, and its spin too - except close to a heavy super well, whose
+        tide spun stars up until they flung their outskirts off: there it turns towards once an orbit (tidal locking).
+        """
+        if not config.STAR_DAMPING:
+            return
+        for k, st in enumerate(self.stars):
+            idx = self._star_cells(k, st)
+            if idx.size < 3:
+                continue
+            m = self.mass[idx].astype(np.float64)
+            ys, xs = np.divmod(idx, self.w)
+            dx, dy = xs - st.x, ys - st.y
+            if self.wrap:
+                dx -= self.w * np.floor(dx / self.w + 0.5)
+                dy -= self.h * np.floor(dy / self.h + 0.5)
+            total = m.sum()
+            dx -= (m * dx).sum() / total                 # about their centre of mass
+            dy -= (m * dy).sum() / total
+            vx, vy = self.kin[idx, 0].astype(np.float64), self.kin[idx, 1].astype(np.float64)
+            ux, uy = vx - (m * vx).sum() / total, vy - (m * vy).sum() / total
+            inertia = (m * (dx * dx + dy * dy)).sum()
+            om = (m * (dx * uy - dy * ux)).sum() / inertia if inertia > 0 else 0.0   # its spin, as a solid body
+            wl = self.orbit_well(st.x, st.y)
+            if wl is not None and wl.mass > 10 * st.mass and self.tide_share(self.distance(st.x, st.y, wl.x, wl.y)):
+                om = 0.0                                 # close to a heavy super well: its spin fades too
+            self.kin[idx, 0] -= config.STAR_DAMPING * (ux + om * dy)
+            self.kin[idx, 1] -= config.STAR_DAMPING * (uy - om * dx)
+
     def _star_cells(self, k, st):
         """The cells holding star k's particles."""
         xs, ys, _, _ = self._disk_cells(st.x, st.y, st.ring + 2.0)
@@ -965,8 +1083,10 @@ class World:
 
     def _set_ring(self, st, grow=True):
         """A star's capture ring: where its pull drops to STAR_CAPTURE_ACCEL, cut down to its Roche lobe against
-        each other star and super well; between STAR_RING_MIN x its largest radius lately (and 2 cells) and
-        STAR_RING_MAX x its radius, widening by at most STAR_RING_GROWTH a tick."""
+        each other star and super well - against a much heavier body STAR_HILL_RING x its Hill radius (where that
+        body's tide, with the orbit's own share, matches its pull), as the point-mass Roche lobe, a third smaller,
+        dropped particles still bound to it (at most half the way to the other body); between STAR_RING_MIN x its largest
+        radius lately (and 2 cells) and STAR_RING_MAX x its radius, widening by at most STAR_RING_GROWTH a tick."""
         r = reach_for(self.g_scale * st.pull(), config.STAR_CAPTURE_ACCEL, self.kinv)
         st.tide = None
         for b in self.stars + self.wells:
@@ -976,7 +1096,8 @@ class World:
             share = self.tide_share(d)
             if share <= 0.0:                             # gravity doesn't reach that far: no tide
                 continue
-            lobe = d * roche_lobe(max(st.mass, 1.0) / (b.mass * share))
+            q = max(st.mass, 1.0) / (b.mass * share)
+            lobe = d * max(roche_lobe(q), min(0.5, config.STAR_HILL_RING * (q / 3.0) ** (1 / 3)))
             r = min(r, lobe)
             if lobe < st.radius and b.mass > st.mass:
                 st.tide = b
@@ -1004,10 +1125,12 @@ class World:
                 st.ax, st.ay = px / m - st.vx, py / m - st.vy
                 st.vx, st.vy = px / m, py / m
         carried = []
+        push = np.zeros(2)
         for k, st in enumerate(self.stars):
             st.ox += st.vx
             st.oy += st.vy
             cx, cy = 0, 0
+            push[:] = 0.0
             for _ in range(config.MAX_STEPS):
                 sx = 1 if st.ox >= 0.5 else (-1 if st.ox <= -0.5 else 0)
                 sy = 1 if st.oy >= 0.5 else (-1 if st.oy <= -0.5 else 0)
@@ -1015,12 +1138,21 @@ class World:
                     break
                 kernels.star_shift(k, sx, sy, st.x + cx, st.y + cy, st.ring + 2.0, config.RESTITUTION,
                                    config.WALL_E, self.w, self.h, self.mass, self.kin, self.quad, self.shade,
-                                   self.stamp, self.flag, self.owner, self.solid, self.hole, self.absorbed, self.wrap)
+                                   self.stamp, self.flag, self.owner, self.solid, self.hole, self.absorbed, push,
+                                   max(st.mass, 1.0), self.wrap)
                 st.ox -= sx
                 st.oy -= sy
                 cx += sx
                 cy += sy
             st.ox, st.oy = min(max(st.ox, -0.5), 0.5), min(max(st.oy, -0.5), 0.5)
+            if push.any():                               # the knocks it took ploughing on, shared by all of it
+                xs, ys, _, _ = self._disk_cells(st.x + cx, st.y + cy, st.ring + 2.0)
+                idx = ys * self.w + xs
+                idx = idx[self.owner[idx] == k + 1]
+                held = float(self.mass[idx].sum())
+                if held > 0:
+                    self.kin[idx, 0] += push[0] / held
+                    self.kin[idx, 1] += push[1] / held
             carried.append((cx, cy))
         return carried
 
@@ -1100,6 +1232,7 @@ class World:
                 self._explode_star(k, st)
         if target != list(range(len(stars))):
             self._drop_stars(target)
+        self._damp_stars()
         for st in self.stars:
             self._set_ring(st)
             wx, wy, wm = st.woke
@@ -1271,8 +1404,8 @@ class World:
             near = max(st.ring, 4.0 * soft, 3.0 * b)
             rows.append((st.x, st.y, self.g_scale * st.pull(), soft * soft, near * near))
         self.star_pulls = np.array(rows, np.float64).reshape(-1, 5)
-        self.star_v = np.array([(st.vx + st.ax, st.vy + st.ay, *st.fix) for st in self.stars],
-                               np.float64).reshape(-1, 4)
+        self.star_v = np.array([(st.vx + st.ax, st.vy + st.ay, *st.fix, st.ax, st.ay) for st in self.stars],
+                               np.float64).reshape(-1, 6)
         self.star_f = np.zeros((len(self.stars), 3))
         if self.stars:
             kernels.star_field(self.star_pulls, self.w, self.h, b, self.scw, self.sch, self.sfx, self.sfy, self.wrap,
@@ -2405,6 +2538,7 @@ class World:
         self.orbit_speed = self.orbit_speed_for(config.ORBIT_EDGE_SPEED)
         self.g_scale = config.GRAVITY_SCALE
         self.explode_mass = config.SUPER_EXPLODE_MASS
+        self.star_collapse = config.STAR_COLLAPSE_FACTOR
         if self.reach_len != config.GRAVITY_REACH:
             self.set_reach(config.GRAVITY_REACH)
         if self.wrap != config.WRAP:

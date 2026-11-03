@@ -14,6 +14,8 @@ HELP = [
     ("shift+LMB", f"pour ghosts: feel gravity but pass through everything for {config.GHOST_TICKS} ticks"),
     ("1-5 / 6", "pour mass " + " / ".join(str(m) for m in config.POUR_MASSES)
      + " / random {}-{}".format(*config.RANDOM_MASS)),
+    ("shift+1-4 / shift+6", "heavy pour mass " + " / ".join(str(m) for m in config.HEAVY_POUR_MASSES)
+     + " / random {}-{}".format(*config.RANDOM_HEAVY_MASS)),
     ("G / shift+G", "place star (a ball of particles, core of pour-mass particles, held by its own gravity) / solid "
                     "repulsor"),
     ("shift+LMB, Star tool", "place a ghost star: flies through everything, lands as a star"),
@@ -184,9 +186,34 @@ class Renderer:
 
     def draw_orbit_bands(self, world, radius, mass):
         """Round each super well, the band where a star of this radius (cells) and mass could be put to orbit it
-        (World.orbit_band): shaded, with its edges drawn."""
-        bands = [(wl, world.orbit_band(wl, radius, mass)) for wl in world.wells if wl.is_super]
-        bands = [(wl, band) for wl, band in bands if band]
+        (World.orbit_band): shaded, with its edges drawn; round one it can't orbit anywhere, a dashed red circle and
+        a note saying so."""
+        found = [(wl, world.orbit_band(wl, radius, mass)) for wl in world.wells if wl.is_super]
+        self._draw_bands(world, found, "no stable orbit for this star: smaller brush or heavier pour")
+
+    def draw_auto_star(self, world, mx, my):
+        """The Auto star tool: round each super well the band of the star it would place there, or a red note when
+        none can orbit it or its orbit is full; for the well pulling hardest at the mouse (cells), the star itself
+        where it would go."""
+        plans = {wl: world.auto_star_plan(wl) for wl in world.wells if wl.is_super}
+        self._draw_bands(world, [(wl, plan[2] if plan else None) for wl, plan in plans.items()],
+                         "no star can orbit here (too heavy for the reach: orbits too fast) or its orbit is full")
+        wl = world.orbit_well(mx, my)
+        if wl is None:
+            return
+        dx, dy = world.delta(wl.x, wl.y, mx, my)
+        plan = world.auto_star_plan(wl, math.hypot(dx, dy), math.atan2(dy, dx))
+        if plan:
+            _, r, _, orbit, a = plan
+            x, y = self.cam.point(wl.x + orbit * math.cos(a), wl.y + orbit * math.sin(a))
+            pygame.draw.circle(self.screen, config.ORBIT_BAND_COLOR, (round(x), round(y)),
+                               max(3, round(r * self.cam.k)), 1)
+
+    def _draw_bands(self, world, found, none_note):
+        """Shade the bands of (super well, (inner, outer) or None) pairs (see draw_orbit_bands); a well with None gets
+        the dashed red circle and none_note."""
+        self._draw_no_orbit(world, [wl for wl, band in found if not band], none_note)
+        bands = [(wl, band) for wl, band in found if band]
         if not bands:
             return
         size = self.screen.get_size()
@@ -216,6 +243,25 @@ class Renderer:
         self._band_rect = drawn.clip(layer.get_rect()) if drawn else None
         if self._band_rect:
             self.screen.blit(layer, self._band_rect.topleft, self._band_rect)
+
+    def _draw_no_orbit(self, world, wells, text):
+        """A dashed red circle just outside each of these super wells' dotted circles, and a note (text) under it."""
+        cam, k = self.cam, self.cam.k
+        sw, sh = self.screen.get_size()
+        color = config.ORBIT_BAND_NONE_COLOR
+        note = self.small.render(text, True, color)
+        radius = 10.0
+        for wl in wells:
+            x, y = cam.point(wl.x, wl.y)
+            r = max(6, round((world.well_range(wl) + radius) * k))
+            if not (-r <= x <= sw + r and -r <= y <= sh + r):
+                continue
+            dashes = max(16, int(2 * math.pi * r / 8))
+            for d in range(0, dashes, 2):
+                a0, a1 = 2 * math.pi * d / dashes, 2 * math.pi * (d + 1) / dashes
+                pygame.draw.line(self.screen, color, (x + r * math.cos(a0), y + r * math.sin(a0)),
+                                 (x + r * math.cos(a1), y + r * math.sin(a1)), 2)
+            self.screen.blit(note, (round(x - note.get_width() / 2), round(y + r + 6)))
 
     def draw_wells(self, world):
         cam, k = self.cam, self.cam.k
@@ -451,15 +497,23 @@ class Renderer:
             pygame.draw.line(self.screen, (120, 190, 255), (c[0] + r * math.cos(a0), c[1] + r * math.sin(a0)),
                              (c[0] + r * math.cos(a1), c[1] + r * math.sin(a1)), 2)
 
-    def draw_brush(self, tool, pos, radius):
-        """The brush circle at the mouse, coloured by what a click will do: pour, erase, or place a body."""
-        if tool in ("select", "delete"):
-            color = (120, 190, 255) if tool == "select" else (230, 110, 110)
+    def draw_brush(self, tool, pos, radius, collapse=None):
+        """The brush circle at the mouse, coloured by what a click will do: pour, erase, or place a body. collapse:
+        for a star, (the most it would hold in a collapse window, the limit; World.star_collapse_check) - near the
+        limit the circle turns amber, over it red (it would collapse into a super well at once), with a note."""
+        if tool in ("select", "delete", "auto"):      # (Auto star picks its own size: it shows where it goes)
+            color = {"select": (120, 190, 255), "delete": (230, 110, 110), "auto": (230, 150, 80)}[tool]
             pygame.draw.circle(self.screen, color, pos, 6, 1)
             return
         color = {"erase": (150, 80, 80), "star": (230, 150, 80), "repulsor": config.REPULSOR_COLOR,
                  "super": config.SUPER_RANGE_COLOR, "spawner": config.SPAWNER_COLOR,
                  "locked": config.SPAWNER_COLOR}.get(tool, (70, 76, 90))
+        if collapse is not None and collapse[0] >= config.STAR_COLLAPSE_WARN * collapse[1]:
+            over = collapse[0] >= collapse[1]
+            color = config.ORBIT_BAND_NONE_COLOR if over else (235, 190, 90)
+            note = self.small.render(f"{'collapses into a super well' if over else 'near collapse'}: densest "
+                                     f"20x20 {collapse[0] / 1000:,.0f}k / {collapse[1] / 1000:,.0f}k", True, color)
+            self.screen.blit(note, (pos[0] - note.get_width() // 2, pos[1] + radius + 6))
         pygame.draw.circle(self.screen, color, pos, radius, 1)
 
     def draw_status(self, world, app, fps):
