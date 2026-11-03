@@ -78,6 +78,11 @@ Re-measure before you trust its numbers, because the code has moved since it was
    README if a user-visible figure or flag changes) when you land or rule out something significant.
 7. **Don't commit or push.** Leave your changes in the working tree for the main agent and the user.
 8. **Keep temporary files out of the repo.** Put benchmark scripts and temporary output in the scratchpad.
+9. **Only remove what you made, for this task.** When you clean up, delete only the files, directories and git
+   worktrees you created during this run, by exact path, never with a wildcard or a whole directory. Other files in
+   the scratchpad, the repo or anywhere else belong to the user or the main agent, even if they look temporary,
+   stale or unrelated; leave them alone. If something outside your work seems to need removing, say so in your
+   report instead.
 
 ## Your report
 
