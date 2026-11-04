@@ -6,4 +6,4 @@
 
 - Make the menu window wider as it keeps jumping around when the values at the very top change and go onto a second line.
 
-- Invesitagte why the test runner is no longer able to close the sim even after being given permission.
+- ~~Invesitagte why the test runner is no longer able to close the sim even after being given permission.~~ Done: the subagents only close the sim on the user's own go-ahead, and auto mode blocked the kill until settings.local.json got an autoMode allow rule.
