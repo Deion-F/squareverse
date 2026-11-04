@@ -54,6 +54,14 @@ Next, in order:
      (`SUPER_SWIRL_*`) or another spin effect reaching a star ~26 cells out at reach 30 (the faint circle is ~13).
    - **Then a second problem:** even with spin 0, after ~400 ticks the star is thrown out (25 -> 41 -> 80 cells).
      Not yet traced.
+   - Idea from the user (2026-11-04): it's the well's spin, not orbital speed, that the spin-with-mass scale affects
+     (orbital speed is set by the well's mass and distance alone). New wells start at spin 1.5
+     (`SUPER_SPIN_PLACED` / `SUPER_SPIN_NATURAL`) rising to 3 at the supernova mass (`SUPER_SPIN_FULL`); spin is
+     measured against the local orbital speed, like a real black hole's 0-1 spin number. Suggested: keep it rising
+     with mass but start much lower (e.g. 0.5), so small wells barely stir their surroundings and can hold stars
+     while heavy ones still spin up and feed slowly. Making heavier wells spin slower is the alternative, but it
+     loses the brake that rising spin puts on runaway growth (fewer supernova chains). First test: single star at
+     spin 0.5 and 1.0.
    - Next: find both causes (a test like `scratchpad/orbit2.py`: one well, one star, NOSPIN / NODRAG switches),
      then tune the systems preset (light well ~40k, small dense stars), binary, auto star (`AUTO_STAR_RECIPES` now
      ends with (1024, 3)), the Star tool's default size, tests and README. The collapse threshold (33k at strength
