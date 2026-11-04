@@ -4,6 +4,8 @@
 
 - confirm the sim isn't compiling kernels when not needed
 
+- have dense regions of matter collapse into a SGW at the same desnity as the value set for stars collapsing into SGW
+
 - The simulation runs very slowly when there is a very heavy SGW. Is this expected? I would assume that since every particle inside of a SGW isn't simulated, a SGW and another SGW 10x bigger should have roughly the same performance?
 
 - ~~Make the menu window wider as it keeps jumping around when the values at the very top change and go onto a second line.~~ Done: `PANEL_W` 380 -> 450 (`sv/ui.py`), wide enough for 10M particles, 1B mass and 100M ticks on one line.
