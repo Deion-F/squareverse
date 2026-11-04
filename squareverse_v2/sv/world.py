@@ -10,7 +10,7 @@ import numpy as np
 
 from . import config, kernels, palette
 from .gpu import Chooser
-from .gravity import SelfGravity, external_field, fade, order_buckets, reach_for, tide_share
+from .gravity import SelfGravity, external_field, fade, horizon_for, order_buckets, reach_for, tide_share
 
 # Global gravity directions, clockwise on screen starting from "down" (sand.py).
 DIRS = [(0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0), (1, 1)]
@@ -74,6 +74,7 @@ class Blast:
     blow: int = 0               # ... and over all of its reach for this many ticks after the front stops
     source: object = None       # a body it stays centred on while that lasts (a merged super well)
     settled: int = 0
+    settle: int = config.SUPER_BLAST_SETTLE   # without wind, it goes on damping for this many ticks after it stops
 
     def speed(self, r):
         """Speed of the front at radius r: v0 when it starts, none at its edge."""
@@ -96,7 +97,7 @@ class Well:
 
     A solid well has a size: a spinning body nothing can enter (its softening radius); a repulsor (sign -1) pushes
     instead and stays put. A super well swallows every particle and well that reaches its core; its core grows with
-    its mass. Its pull follows the same law at every distance; within its range (the dotted circle) it also spins
+    its mass. Its pull follows the same law at every distance; within its range (the faint circle) it also spins
     space round. Wells attract each other (and feel the stars and, with self-gravity on, the particles). Gravity
     accelerates a solid well as it does a particle, whatever its mass; a super well responds more sluggishly the
     heavier it is. (Stars are not wells: see Star.)
@@ -164,6 +165,7 @@ class Star:
     count: int = 0              # how many particles
     radius: float = 1.0         # their rms distance from the centre x sqrt(2): a packed disc's radius
     ring: float = 0.0           # capture radius (cells)
+    reach: float = 0.0          # the capture radius before the Roche cut: where its pull drops to STAR_CAPTURE_ACCEL
     smooth: float = 0.0         # its mass, followed smoothly (STAR_SMOOTH)
     peak: float = 0.0           # the most `smooth` has been lately (STAR_PEAK_HALF_LIFE)
     size: float = 0.0           # the largest radius lately
@@ -375,6 +377,8 @@ class World:
         p[kernels.P_WHIRL_GRIP] = config.SUPER_SWIRL_GRIP
         p[kernels.P_WHIRL_INFALL] = config.SUPER_SWIRL_INFALL
         p[kernels.P_WHIRL_EDGE] = config.SUPER_SWIRL_EDGE
+        p[kernels.P_DRAG_EDGE] = config.SUPER_DRAG_EDGE
+        p[kernels.P_DRAG_TURN] = config.SUPER_DRAG_TURN_MAX
         p[kernels.P_ORBIT_CX], p[kernels.P_ORBIT_CY] = self.w / 2, self.h / 2
         p[kernels.P_SG_COS], p[kernels.P_SG_SIN] = self.sg_turn()
         p[kernels.P_HEAT] = config.HEAT_SHARE if self.radiation_on else 0.0
@@ -438,7 +442,7 @@ class World:
 
     def reach(self, well):
         """Distance (cells) at which a well's pull drops to SUPER_RANGE_ACCEL: how far waking particles matters. A
-        well's pull goes on beyond it, fading; a super well's range (the dotted circle) is SUPER_RANGE_FACTOR of it."""
+        well's pull goes on beyond it, fading; a super well's range (the faint circle) is SUPER_RANGE_FACTOR of it."""
         return reach_for(self.g_scale * abs(well.pull()), config.SUPER_RANGE_ACCEL, self.kinv)
 
     def softening(self, well):
@@ -452,7 +456,7 @@ class World:
         return max(super_core(mass), config.SUPER_SOFTENING * plain)
 
     def well_range(self, well):
-        """A super well's range (cells, the dotted circle): its zone of strong pull, where it spins space round and
+        """A super well's range (cells, the faint circle): its zone of strong pull, where it spins space round and
         where another super well's range overlapping it draws the two together. 0 for normal wells."""
         return self.reach(well) * config.SUPER_RANGE_FACTOR if well.is_super else 0.0
 
@@ -780,7 +784,7 @@ class World:
 
     def orbit_band(self, wl, radius, mass):
         """Where (distance from super well wl, cells) a star of this radius and mass can orbit it: (inner, outer), or
-        None when nowhere. Inner: outside the dotted circle, and far enough out that its own pull at its surface
+        None when nowhere. Inner: outside the faint circle, and far enough out that its own pull at its surface
         (softened as a star's is) is (ORBIT_BAND_HOLD + ORBIT_BAND_HOLD_PER_SPEED x the circular speed) x the tide
         across it (with the orbit's own share), and where that speed is at most ORBIT_BAND_MAX_SPEED (faster, a star
         comes apart). Outer: where
@@ -937,8 +941,9 @@ class World:
                 if speed > config.VMAX:
                     gs.vx *= config.VMAX / speed
                     gs.vy *= config.VMAX / speed
-                gs.x += gs.vx
-                gs.y += gs.vy
+                cx, cy = self._carry(gs)
+                gs.x += gs.vx + cx
+                gs.y += gs.vy + cy
                 if self.wrap:
                     gs.x %= self.w
                     gs.y %= self.h
@@ -1088,6 +1093,8 @@ class World:
         dropped particles still bound to it (at most half the way to the other body); between STAR_RING_MIN x its largest
         radius lately (and 2 cells) and STAR_RING_MAX x its radius, widening by at most STAR_RING_GROWTH a tick."""
         r = reach_for(self.g_scale * st.pull(), config.STAR_CAPTURE_ACCEL, self.kinv)
+        lo = max(2.0, config.STAR_RING_MIN * st.size)
+        st.reach = min(max(r, lo), max(lo, config.STAR_RING_MAX * st.radius))   # drawn only: no Roche cut
         st.tide = None
         for b in self.stars + self.wells:
             if b is st or (isinstance(b, Well) and not b.is_super) or b.mass <= 0:
@@ -1101,7 +1108,6 @@ class World:
             r = min(r, lobe)
             if lobe < st.radius and b.mass > st.mass:
                 st.tide = b
-        lo = max(2.0, config.STAR_RING_MIN * st.size)
         r = min(max(r, lo), max(lo, config.STAR_RING_MAX * st.radius))
         st.ring = min(r, st.ring + config.STAR_RING_GROWTH) if grow else r
 
@@ -1115,7 +1121,9 @@ class World:
         """Move each star as a whole at its velocity - the momentum of its body (the particles packed together, not
         loose matter it has captured) over its mass, as this tick's forces left it: once it has gone half a cell, all
         its particles are carried a cell (kernels.star_shift), so they travel together however fast it goes; loose
-        ones make up the difference to their own velocity themselves. Returns how far each was carried."""
+        ones make up the difference to their own velocity themselves. Turning space round a super well carries a star
+        as a whole too, turning its particles' velocities with it (so it isn't torn apart particle by particle).
+        Returns how far each was carried."""
         motion = np.zeros((len(self.stars), 6))
         kernels.star_motion(np.array([(st.x, st.y, st.ring + 2.0) for st in self.stars], np.float64), self.w, self.h,
                             self.mass, self.kin, self.owner, motion, self.wrap)
@@ -1127,8 +1135,17 @@ class World:
         carried = []
         push = np.zeros(2)
         for k, st in enumerate(self.stars):
-            st.ox += st.vx
-            st.oy += st.vy
+            turn, fx, fy = self.frame_turn(st.x, st.y)
+            if turn:
+                c, sn = math.cos(turn), math.sin(turn)
+                st.vx, st.vy = c * st.vx - sn * st.vy, sn * st.vx + c * st.vy
+                xs, ys, _, _ = self._disk_cells(st.x, st.y, st.ring + 2.0)
+                idx = ys * self.w + xs
+                idx = idx[self.owner[idx] == k + 1]
+                vx, vy = self.kin[idx, 0].copy(), self.kin[idx, 1].copy()
+                self.kin[idx, 0], self.kin[idx, 1] = c * vx - sn * vy, sn * vx + c * vy
+            st.ox += st.vx + fx
+            st.oy += st.vy + fy
             cx, cy = 0, 0
             push[:] = 0.0
             for _ in range(config.MAX_STEPS):
@@ -1486,8 +1503,9 @@ class World:
         for wl in wells:
             if wl is self.held:
                 continue
-            wl.x += wl.vx
-            wl.y += wl.vy
+            cx, cy = self._carry(wl) if wl.sign > 0 else (0.0, 0.0)   # a repulsor stays put
+            wl.x += wl.vx + cx
+            wl.y += wl.vy + cy
             if self.wrap:
                 wl.x %= self.w
                 wl.y %= self.h
@@ -1560,9 +1578,13 @@ class World:
         self.remove_well(wl)
         rng = self.rng
         r0 = max(wl.core() + 1.0, 2.0)
-        reach = max(min(config.SUPER_BLAST_RADIUS, 0.45 * min(self.w, self.h)), r0 + 5.0)
+        f = self.blast_scale(wl.mass)
+        reach = max(min(config.SUPER_BLAST_RADIUS * f, 0.45 * min(self.w, self.h)), r0 + 5.0)
         self.blast_serial += 1
-        blast = Blast(wl.x, wl.y, r0, reach, self.blast_serial)
+        drag = min(0.5, config.SUPER_BLAST_DRAG / f)
+        blast = Blast(wl.x, wl.y, r0, reach, self.blast_serial, min(config.SUPER_BLAST_SPEED * math.sqrt(f),
+                      0.95 * config.VMAX), config.SUPER_BLAST_PUSH * config.SUPER_BLAST_DRAG / drag, drag,
+                      settle=round(config.SUPER_BLAST_SETTLE * f))
         self.blasts.append(blast)
         n = max(1, round(wl.mass / config.SUPER_BLAST_HOT_MASS))
         masses = self._split_mass(wl.mass, n)
@@ -1574,6 +1596,14 @@ class World:
                         wl.vy + s * np.sin(a), tag=blast.tag)
         self.explosions += 1
         self.calm_until = self.tick_count + config.SUPER_EXPLODE_CALM
+
+    @staticmethod
+    def blast_scale(mass):
+        """How much bigger a supernova of this mass is than one of SUPER_BLAST_REF_MASS: sqrt(mass / that), so the
+        area it clears grows with its mass and the debris spread over it is as thin whatever the mass. Its radius
+        and how far it shoves things grow by this, its front's speed by its square root (at most 0.95 VMAX), and
+        it damps what it shoved this many times more gently for this many times longer."""
+        return math.sqrt(max(mass, 1.0) / config.SUPER_BLAST_REF_MASS)
 
     def _step_blasts(self):
         """Sweep each shock front on: it shoves the particles it passes outwards, and damps the outward motion of
@@ -1600,7 +1630,7 @@ class World:
                                    self.w, self.h, self.mass, self.kin, self.stamp, self.flag, self.solid, self.wrap)
                 b.settled += 1
             b.r = r_new
-        self.blasts = [b for b in self.blasts if b.settled < (b.blow if b.wind else config.SUPER_BLAST_SETTLE)]
+        self.blasts = [b for b in self.blasts if b.settled < (b.blow if b.wind else b.settle)]
 
     def _cool_blasts(self):
         """Blast debris (ghosts tagged with their blast's number) expands with its front while the blast lasts, each
@@ -1663,13 +1693,13 @@ class World:
 
     def whirl_omega(self, wl):
         """How fast a super well's whirlpool carries matter round (rad/tick, > 0 clockwise), SUPER_SPIN_ARMS_AT of the
-        way out to its dotted circle: the speed its whirl drives things towards there (kernels.whirl), never over
+        way out to its faint circle: the speed its whirl drives things towards there (kernels.whirl), never over
         VMAX. Its spiral arms turn at this."""
         reach = self.well_range(wl)
         d = max(config.SUPER_SPIN_ARMS_AT * reach, 1.0)
         _, target, _ = kernels.whirl(d, 0.0, 0.0, 0.0, reach, wl.spin, self.g_scale * wl.pull(), self.softening(wl),
                                      config.SUPER_SWIRL_SPEED, 1.0, config.SUPER_SWIRL_INFALL, config.SUPER_SWIRL_EDGE,
-                                     self.kinv)
+                                     self.kinv, self.horizon(wl), -1e9)          # (the speed it drives towards)
         return math.copysign(min(abs(target), config.VMAX), target) / d
 
     def set_spin_follows_mass(self, on):
@@ -1703,8 +1733,9 @@ class World:
                 if speed > config.VMAX:
                     sp.vx *= config.VMAX / speed
                     sp.vy *= config.VMAX / speed
-                sp.x += sp.vx
-                sp.y += sp.vy
+                cx, cy = self._carry(sp)
+                sp.x += sp.vx + cx
+                sp.y += sp.vy + cy
                 if self.wrap:
                     sp.x %= self.w
                     sp.y %= self.h
@@ -2083,9 +2114,51 @@ class World:
                                  drag, wind=True, blow=max(0, round(config.SUPER_MERGE_SHOCK_TICKS - run)), source=wl))
 
     def whirls(self):
-        """Each super well's whirlpool for the step kernel: rows of x, y, range, spin, pull strength, softening."""
-        return np.array([(wl.x, wl.y, self.well_range(wl), wl.spin, self.g_scale * wl.pull(), self.softening(wl))
-                         for wl in self.wells if wl.is_super], np.float64).reshape(-1, 6)
+        """Each super well's whirlpool and the space it turns, for the step kernel: rows of x, y, range, spin, pull
+        strength, softening, the share of circling speed space turns at there (signed by its spin: drag_share), how
+        far that reaches, and its point of no return (horizon)."""
+        return np.array([(wl.x, wl.y, self.well_range(wl), wl.spin, self.g_scale * wl.pull(), self.softening(wl),
+                          self.drag_share(wl), self.reach(wl), self.horizon(wl))
+                         for wl in self.wells if wl.is_super], np.float64).reshape(-1, 9)
+
+    def drag_share(self, wl):
+        """The share of the angular speed of something circling it that a super well turns space round at (signed: >
+        0 clockwise), rising with its spin (SUPER_DRAG): see kernels.frame_turn."""
+        return math.copysign(min(config.SUPER_DRAG * abs(wl.spin), config.SUPER_DRAG_MAX), wl.spin) if wl.spin else 0.0
+
+    def horizon(self, wl):
+        """A super well's point of no return (cells from its centre; the dotted circle): where the speed it takes to
+        escape its pull reaches VMAX, the most anything can move, so whatever leaves it is pulled back - it orbits or
+        falls in - and its whirlpool only flings matter out within it. Its core when even its centre is shallower than
+        that (a light super well can't hold back something at top speed anywhere outside its core)."""
+        return horizon_for(self.g_scale * wl.pull(), self.softening(wl), self.kinv, wl.core())
+
+    def frame_turn(self, x, y, body=None):
+        """How the super wells' turning space carries a body at (x, y) this tick: (how far it turns in all, how far it
+        is carried along x and y). Not a super well (they only drag each other when spiralling in: _inspiral)."""
+        turn = cx = cy = 0.0
+        if getattr(body, "is_super", False):
+            return turn, cx, cy
+        for wl in self.wells:
+            if wl.is_super and wl.spin:
+                dx, dy = self.delta(wl.x, wl.y, x, y)
+                om = kernels.frame_turn(dx, dy, self.drag_share(wl), self.reach(wl), self.g_scale * wl.pull(),
+                                        self.softening(wl), self.kinv, config.SUPER_DRAG_EDGE,
+                                        config.SUPER_DRAG_TURN_MAX, config.VMAX, self.well_range(wl),
+                                        config.SUPER_SWIRL_EDGE)
+                if om:
+                    ex, ey = kernels.frame_carry(dx, dy, om)
+                    turn, cx, cy = turn + om, cx + ex, cy + ey
+        return turn, cx, cy
+
+    def _carry(self, b):
+        """Turning space carries a well, spawner or ghost star b this tick: turns its velocity and returns how far it
+        moves it (see frame_turn)."""
+        turn, cx, cy = self.frame_turn(b.x, b.y, b)
+        if turn:
+            c, s = math.cos(turn), math.sin(turn)
+            b.vx, b.vy = c * b.vx - s * b.vy, s * b.vx + c * b.vy
+        return cx, cy
 
     def _whirl_accel(self, body, x, y, vx, vy):
         """The super wells' whirlpools on a well or spawner at (x, y). Not on a super well: one is only inside another's
@@ -2096,9 +2169,12 @@ class World:
         for wl in self.wells:
             if wl.is_super:
                 dx, dy = self.delta(wl.x, wl.y, x, y)
-                wx, wy, _ = kernels.whirl(dx, dy, vx, vy, self.well_range(wl), wl.spin, self.g_scale * wl.pull(),
-                                          self.softening(wl), config.SUPER_SWIRL_SPEED, config.SUPER_SWIRL_GRIP,
-                                          config.SUPER_SWIRL_INFALL, config.SUPER_SWIRL_EDGE, self.kinv)
+                strength, soft = self.g_scale * wl.pull(), self.softening(wl)
+                phi = kernels._pull(-dx, -dy, strength, soft, self.kinv)[2]
+                wx, wy, _ = kernels.whirl(dx, dy, vx, vy, self.well_range(wl), wl.spin, strength, soft,
+                                          config.SUPER_SWIRL_SPEED, config.SUPER_SWIRL_GRIP,
+                                          config.SUPER_SWIRL_INFALL, config.SUPER_SWIRL_EDGE, self.kinv,
+                                          self.horizon(wl), phi)
                 ax += wx
                 ay += wy
         return ax, ay
@@ -2847,15 +2923,55 @@ class World:
         self.wake_all()
 
     def scale_orbit(self, factor):
-        self.orbit_speed *= factor
-        self._mark_rim()
-        self.wake_all()
+        self._retune_orbit(self.orbit_speed * factor)
 
     def set_orbit_edge_speed(self, speed):
         """Turn the global orbit so the edge of the universe moves at `speed` cells/tick."""
-        self.orbit_speed = self.orbit_speed_for(speed)
+        self._retune_orbit(self.orbit_speed_for(speed))
+
+    def _retune_orbit(self, speed):
+        """Set the global orbit's angular speed (rad/tick). With the orbit on, everything moving - particles, ghosts,
+        stars, wells, spawners and stars still arriving - has its motion round the centre scaled at once by how much
+        faster (or slower) the orbit's flow now is where it is, so the whole universe turns faster or slower together
+        and keeps its structure, instead of keeping its old momentum and only slowly being dragged to the new speed
+        (ORBIT_GRIP). Scaling (rather than adding the flow's change) never turns matter that lags the flow - most of
+        it, held by gravity - backwards when the orbit slows, and slowing by as much as it was sped up undoes it."""
+        old = self.orbit * self.orbit_speed
+        self.orbit_speed = speed
+        new = self.orbit * self.orbit_speed
+        if new != old:
+            self._rescale_orbit(old, new)
         self._mark_rim()
         self.wake_all()
+
+    def _orbit_rescaled(self, x, y, vx, vy, old, new):
+        """Velocities (vx, vy) at (x, y) - arrays, in cells - with their motion round the centre (in the orbit's
+        direction) scaled by the orbit's flow speed there (kernels.orbit_flow) at angular speed `new` over `old`;
+        motion in or out is left alone."""
+        rx, ry = np.asarray(x, np.float64) - self.w / 2, np.asarray(y, np.float64) - self.h / 2
+        r2 = rx * rx + ry * ry
+        r = np.sqrt(np.maximum(r2, 1e-18))
+        vmin2 = config.ORBIT_MIN_SPEED ** 2
+        f = np.sqrt(new * new * r2 + vmin2) / np.sqrt(old * old * r2 + vmin2)
+        f = np.where(r2 < 0.25, 1.0, f)              # the flow is nothing right at the centre (as orbit_flow)
+        tx, ty = -ry / r, rx / r                     # either way round: scaling the component is the same
+        vx, vy = np.asarray(vx, np.float64), np.asarray(vy, np.float64)
+        dv = (f - 1.0) * (vx * tx + vy * ty)
+        return vx + dv * tx, vy + dv * ty
+
+    def _rescale_orbit(self, old, new):
+        """Scale everything that moves to the orbit's new speed (see _retune_orbit)."""
+        idx = np.flatnonzero(self.mass > 0)
+        if idx.size:
+            ys, xs = np.divmod(idx, self.w)
+            vx, vy = self._orbit_rescaled(xs, ys, self.kin[idx, 0], self.kin[idx, 1], old, new)
+            self.kin[idx, 0], self.kin[idx, 1] = vx, vy
+        if self.ghost_x.size:
+            self.ghost_vx, self.ghost_vy = self._orbit_rescaled(self.ghost_x, self.ghost_y, self.ghost_vx,
+                                                                self.ghost_vy, old, new)
+        for b in [*self.stars, *self.wells, *self.ghost_stars, *(sp for sp in self.spawners if not sp.locked)]:
+            vx, vy = self._orbit_rescaled(b.x, b.y, b.vx, b.vy, old, new)
+            b.vx, b.vy = float(vx), float(vy)
 
     def set_gravity(self, gdir):
         self.gdir = gdir

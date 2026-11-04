@@ -902,7 +902,37 @@ def test_whirlpool_is_strong_through_its_range_and_stops_at_the_edge():
     inner_v = w.kin[idx[np.argmin(x)], 1]            # right of the centre, clockwise = moving down
     outer_v = w.kin[idx[np.argmax(x)], 1]
     assert inner_v > 0.5                             # whirled hard three quarters of the way out
-    assert abs(outer_v) < 0.05                       # outside the dotted circle only gravity acts
+    outer = idx[np.argmax(x)]
+    pull = np.hypot(*kernels._pull(sw.x - outer % w.w, sw.y - outer // w.w, w.g_scale * sw.pull(), w.softening(sw),
+                                   w.kinv)[:2])
+    # outside the dotted circle the whirlpool doesn't speed it up: only gravity does (turning space turns which way
+    # it heads, never how fast)
+    assert abs(np.hypot(*w.kin[outer, :2]) - 2 * pull) < 0.05 * 2 * pull
+
+
+def test_spinning_super_well_drags_space_round_beyond_its_range():
+    """Outside the dotted circle, out to its reach, a spinning super well turns space itself round (frame dragging):
+    something dropped there at rest is carried round the way it spins as it falls, instead of falling straight in,
+    and isn't sped up; with no spin it falls straight."""
+    ys, missed = {}, {}
+    for spin in (1.0, 0.0):
+        w = make_world(pw=600, ph=600)
+        w.merge_on = w.split_on = w.collapse_on = False
+        sw = w.add_super_well(300, 300, 1000000)
+        sw.spin = spin
+        w.held = sw
+        w.rebuild_field()
+        r = 1.5 * w.well_range(sw)
+        assert (w.frame_turn(sw.x + r, sw.y)[0] > 0) == (spin > 0)
+        w.place_many([round(sw.x + r)], [round(sw.y)], [1])
+        run(w, 5)
+        idx = np.nonzero(w.mass)[0]
+        ys[spin] = idx[0] // w.w - sw.y
+        run(w, 7)
+        missed[spin] = np.count_nonzero(w.mass) == 1
+    assert ys[1.0] >= 4                              # right of the centre, clockwise = carried down
+    assert ys[0.0] == 0                              # straight in ...
+    assert missed[1.0] and not missed[0.0]           # ... and swallowed, where carried round it misses the core
 
 
 def test_clump_inside_whirlpool_keeps_turning():
@@ -1000,7 +1030,8 @@ def test_explosion_ring_starts_at_the_well_and_the_blast_pushes_particles_away()
     run(w, 40)
     assert w.ghost_count() > 0                       # the debris is still flying...
     assert dust(40) < 0.1 * start                    # ...and the nearby dust has been shoved back out of the way
-    assert dust(config.SUPER_BLAST_RADIUS * 1.2) > 0.3 * dust(1e9)    # and not just thrown away
+    reach = config.SUPER_BLAST_RADIUS * w.blast_scale(config.SUPER_EXPLODE_MASS + 10)
+    assert dust(reach * 1.2) > 0.3 * dust(1e9)       # and not just thrown away
     run(w, 160)
     assert w.ghost_count() == 0                      # the debris has landed, spread over the swept area
     assert dust(40) > 0.5 * start
@@ -1020,8 +1051,9 @@ def test_blast_debris_lands_where_it_comes_to_rest():
     # the debris is spread over the blast area rather than piled on its rim: its particles fill the inside too
     yy, xx = np.nonzero(w.mass.reshape(w.h, w.w) > 4)  # debris pieces are heavier than the dust
     r = np.hypot(xx - 300, yy - 200)
-    assert np.mean(r < 0.5 * config.SUPER_BLAST_RADIUS) > 0.15
-    assert np.mean(r > 1.1 * config.SUPER_BLAST_RADIUS) < 0.02   # nothing thrown far out to find room
+    reach = min(config.SUPER_BLAST_RADIUS * w.blast_scale(config.SUPER_EXPLODE_MASS + 10), 0.45 * min(w.w, w.h))
+    assert np.mean(r < 0.5 * reach) > 0.15
+    assert np.mean(r > 1.1 * reach) < 0.02           # nothing thrown far out to find room
 
 
 def test_ghosts_pass_through_particles_and_land_after_their_time():

@@ -64,6 +64,32 @@ def reach_for(strength, accel, kinv):
     return 0.5 * (lo + hi)
 
 
+@functools.lru_cache(maxsize=4096)
+def horizon_for(strength, soft, kinv, core, vmax=None):
+    """How far out (cells) the speed it takes to escape a pull of `strength` softened over `soft` reaches vmax
+    (default VMAX): its potential there is - vmax^2 / 2 (kernels._pull's, which is what that pull climbs out of).
+    Nothing inside can get away. Never less than `core`; just `core` when even the centre is shallower."""
+    from . import config
+    depth = 0.5 * (vmax if vmax is not None else config.VMAX) ** 2
+
+    def deep(r):
+        rho = math.sqrt(r * r + soft * soft)
+        return strength / rho * kernels.fade(rho, kinv)[1] > depth
+
+    if strength <= 0.0 or not deep(0.0):
+        return core
+    lo, hi = 0.0, max(math.sqrt(strength / depth * 2.0), soft) + 1.0
+    while deep(hi):
+        hi *= 2.0
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if deep(mid):
+            lo = mid
+        else:
+            hi = mid
+    return max(core, 0.5 * (lo + hi))
+
+
 def external_field(w, h, wells, gvec, wrap=False, kinv=0.0, gpu=None, key=None):
     """Acceleration (fx, fy) and potential phi for every cell, as flat float32 arrays.
 

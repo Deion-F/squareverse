@@ -130,20 +130,33 @@ widget kit in `sv/ui.py`.
   of one particle mass (like the cloud preset) can't form stars, since nothing is layered.
 * **Super wells:** B places one (as heavy as a brush-sized well, and never lighter than the collapse threshold). It
   is a tiny black core that deletes every particle, repulsor and super well touching it and adds their mass to its own. Its pull
-  grows with that mass and follows the same law as every other mass, fading with distance (see Gravity reach). Inside its dotted circle it
+  grows with that mass and follows the same law as every other mass, fading with distance (see Gravity reach). Inside its faint circle (the whirlpool's range, drawn solid and dim in `SUPER_WHIRL_COLOR`) it
   whirls everything round the way it spins (`SUPER_SWIRL_*`), at full strength right out to the circle (it fades in
   only over the outer 15%). Nothing inside sleeps or rests on friction, so matter keeps circling unless other
   matter blocks its way, and spirals in over several turns. Its spiral arms show which way it spins, turning faster and brighter the faster it
   spins. `;` / `'` spin the nearest super well slower / faster (up to `SUPER_SPIN_MAX`, 7). One placed with B starts at spin 1.5
   (`SUPER_SPIN_PLACED`), and one formed by collapse at 1.5 (`SUPER_SPIN_NATURAL`). A new one spins the same way as the
   global orbit when that is on, and either way at random when it is off. Above spin 1 it whirls
-  matter faster than it would orbit and flings it out into a ring instead of drawing it in: spin makes no difference
+  matter faster than it would orbit and flings it out into a ring instead of drawing it in, but only inside its dotted
+  circle, the point of no return (`World.horizon`, `gravity.horizon_for`): the radius where the speed needed to escape
+  its pull reaches `VMAX` (8 cells/tick), so whatever leaves it is pulled back (it orbits or falls in). Outside that
+  the whirlpool only draws matter in, and it never leaves anything with enough energy to escape the well
+  (`WHIRL_BOUND` in `sv/kernels.py`), so nothing it whirls is thrown out for good. A light super well (a fresh collapse
+  at about 66,000–80,000 mass) has no point of no return outside its core, so no dotted circle is drawn; with the
+  default tuning about 500,000 mass gives about 7 cells, 1M about 22, 4M about 68 and 10M about 98. Spin makes no difference
   to how fast a well feeds up to 1, 1.5 slows it a little, 3 roughly halves it and 5 cuts it to a third. With
   "Spin rises with mass" on (`SUPER_SPIN_FOLLOWS_MASS`, on by default since 2026-11: a well eats much of what it
   captures while small, and its rising spin keeps a heavy one from running away) a new well's spin climbs in a straight line
   with its mass from 1.5 to 3 at the supernova mass (`SUPER_SPIN_FULL`), so it feeds ever more slowly as it grows.
   In tests on the disk that gave fewer explosions (about a third as many) but none set off by a neighbour's blast,
-  and more regular lifetimes. Setting a well's spin by hand stops it following its mass. When two super wells' dotted circles overlap, they fall into
+  and more regular lifetimes. Setting a well's spin by hand stops it following its mass. **Frame dragging:** a spinning super well also turns space
+  itself round, from its faint circle out to its reach (4× the faint circle, where its pull drops to `SUPER_RANGE_ACCEL`),
+  at `SUPER_DRAG` (0.35) × its spin, at most `SUPER_DRAG_MAX` (0.7), of the local orbital angular speed, fading over the
+  outer `SUPER_DRAG_EDGE` (0.5) of the reach and capped at `SUPER_DRAG_TURN_MAX` (0.25 rad/tick) and `VMAX`.
+  Particles, ghosts (CPU and GPU), stars as wholes, solid wells, spawners and ghost stars there (not super wells) are
+  carried round with it, position and heading turned together, so nothing is sped up, but what falls in spirals in the
+  way the well spins instead of falling straight. Inside the faint circle the whirlpool takes over (blended across its
+  outer `SUPER_SWIRL_EDGE` share). Select a super well to read "no return N cells   whirlpool N   drags space N   spin ...". When two super wells' faint circles overlap, they fall into
   orbit round their common centre of mass (the lighter one swinging wider) and spiral in like a black hole binary
   (`World._spiral`). They circle ever faster: at 0.03 rad/tick when their circles just touch (`SUPER_INSPIRAL_SPIN`),
   then as Kepler's law has it (~ gap^−1.5), up to 0.35 rad/tick (`SUPER_INSPIRAL_SPIN_MAX`), never faster than
@@ -203,7 +216,7 @@ widget kit in `sv/ui.py`.
   up to `ZOOM_MAX`; middle drag or alt+drag pans; R goes back to 1× centred and shift+R fits the whole universe
   (also in the menu). This is a camera, not the square size: the simulation is unchanged, and zoomed out past a
   pixel per square the image is averaged. The brush and placed bodies keep their size in the universe.
-* **Global orbit:** O cycles off / clockwise / counterclockwise, and K / L make it slower / faster. It starts
+* **Global orbit:** O cycles off / clockwise / counterclockwise, and K / L make it slower / faster (changing it at once scales the motion round the centre of every moving thing - particles, ghosts, stars, wells, spawners and ghost stars - by how much faster or slower the flow is at that spot, so structures keep their shape and speeding up then slowing down undoes it: `World._retune_orbit`). It starts
   turning the edge of the window (half its shorter side out from the centre) at 3 cells/tick (`ORBIT_EDGE_SPEED`),
   whatever the window size or universe shape, and resizing keeps that speed. Everything,
   wells included, is brought round the centre of the universe, faster the further out it is and never slower than
@@ -221,14 +234,14 @@ widget kit in `sv/ui.py`.
   beyond 2 R), so escape speeds are lower too. Circular orbits are as stable as unfaded ones out to R, but not
   beyond about 1.16 R, where the pull falls faster than 1/r³ (anything there drifts in or out). In the taper a
   pull's tide is stronger than the plain one (it falls steeply: 1.6× at 1.5 R) and beyond it there is none, so stars
-  are only torn apart by what comes close. A super well's reach, and with it its dotted circle, is where its pull
+  are only torn apart by what comes close. A super well's reach, and with it its faint circle (`SUPER_RANGE_FACTOR` × the reach), is where its pull
   drops to `SUPER_RANGE_ACCEL`, so with gravity fading it can't be more than half of R across: at gravity strength
   1 and R = 20 the circle's radius is 8.9 cells for a 50,000 well, 9.7 for a 1M one and 9.9 for a 7.5M one (at R =
   60: 21, 28 and 29; reaching everywhere: 25, 112 and 306). Its softening stays what it would be unfaded, so close in
   it pulls as before. (Until 2026-11 the pull faded as (1 + d/R) e^(−d/R): never quite zero, already 74% at R, with
-  orbits stable out to 1.6 R and dotted circles that kept growing slowly with mass.)
+  orbits stable out to 1.6 R and circles that kept growing slowly with mass.)
 * **A star orbiting a super well** (found by testing, 2026-11; no other matter, cell size 2): a star has to orbit
-  outside the super well's dotted circle (inside it the whirlpool shears it apart), far enough out that the tide
+  outside the super well's faint circle (inside it the whirlpool shears it apart), far enough out that the tide
   doesn't strip it (a star of radius s, mass m holds against a well of mass M beyond roughly s × (3M / m)^(1/3)), and
   inside the gravity reach (1.16 × it at most; it was 1.6 × with the old fade). At a reach of 20 cells those can't all hold, so a star either falls through or is
   torn up. At 50–60 only tiny dense stars fit (pour 256 from a 6 px brush, 25–68 cells out round an 80,000 well),
@@ -241,7 +254,7 @@ widget kit in `sv/ui.py`.
   to the star's pull) so the two don't drift off together (`World.add_star(orbit=True)`); off, it starts at rest and
   just falls straight through. With the Star tool picked, a shaded green band round each super well shows where
   the star the brush and pour mass would place can orbit it (`World.orbit_band`, drawn by
-  `Renderer.draw_orbit_bands`): outside the dotted circle, far enough out that the star's own pull at its surface
+  `Renderer.draw_orbit_bands`): outside the faint circle, far enough out that the star's own pull at its surface
   is `ORBIT_BAND_HOLD` (6) × the tide across it (`ORBIT_BAND_HOLD_PER_SPEED` is 0: speed doesn't matter), and where
   the circular speed is at most `ORBIT_BAND_MAX_SPEED` (6 cells/tick), out to where the pull, fading, falls as steeply
   as 1/r^2.8 (`ORBIT_BAND_STABLE`), half the well's Hill radius against any other super well that reaches it (and 0.6 of
@@ -273,7 +286,7 @@ widget kit in `sv/ui.py`.
   * Gravity strength × 0.60 (the default; × 1.2 works too, with a faster orbit) and a reach of at least about 115
     cells (the default 120 holds stars 10 cells across 105–125 cells out with 90% of their mass for a minute;
     everywhere, all the way right, is what the measurements below were made at).
-  * The super well: B with **pour mass 1** and the default 40 px brush: 80,000 mass, dotted circle 22 cells. Up to
+  * The super well: B with **pour mass 1** and the default 40 px brush: 80,000 mass, faint circle 22 cells. Up to
     about 160,000 (pour mass 2) is fine. The default pour mass 16 makes a 1.3M well, whose tide tears a pour-16
     star apart wherever an orbit fits in the universe.
   * The star: G with pour mass 16 and the default brush: about 6,900 mass, 20 cells across in radius at first,
@@ -462,13 +475,13 @@ Tunables are in `sv/config.py`.
   collapses into a super well, so a disk scene evolves faster than it did with solid stars.
 * The heavy disk collapses into 10–25 super wells within a few hundred ticks (its density is far over the
   collapse threshold everywhere). From then on the wells grow mostly by merging, and a supernova's debris often
-  feeds a neighbour over the limit, setting off a chain. With gravity reaching 60 cells, no well's dotted circle
+  feeds a neighbour over the limit, setting off a chain. With gravity reaching 60 cells, no well's faint circle
   got past about 67 cells in tests (up to 244 with no fading), and in 4,000 ticks the disk went through 14–17
   supernovas (3–6 with no fading), about 210 collapses (50–110) and nearly 60 stars formed (7–16). Most of those
   stars are still torn apart, though: the disk holds about 220 mass per cell, against 16 in a placed star, so close
   to the disk its pull (about 2 cells/tick² at its edge) is 40× a star's own, and its tide wrecks a star within
   20 ticks however far gravity reaches. A star dense enough to resist that is over the collapse mass and becomes a
-  super well. Wells whose dotted circles don't overlap can settle in a stable arrangement and stop growing until
+  super well. Wells whose faint circles don't overlap can settle in a stable arrangement and stop growing until
   something disturbs them. A universe that heavy also costs more to run: about 15–35 ms a tick at 960×720 and 45–50 ms at
   1920×990 (2 px cells), against under 10 ms for a light one, since nothing inside a super well's circle sleeps.
 * Contacts between free particles lose momentum (that is the friction that lets piles settle), so after a perfectly

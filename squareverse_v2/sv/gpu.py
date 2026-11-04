@@ -208,7 +208,7 @@ fn orbit_accel(rx: f32, ry: f32, vx: f32, vy: f32, om: f32, grip: f32, vmin: f32
     return vec2<f32>(-c * rx / r + grip * (target_ * tx - vx), -c * ry / r + grip * (target_ * ty - vy));
 }
 
-fn whirl(rx: f32, ry: f32, vx: f32, vy: f32, o: i32, kinv: f32) -> vec2<f32> {
+fn whirl(rx: f32, ry: f32, vx: f32, vy: f32, o: i32, kinv: f32, phi: f32) -> vec2<f32> {
     let reach = aux[o + 2]; let spin = aux[o + 3]; let strength = aux[o + 4]; let soft = aux[o + 5];
     let d2 = rx * rx + ry * ry;
     if (d2 >= reach * reach || d2 < 1e-6) { return vec2<f32>(0.0); }
@@ -216,11 +216,34 @@ fn whirl(rx: f32, ry: f32, vx: f32, vy: f32, o: i32, kinv: f32) -> vec2<f32> {
     let rim = min(1.0, (1.0 - d / reach) / max(gp[15], 1e-9));
     let s2 = d2 + soft * soft;
     let orbital = sqrt(strength * d2 / (s2 * sqrt(s2)) * fade(sqrt(s2), kinv).x);
-    let target_ = min(abs(spin) * gp[12], gp[14] * orbital * max(1.0, abs(spin))) * rim
-                  * select(-1.0, 1.0, spin >= 0.0);
+    let fling = select(1.0, max(1.0, abs(spin)), d < aux[o + 8]);   // it only flings within its point of no return
+    let target_ = min(abs(spin) * gp[12], gp[14] * orbital * fling) * rim * select(-1.0, 1.0, spin >= 0.0);
     let tx = -ry / d; let ty = rx / d;
-    let a = gp[13] * rim * (target_ - (vx * tx + vy * ty));
+    let vt = vx * tx + vy * ty;
+    var a = gp[13] * rim * (target_ - vt);
+    let nvt = vt + a;
+    if (nvt * nvt > vt * vt) {                   // speeding it up: never so far it could get away (kernels.whirl)
+        let room = -2.0 * (phi + gp[33]) - (vx * vx + vy * vy - vt * vt);
+        if (room <= vt * vt) { a = 0.0; }
+        else if (nvt * nvt > room) { a = sqrt(room) * select(-1.0, 1.0, nvt >= 0.0) - vt; }
+    }
     return vec2<f32>(a * tx, a * ty);
+}
+
+// kernels.frame_turn: how fast a super well turns space round here (rad/tick)
+fn frame_turn(rx: f32, ry: f32, o: i32, kinv: f32, vmax: f32) -> f32 {
+    let share = aux[o + 6]; let reach = aux[o + 7]; let strength = aux[o + 4]; let soft = aux[o + 5];
+    let d2 = rx * rx + ry * ry;
+    if (share == 0.0 || d2 >= reach * reach) { return 0.0; }
+    let s2 = d2 + soft * soft;
+    let rho = sqrt(s2);
+    let d = sqrt(d2);
+    let band = aux[o + 2] * gp[15];             // the whirlpool takes over within its range
+    let om = share * sqrt(strength / (s2 * rho) * fade(rho, kinv).x)
+             * min(1.0, (1.0 - d / reach) / max(gp[31], 1e-9))
+             * clamp((d - aux[o + 2] + band) / max(band, 1e-9), 0.0, 1.0);
+    let cap = select(vmax / d, gp[32], d * gp[32] <= vmax);
+    return clamp(om, -cap, cap);
 }
 
 fn star_pull(x: f32, y: f32, w: f32, h: f32, wrap: bool, kinv: f32) -> vec2<f32> {
@@ -279,28 +302,43 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     if (gp[7] != 0.0) {
         a += orbit_accel(g.x - gp[10], g.y - gp[11], g.z, g.w, gp[7], gp[8], gp[9]);
     }
-    for (var j = 0; j < i32(gp[19]); j++) {      // each super well's exact pull and whirlpool
-        let o = i32(gp[27]) + j * 6;
+    var turn = 0.0; var carry = vec2<f32>(0.0);
+    for (var j = 0; j < i32(gp[19]); j++) {      // each super well's exact pull and whirlpool, and the space it turns
+        let o = i32(gp[27]) + j * 9;
         let rx = axis(g.x, aux[o], w, wrap); let ry = axis(g.y, aux[o + 1], h, wrap);
-        a += pull(-rx, -ry, aux[o + 4], aux[o + 5], kinv).xy + whirl(rx, ry, g.z, g.w, o, kinv);
+        let p = pull(-rx, -ry, aux[o + 4], aux[o + 5], kinv);
+        a += p.xy + whirl(rx, ry, g.z, g.w, o, kinv, p.z);
+        let om = frame_turn(rx, ry, o, kinv, vmax);
+        if (om != 0.0) {
+            let c = cos(om); let s = sin(om);
+            carry += vec2<f32>(c * rx - s * ry - rx, s * rx + c * ry - ry);
+            turn += om;
+        }
     }
     if (gp[20] > 0.0) {
         a += star_pull(g.x, g.y, w, h, wrap, kinv);
     }
     var vx = (g.z + a.x) * (1.0 - drag);
     var vy = (g.w + a.y) * (1.0 - drag);
+    if (turn != 0.0) {                           // turning space turns which way it is heading too
+        let tc = cos(turn); let ts = sin(turn);
+        let tvx = tc * vx - ts * vy;
+        vy = ts * vx + tc * vy;
+        vx = tvx;
+    }
     var v = sqrt(vx * vx + vy * vy);
     if (v > vmax) {
         vx *= vmax / v;
         vy *= vmax / v;
         v = vmax;
     }
-    // move in steps of at most one cell, so a fast ghost can't jump over a small core
-    let n = max(1, i32(ceil(v)));
+    // move in steps of at most one cell, so a fast ghost can't jump over a small core - its own motion and space
+    // carrying it
+    let n = max(1, i32(ceil(length(vec2<f32>(vx, vy) + carry))));
     var x = g.x; var y = g.y;
     for (var s = 0; s < n; s++) {
-        x = x + vx / f32(n);
-        y = y + vy / f32(n);
+        x = x + (vx + carry.x) / f32(n);
+        y = y + (vy + carry.y) / f32(n);
         if (wrap) {
             x = pmod(x, w);
             y = pmod(y, h);
@@ -429,7 +467,7 @@ class Gpu:
                        P[k.P_WHIRL_GRIP], P[k.P_WHIRL_INFALL], P[k.P_WHIRL_EDGE], P[k.P_REACH],
                        sg_block, sg_w, whirls.shape[0], stars.shape[0], s_block, s_cw, s_ch, n,
                        nsg, 2 * nsg, 2 * nsg + 2 * nsf, 2 * nsg + 2 * nsf + whirls.size, P[k.P_SG_COS],
-                       P[k.P_SG_SIN]], np.float32)
+                       P[k.P_SG_SIN], P[k.P_DRAG_EDGE], P[k.P_DRAG_TURN], k.WHIRL_BOUND], np.float32)
         state = np.empty((n, 4), np.float32)
         state[:, 0], state[:, 1], state[:, 2], state[:, 3] = gx, gy, gvx, gvy
         bufs = [self._upload("gp", gp), self._upload("aux", aux), self.bufs["fx"], self.bufs["fy"],

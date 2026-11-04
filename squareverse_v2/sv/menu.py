@@ -131,15 +131,19 @@ INFO = {
                  "one blowing up rarely sets off its neighbours at once. Setting a well's spin by hand stops it "
                  "following its mass. Turning this off sets every super well back to {}.".format(
                      config.SUPER_SPIN_PLACED, config.SUPER_SPIN_FULL, config.SUPER_SPIN_PLACED),
-    "spin": "How fast the super well whirls the space inside its dotted circle round. Above 1 it whirls matter "
-            "faster than it would orbit and flings it out into a ring instead of drawing it in. Keys: ; / '.",
+    "spin": "How fast the super well whirls the space inside its faint circle round. Above 1 it whirls matter "
+            "faster than it would orbit and flings it out - but only inside its dotted circle, the point of no "
+            "return, where escaping would take more than the top speed: what is flung can't get away and comes back "
+            "to orbit or fall in. (A light super well has none outside its core.) Out to 4 times the faint circle, "
+            "as far as its pull reaches, it drags space itself round the same way, faster the faster it spins, so "
+            "whatever falls in spirals in instead of falling straight. Keys: ; / '.",
     "ghost_stars": "A placed star arrives as a ghost star: its particles fly together through everything, feeling "
                    f"gravity, for {config.GHOST_TICKS} ticks, then land as a star where it got to (any of its "
                    "particles whose cell is taken land nearby as ordinary particles). Shift+click with the Star tool "
                    "always places one; with this on, so do a click and G.",
     "orbit_stars": "A placed star sets off on a circular orbit round the super well pulling hardest on it, the way "
                    "that well spins, and the well takes the opposite push so the two don't drift off together. To "
-                   "last, put it outside the dotted circle (inside, the whirlpool tears it up) and far enough out "
+                   "last, put it outside the faint circle (inside, the whirlpool tears it up) and far enough out "
                    "that the tide doesn't strip it (heavier wells need smaller, denser stars; wells over about 5M "
                    "can't hold any at the default reach): a pour-16 star from a 20 px brush holds 114-135 cells from an 80,000 "
                    "well (B at pour mass 1). Off: it starts at rest. With the Star tool picked, a green band round "

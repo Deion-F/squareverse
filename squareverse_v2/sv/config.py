@@ -45,6 +45,7 @@ REPULSOR_COLOR = (90, 200, 255)
 STAR_COLORS = ((255, 95, 45), (255, 180, 60), (255, 236, 170), (160, 195, 255))   # light -> very heavy stars
 STAR_COLOR_MASS = (3.0, 6.0)           # log10 of the star masses at the two ends of STAR_COLORS
 STAR_RING_FADE = 0.3                   # a star's capture ring is drawn this bright over the background
+STAR_REACH_FADE = 0.3                  # where a tide cuts it down, the uncut ring is dotted this bright round it
 STAR_GLOW = 0.55                       # brightness of a solid well's corona at its surface...
 STAR_GLOW_SIZE = 2.2                   # ...fading out at this x its radius
 SPAWNER_COLOR = (120, 220, 150)
@@ -164,7 +165,7 @@ STAR_PLACE_LAYERS = ((0.4, 8.0), (0.7, 3.0), (1.0, 1.0))   # a placed star's par
                                        #   its envelope: its core is made of pour-mass particles, the middle 3/8 and
                                        #   the envelope 1/8 of that (at least 1)
 ORBIT_BAND_HOLD = 6.0                  # the Star tool shows round each super well where the star it would place can
-ORBIT_BAND_HOLD_PER_SPEED = 0.0        #   orbit: outside the dotted circle, beyond where its own pull at its surface is
+ORBIT_BAND_HOLD_PER_SPEED = 0.0        #   orbit: outside the whirlpool's faint circle, beyond where its own pull at its surface is
                                        #   (this + this x the circular speed) x the tide across it - with star damping
                                        #   and the normal force that no longer cancels a star's pull against a tide
                                        #   (2026-11), dense stars 90-130 cells out round
@@ -244,7 +245,7 @@ STAR_COLLAPSE_RANGE = (1.0, 20.0)      #   star becomes a super well only if thi
                                        #   must be (the menu's Stars collapse at, between these)
 STAR_COLLAPSE_WARN = 0.7               # the Star tool's brush turns amber when its star would hold this share of that
 SUPER_RANGE_ACCEL = 0.01               # a well's reach: where its pull drops below this
-SUPER_RANGE_FACTOR = 0.25              # a super well's range (the dotted circle) is this x its reach: it spins
+SUPER_RANGE_FACTOR = 0.25              # a super well's range (the faint circle) is this x its reach: it spins
                                        #   space round within it, and overlapping ranges merge. Its pull goes on
 SUPER_SOFTENING = 0.25                 # its pull is softened over this share of its range (as it would be if
                                        #   gravity reached all the way: GRAVITY_REACH), so infalling particles
@@ -258,6 +259,16 @@ SUPER_SWIRL_EDGE = 0.15                #   out, fading in only over this outer s
 SUPER_SWIRL_INFALL = 0.98              # ...but never faster than this share of the speed that would hold it in
                                        #   orbit there (x its spin above 1), so whirling matter still spirals in;
                                        #   a well spun up past 1 flings matter out into a ring instead
+SUPER_DRAG = 0.35                      # a spinning super well drags space itself round (frame dragging), out to its
+SUPER_DRAG_MAX = 0.7                   #   reach (where its pull drops to SUPER_RANGE_ACCEL): space there turns at
+SUPER_DRAG_EDGE = 0.5                  #   this x its spin (at most SUPER_DRAG_MAX) of the angular speed something
+SUPER_DRAG_TURN_MAX = 0.25             #   circling there has, fading out over this outer share of the reach, never
+                                       #   faster than this (rad/tick) nor carrying anything faster than VMAX.
+                                       #   Everything in it is carried round - where it is and which way it is
+                                       #   heading, turned together - so nothing is sped up, but what falls in
+                                       #   spirals in the way the well spins instead of falling straight. Within
+                                       #   its range its whirlpool takes over (across SUPER_SWIRL_EDGE)
+SUPER_WHIRL_COLOR = (90, 80, 120)     # its whirlpool's range (a faint circle; its point of no return is dotted)
 SUPER_SPIN_NATURAL = 1.5               # spin of a super well formed by collapse (which way: see SUPER_SPIN_PLACED)
 SUPER_SPIN_MAX = 7.0                   # ; / ' spin the nearest super well down / up by SUPER_SPIN_STEP, up to this
 SUPER_SPIN_PLACED = 1.5                # spin of a super well placed with B; new ones spin with the global orbit,
@@ -268,7 +279,7 @@ SUPER_SPIN_FULL = 3.0                 #   starting spin to this at SUPER_EXPLODE
                                       #   it flings matter out instead of feeding, so it grows steadily (setting
                                       #   its spin by hand stops this for that well)
 SUPER_SPIN_ARMS_AT = 0.5               # its spiral arms turn as fast as its whirlpool carries matter round this share
-                                       #   of the way out to its dotted circle...
+                                       #   of the way out to its faint circle...
 SUPER_SPIN_FRAME_MAX = 0.6             # ...eased to less than this many radians per frame when that is faster (three
                                        #   arms a third of a turn apart turning further would seem to turn backwards)
 SUPER_INSPIRAL_TICKS = 540             # super wells whose ranges overlap fall into orbit round each other and spiral
@@ -319,6 +330,8 @@ SUPER_BLAST_COOL_FROM = 20             #   ... which from this age (ticks), then
 SUPER_BLAST_COOL_EVERY = 20            #   in two ("cools") until the pieces are no heavier than...
 SUPER_BLAST_COOL_TO = 400              #   ... this; once cool and at rest, a piece lands where it is
 SUPER_BLAST_SCATTER = 1.5              # a piece breaking off lands about this far (cells) from the one it broke from
+SUPER_BLAST_REF_MASS = 10_000_000      # the figures below are for a super well this heavy going supernova; a heavier
+                                       #   or lighter one scales them by sqrt(mass / this) (World.blast_scale)
 SUPER_BLAST_RADIUS = 225.0             # the ring and the shock front slow to a halt this far out (cells; at most 45% of
                                        #   the shorter side) ...
 SUPER_BLAST_SPEED = 6.0                #   ... starting at this speed (cells/tick), slowing like a blast wave

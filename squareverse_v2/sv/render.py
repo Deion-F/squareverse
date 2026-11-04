@@ -245,7 +245,7 @@ class Renderer:
             self.screen.blit(layer, self._band_rect.topleft, self._band_rect)
 
     def _draw_no_orbit(self, world, wells, text):
-        """A dashed red circle just outside each of these super wells' dotted circles, and a note (text) under it."""
+        """A dashed red circle just outside each of these super wells' faint circles, and a note (text) under it."""
         cam, k = self.cam, self.cam.k
         sw, sh = self.screen.get_size()
         color = config.ORBIT_BAND_NONE_COLOR
@@ -278,11 +278,11 @@ class Renderer:
             return -r <= c[0] <= sw + r and -r <= c[1] <= sh + r
 
         for st in world.stars:
-            ring = int(st.ring * k)
+            ring, reach = int(st.ring * k), int(st.reach * k)
             for sx, sy in shifts:
                 center = at(st, sx, sy)
-                if visible(center, ring):
-                    self._draw_star_marks(st, center, ring)
+                if visible(center, max(ring, reach)):
+                    self._draw_star_marks(st, center, ring, reach)
         arms = {}
         for wl in world.wells:
             if wl.is_super:
@@ -326,13 +326,17 @@ class Renderer:
     def _draw_well(self, world, wl, center, radius):
         screen = self.screen
         if wl.is_super:
-            # dotted circle round its range (strong pull and spin), then the black core with a faint rim
-            reach = world.well_range(wl) * self.cam.k
-            dots = max(24, int(2 * math.pi * reach / 9))
-            for d in range(dots):
-                a = 2 * math.pi * d / dots
-                pos = (int(center[0] + reach * math.cos(a)), int(center[1] + reach * math.sin(a)))
-                pygame.draw.circle(screen, config.SUPER_RANGE_COLOR, pos, 1)
+            # a faint circle round its whirlpool's range, a dotted one at its point of no return (when that is outside
+            # its core), then the black core with a faint rim
+            pygame.draw.circle(screen, config.SUPER_WHIRL_COLOR, center, int(round(world.well_range(wl) * self.cam.k)),
+                               1)
+            horizon = world.horizon(wl) * self.cam.k
+            if horizon > radius + 2:
+                dots = max(24, int(2 * math.pi * horizon / 9))
+                for d in range(dots):
+                    a = 2 * math.pi * d / dots
+                    pos = (int(center[0] + horizon * math.cos(a)), int(center[1] + horizon * math.sin(a)))
+                    pygame.draw.circle(screen, config.SUPER_RANGE_COLOR, pos, 1)
             self._draw_spin_arms(wl, center, radius, self._arms[id(wl)][1])
             stretch, angle = world.well_shape(wl)
             if stretch < 0.02:
@@ -359,11 +363,19 @@ class Renderer:
             stretch, angle = world.well_shape(wl)
             pygame.draw.polygon(self.screen, (0, 0, 0), _oval(c, r, stretch, angle))
 
-    def _draw_star_marks(self, st, center, ring):
+    def _draw_star_marks(self, st, center, ring, reach):
         """A star is its particles; on top of them a small dot marks its centre of mass and a faint ring the reach of
-        its capture, both in its colour."""
+        its capture, both in its colour. Where a heavier body's tide cuts the capture ring down, a fainter dotted
+        circle shows where it would reach on its own (where its pull drops to STAR_CAPTURE_ACCEL)."""
         color = self._star_color(st)
         faint = tuple(int(b + (c - b) * config.STAR_RING_FADE) for b, c in zip(config.BG, color))
+        if reach > ring + 1 and reach > 3:
+            fainter = tuple(int(b + (c - b) * config.STAR_REACH_FADE) for b, c in zip(config.BG, color))
+            dots = max(24, int(2 * math.pi * reach / 6))
+            for d in range(dots):
+                a = 2 * math.pi * d / dots
+                self.screen.set_at((int(center[0] + reach * math.cos(a)), int(center[1] + reach * math.sin(a))),
+                                   fainter)
         if ring > 3:
             pygame.draw.circle(self.screen, faint, center, ring, 1)
         pygame.draw.circle(self.screen, config.BG, center, 3)
@@ -590,7 +602,8 @@ class Renderer:
         lines = [
             (f"{kind}   mass {wl.mass:,.0f}   cell ({wl.x:.0f}, {wl.y:.0f})", config.FG),
             (f"v ({wl.vx:+.3f}, {wl.vy:+.3f})   mobility {wl.mobility():.3f}", config.FG),
-            (f"range {world.well_range(wl):.0f} cells   spin {abs(wl.spin):.2f} (; / ') "
+            (f"no return {world.horizon(wl):.0f} cells   whirlpool {world.well_range(wl):.0f}   drags space "
+             f"{world.reach(wl):.0f}   spin {abs(wl.spin):.2f} (; / ') "
              f"{'clockwise' if wl.spin > 0 else 'counterclockwise'}" if wl.is_super else
              f"spin {abs(wl.omega) * config.FPS:.2f} rad/s {'clockwise' if wl.omega > 0 else 'counterclockwise'}   "
              f"reach {world.reach(wl):.0f} cells", config.DIM),

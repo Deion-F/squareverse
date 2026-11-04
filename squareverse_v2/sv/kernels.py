@@ -22,8 +22,8 @@ from numba import njit, prange
  P_CHILD_MOVES, P_SLOSH, P_LEAN, P_MERGE_ON, P_MERGE_SPEED, P_MERGE_CHANCE, P_MAX_MASS,
  P_SPLIT_ON, P_BIND, P_KICK, P_SG_ON, P_CHILD_EVERY, P_ORBIT_W, P_ORBIT_GRIP, P_ORBIT_CX, P_ORBIT_CY,
  P_SLEEP_ACCEL, P_WRAP, P_ORBIT_VMIN, P_WHIRL_SPEED, P_WHIRL_GRIP, P_WHIRL_INFALL, P_WHIRL_EDGE, P_SPLIT_SPEED,
- P_SCATTER, P_REACH, P_SG_COS, P_SG_SIN, P_HEAT) = range(38)
-N_PARAMS = 38
+ P_SCATTER, P_REACH, P_SG_COS, P_SG_SIN, P_HEAT, P_DRAG_EDGE, P_DRAG_TURN) = range(40)
+N_PARAMS = 40
 
 # indices into the int64 stats array filled by step()
 S_MOVED, S_COLLISIONS, S_MERGES, S_SPLITS, S_SINKS, S_ABSORBED, S_HEAT = range(7)
@@ -464,6 +464,7 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
     whirl_grip = P[P_WHIRL_GRIP]
     whirl_infall = P[P_WHIRL_INFALL]
     whirl_edge = P[P_WHIRL_EDGE]
+    drag_edge, drag_turn = P[P_DRAG_EDGE], P[P_DRAG_TURN]
     ocx, ocy = P[P_ORBIT_CX], P[P_ORBIT_CY]
     wrap = P[P_WRAP] != 0.0
 
@@ -498,14 +499,22 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             ax += ox_
             ay += oy_
         whirled = False                                  # inside a whirlpool: never sleeps or sticks
+        turn = carry_x = carry_y = 0.0                   # how far turning space turns and carries it this tick
         for k in range(whirls.shape[0]):                 # each super well: its pull, exact from where it is now (it
-            rx_, ry_ = _axis(x, whirls[k, 0], w, wrap), _axis(y, whirls[k, 1], h, wrap)   # isn't on the field), and
-            gx_, gy_, _ = _pull(-rx_, -ry_, whirls[k, 4], whirls[k, 5], kinv)               # its whirlpool
+            rx_, ry_ = _axis(x, whirls[k, 0], w, wrap), _axis(y, whirls[k, 1], h, wrap)   # isn't on the field),
+            gx_, gy_, phi_ = _pull(-rx_, -ry_, whirls[k, 4], whirls[k, 5], kinv)            # its whirlpool and the
             wx_, wy_, inside = whirl(rx_, ry_, vx0, vy0, whirls[k, 2], whirls[k, 3], whirls[k, 4], whirls[k, 5],
-                                     whirl_speed, whirl_grip, whirl_infall, whirl_edge, kinv)
-            ax += gx_ + wx_
+                                     whirl_speed, whirl_grip, whirl_infall, whirl_edge, kinv, whirls[k, 8], phi_)
+            ax += gx_ + wx_                              # space it turns
             ay += gy_ + wy_
             whirled = whirled or (inside and whirls[k, 3] != 0.0)
+            om_ = frame_turn(rx_, ry_, whirls[k, 6], whirls[k, 7], whirls[k, 4], whirls[k, 5], kinv, drag_edge,
+                             drag_turn, vmax, whirls[k, 2], whirl_edge)
+            if om_ != 0.0 and own == 0:                  # (a star's particles are carried with it: carry_stars)
+                cx_, cy_ = frame_carry(rx_, ry_, om_)
+                carry_x += cx_
+                carry_y += cy_
+                turn += om_
         if stars.shape[0] > 0:
             sx_, sy_, px_, py_ = _star_pull(x, y, own, stars, sfx, sfy, s_block, s_cw, s_ch, w, h, wrap, kinv)
             if _held_up(x, y, own, px_, py_, w, h, mass, owner, wrap) >= 0:
@@ -533,6 +542,9 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
 
         vx = vx0 + ax
         vy = vy0 + ay
+        if turn != 0.0:                                  # turning space turns which way it is heading too
+            tc, ts = np.cos(turn), np.sin(turn)
+            vx, vy = tc * vx - ts * vy, ts * vx + tc * vy
         if drag > 0.0:
             vx *= 1.0 - drag
             vy *= 1.0 - drag
@@ -541,8 +553,8 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             s = vmax / np.sqrt(v2)
             vx *= s
             vy *= s
-        ox = ox0 + vx
-        oy = oy0 + vy
+        ox = ox0 + vx + carry_x                          # its own motion, and space carrying it
+        oy = oy0 + vy + carry_y
         if own > 0:                                      # in a star: only its motion relative to the star
             ox -= star_v[own - 1, 0]
             oy -= star_v[own - 1, 1]
@@ -786,7 +798,7 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
         quad[i, 3] = q3
         shade[i] = sh
         stamp[i] = 2 * tick + (1 if blocked else 0)
-        if moved or stay or whirled or vx * vx + vy * vy > eps2 or (not blocked and ax * ax + ay * ay > accel_eps2):
+        if moved or stay or whirled or turn != 0.0 or vx * vx + vy * vy > eps2 or (not blocked and ax * ax + ay * ay > accel_eps2):
             wake(i, mass, flag)
 
 
@@ -821,7 +833,8 @@ def step(w, h, tick, P, mass, kin, quad, shade, stamp, flag, cur, order, bucket_
     """Advance one tick: simulate the awake particles and flag the ones that stay awake. Returns how many ran.
     Heat shed by merging and splitting is noted in heat's first stats[S_HEAT] rows (see _shed).
     Mass swallowed by super well k is added to absorbed[k]. whirls holds each super well's whirlpool (rows of x, y,
-    range, spin, pull strength, softening); stars, sfx and sfy the stars' pull (see _star_pull); star_v[k] star k's
+    range, spin, pull strength, softening, the share of circling speed it turns space at - signed by its spin - how
+    far that reaches, and its point of no return: see World.whirls); stars, sfx and sfy the stars' pull (see _star_pull); star_v[k] star k's
     velocity as it will be after this tick (and star_v[k, 4:6] its acceleration, for the normal force that holds a
     particle resting on another of its star against a tide). A star's particles (owner, which follows them as they move) only move
     here as fast as they move relative to it: star_shift carries the star as a whole. Jammed, they count as moving
@@ -994,29 +1007,42 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
                                    P[P_ORBIT_VMIN])
             ax += ox_
             ay += oy_
-        for j in range(whirls.shape[0]):                 # each super well's exact pull and whirlpool
-            rx_, ry_ = _axis(gx[k], whirls[j, 0], w, wrap), _axis(gy[k], whirls[j, 1], h, wrap)
-            px_, py_, _ = _pull(-rx_, -ry_, whirls[j, 4], whirls[j, 5], P[P_REACH])
+        turn = carry_x = carry_y = 0.0
+        for j in range(whirls.shape[0]):                 # each super well's exact pull and whirlpool, and the space
+            rx_, ry_ = _axis(gx[k], whirls[j, 0], w, wrap), _axis(gy[k], whirls[j, 1], h, wrap)   # it turns
+            px_, py_, phi_ = _pull(-rx_, -ry_, whirls[j, 4], whirls[j, 5], P[P_REACH])
             wx_, wy_, _ = whirl(rx_, ry_, gvx[k], gvy[k], whirls[j, 2], whirls[j, 3], whirls[j, 4], whirls[j, 5],
-                                P[P_WHIRL_SPEED], P[P_WHIRL_GRIP], P[P_WHIRL_INFALL], P[P_WHIRL_EDGE], P[P_REACH])
+                                P[P_WHIRL_SPEED], P[P_WHIRL_GRIP], P[P_WHIRL_INFALL], P[P_WHIRL_EDGE], P[P_REACH],
+                                whirls[j, 8], phi_)
             ax += px_ + wx_
             ay += py_ + wy_
+            om_ = frame_turn(rx_, ry_, whirls[j, 6], whirls[j, 7], whirls[j, 4], whirls[j, 5], P[P_REACH],
+                             P[P_DRAG_EDGE], P[P_DRAG_TURN], vmax, whirls[j, 2], P[P_WHIRL_EDGE])
+            if om_ != 0.0:
+                cx_, cy_ = frame_carry(rx_, ry_, om_)
+                carry_x += cx_
+                carry_y += cy_
+                turn += om_
         if stars.shape[0] > 0:
             sx_, sy_, _, _ = _star_pull(gx[k], gy[k], 0, stars, sfx, sfy, s_block, s_cw, s_ch, w, h, wrap, P[P_REACH])
             ax += sx_
             ay += sy_
         vx = (gvx[k] + ax) * (1.0 - drag)
         vy = (gvy[k] + ay) * (1.0 - drag)
+        if turn != 0.0:                                  # turning space turns which way it is heading too
+            tc, ts = np.cos(turn), np.sin(turn)
+            vx, vy = tc * vx - ts * vy, ts * vx + tc * vy
         v = np.sqrt(vx * vx + vy * vy)
         if v > vmax:
             vx *= vmax / v
             vy *= vmax / v
             v = vmax
-        # move in steps of at most one cell, so a fast ghost can't jump over a small core
-        n = max(1, int(np.ceil(v)))
+        # move in steps of at most one cell, so a fast ghost can't jump over a small core - its own motion and space
+        # carrying it
+        n = max(1, int(np.ceil(np.sqrt((vx + carry_x) ** 2 + (vy + carry_y) ** 2))))
         for _ in range(n):
-            x = gx[k] + vx / n
-            y = gy[k] + vy / n
+            x = gx[k] + (vx + carry_x) / n
+            y = gy[k] + (vy + carry_y) / n
             if wrap:
                 x %= w
                 y %= h
@@ -1207,6 +1233,10 @@ def heat_push(gx, gy, gvx, gvy, gm, gtag, tag, coupling, min_speed, vmax, w, h, 
         kin[i, 0], kin[i, 1] = vx, vy
         gvx[k] -= dp / mh * ex
         gvy[k] -= dp / mh * ey
+        sg = np.sqrt(gvx[k] * gvx[k] + gvy[k] * gvy[k])
+        if sg > vmax:                                     # waves skip step_ghosts' clamp: keep them (and so the
+            gvx[k] *= vmax / sg                           #   steps fly_waves takes a tick) bounded here
+            gvy[k] *= vmax / sg
         wake(i, mass, flag)
 
 
@@ -1419,6 +1449,9 @@ def mark_solid(bodies, w, h, solid, gvx, gvy, mass, kin, quad, shade, stamp, fla
 # out to the reach R, then less and less, to nothing at REACH_TAPER x R - so things must come close to interact
 # strongly, orbits within R are as stable as with no fading at all (beyond about 1.16 R, where the pull falls faster
 # than 1 / r^3, none is), and bodies further apart than that don't feel each other at all.
+WHIRL_BOUND = 0.05              # a whirlpool never leaves anything with more than - this energy (per mass) in its
+                                #   well's pull: whatever it spins round stays bound (see whirl). (A constant here
+                                #   too, for the same reason as REACH_TAPER below)
 REACH_TAPER = 2.0               # (a constant here, not in config: the cached kernels would keep an old value)
 _TL = REACH_TAPER - 1.0         # the taper's length, in reach lengths
 # the taper's share of the pull as a cubic in u = rho / R (a smoothstep from 1 at u = 1 down to 0 at REACH_TAPER) ...
@@ -1463,13 +1496,17 @@ def _pull(dx, dy, strength, soft, kinv):
 
 
 @njit(cache=True)
-def whirl(rx, ry, vx, vy, reach, spin, strength, soft, speed, grip, infall, edge, kinv):
+def whirl(rx, ry, vx, vy, reach, spin, strength, soft, speed, grip, infall, edge, kinv, horizon, phi):
     """A spinning super well's whirlpool on something at (rx, ry) from it moving at (vx, vy): inside its range
     (reach) its sideways motion is driven towards spin x speed - but never past `infall` of the speed that would hold
     it in orbit there, so it still spirals in - gripped `grip` hard. Both fade in over the outer `edge` share of the
     range, so it is at full strength through nearly all of it. Spun past 1 the cap rises with the spin, flinging
-    matter out into a ring. spin > 0 turns clockwise on screen; motion in or out is left alone. Returns the
-    acceleration and whether it is inside the range."""
+    matter out into a ring - but only within `horizon`, its point of no return (the dotted circle): nothing can be
+    thrown out of there faster than VMAX, which is too slow to get away, so what it flings always comes back; further
+    out it only ever draws matter in. However it speeds something up, it never leaves it energy enough to escape
+    the well's pull (`phi`, its potential there: WHIRL_BOUND short of that), so nothing it whirls can be thrown out
+    for good - it orbits or falls back in. spin > 0 turns clockwise on screen; motion in or out is left alone. Returns the acceleration and whether it is
+    inside the range."""
     d2 = rx * rx + ry * ry
     if d2 >= reach * reach:
         return 0.0, 0.0, False
@@ -1478,10 +1515,52 @@ def whirl(rx, ry, vx, vy, reach, spin, strength, soft, speed, grip, infall, edge
     d = np.sqrt(d2)
     rim = min(1.0, (1.0 - d / reach) / max(edge, 1e-9))
     orbital = np.sqrt(strength * d2 / (d2 + soft * soft) ** 1.5 * fade(np.sqrt(d2 + soft * soft), kinv)[0])
-    target = min(abs(spin) * speed, infall * orbital * max(1.0, abs(spin))) * rim * (1.0 if spin >= 0 else -1.0)
+    fling = max(1.0, abs(spin)) if d < horizon else 1.0
+    target = min(abs(spin) * speed, infall * orbital * fling) * rim * (1.0 if spin >= 0 else -1.0)
     tx, ty = -ry / d, rx / d
-    a = grip * rim * (target - (vx * tx + vy * ty))
+    vt = vx * tx + vy * ty
+    a = grip * rim * (target - vt)
+    nvt = vt + a
+    if nvt * nvt > vt * vt:                              # speeding it up: never so far it could get away
+        room = -2.0 * (phi + WHIRL_BOUND) - (vx * vx + vy * vy - vt * vt)
+        if room <= vt * vt:
+            a = 0.0
+        elif nvt * nvt > room:
+            a = np.sqrt(room) * (1.0 if nvt >= 0.0 else -1.0) - vt
     return a * tx, a * ty, True
+
+
+@njit(cache=True)
+def frame_turn(rx, ry, share, reach, strength, soft, kinv, edge, turn_max, vmax, inner, inner_edge):
+    """How fast a spinning super well turns space itself round at (rx, ry) from it (rad/tick, > 0 clockwise on
+    screen): `share` (signed by its spin) of the angular speed something circling there would have, out to `reach`
+    and fading out over the outer `edge` share of it, at most turn_max and never carrying anything faster than vmax.
+    Within its range (`inner`, the faint circle) its whirlpool takes over, across the same outer `inner_edge` share
+    of the range that the whirlpool fades in over (whirling space on top of the whirlpool feeds it far faster).
+    Everything there is carried round with space - where it is and which way it is heading turned together (see
+    frame_carry) - so its motion through space is unchanged and nothing is sped up: something falling straight in
+    through turning space spirals in, dragged round the way the well spins (frame dragging)."""
+    if share == 0.0:
+        return 0.0
+    d2 = rx * rx + ry * ry
+    if d2 >= reach * reach:
+        return 0.0
+    s2 = d2 + soft * soft
+    rho = np.sqrt(s2)
+    om = share * np.sqrt(strength / (s2 * rho) * fade(rho, kinv)[0])   # circling speed / distance, x share
+    d = np.sqrt(d2)
+    om *= min(1.0, (1.0 - d / reach) / max(edge, 1e-9))
+    band = inner * inner_edge
+    om *= min(1.0, max(0.0, (d - inner + band) / max(band, 1e-9)))
+    cap = turn_max if d * turn_max <= vmax else vmax / d
+    return min(max(om, -cap), cap)
+
+
+@njit(cache=True)
+def frame_carry(rx, ry, om):
+    """How far turning space carries something at (rx, ry) from a super well in a tick when it turns om there."""
+    c, s = np.cos(om), np.sin(om)
+    return c * rx - s * ry - rx, s * rx + c * ry - ry
 
 
 @njit(cache=True)
