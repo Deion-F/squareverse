@@ -1971,6 +1971,147 @@ def star_order(stars, nb, w, h, base, bucket, wrap):
 
 
 @njit(cache=True)
+def _block_sum(a, lo, n):
+    """a[lo:lo + n].sum() for n <= 128, as numpy adds a block up (eight running sums below 128)."""
+    if n < 8:
+        res = 0.0
+        for i in range(lo, lo + n):
+            res += a[i]
+        return res
+    r0, r1, r2, r3 = a[lo], a[lo + 1], a[lo + 2], a[lo + 3]
+    r4, r5, r6, r7 = a[lo + 4], a[lo + 5], a[lo + 6], a[lo + 7]
+    i = 8
+    while i < n - n % 8:
+        r0 += a[lo + i]
+        r1 += a[lo + i + 1]
+        r2 += a[lo + i + 2]
+        r3 += a[lo + i + 3]
+        r4 += a[lo + i + 4]
+        r5 += a[lo + i + 5]
+        r6 += a[lo + i + 6]
+        r7 += a[lo + i + 7]
+        i += 8
+    res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))
+    while i < n:
+        res += a[lo + i]
+        i += 1
+    return res
+
+
+@njit(cache=True)
+def _pairwise_sum(a):
+    """a.sum() exactly as numpy adds it up - halves (cut at a multiple of 8) added pairwise down to blocks of at most
+    128 - so a kernel can replace numpy arithmetic bit for bit. (Without recursion: a cached recursive kernel
+    crashed when loaded back from numba's disk cache.)"""
+    n = a.size
+    if n <= 128:
+        return _block_sum(a, 0, n)
+    los = np.empty(128, np.int64)                      # pending halves (lo, n; n < 0: add the last two sums)
+    ns = np.empty(128, np.int64)
+    sums = np.empty(128)
+    top = 1
+    los[0], ns[0] = 0, n
+    k = 0
+    while top > 0:
+        top -= 1
+        lo, m = los[top], ns[top]
+        if m < 0:
+            k -= 1
+            sums[k - 1] += sums[k]
+        elif m <= 128:
+            sums[k] = _block_sum(a, lo, m)
+            k += 1
+        else:
+            m2 = m // 2
+            m2 -= m2 % 8
+            los[top], ns[top] = 0, -1
+            los[top + 1], ns[top + 1] = lo + m2, m - m2
+            los[top + 2], ns[top + 2] = lo, m2
+            top += 3
+    return sums[0]
+
+
+@njit(cache=True)
+def damp_star(idx, x, y, damping, lock, w, h, mass, kin, wrap):
+    """World._damp_stars for one star, whose particles are in cells idx, centred on (x, y): its particles' motion
+    relative to it, apart from its moving and turning as a whole (not turning either when lock), fades by damping.
+    The same arithmetic as the numpy it replaced, in the same order (~5 us a star, not ~130)."""
+    n = idx.size
+    m = np.empty(n)
+    dx = np.empty(n)
+    dy = np.empty(n)
+    vx = np.empty(n)
+    vy = np.empty(n)
+    t = np.empty(n)
+    for j in range(n):
+        i = idx[j]
+        m[j] = np.float64(mass[i])
+        dx[j] = (i % w) - x
+        dy[j] = (i // w) - y
+        if wrap:
+            dx[j] -= w * np.floor(dx[j] / w + 0.5)
+            dy[j] -= h * np.floor(dy[j] / h + 0.5)
+        vx[j] = np.float64(kin[i, 0])
+        vy[j] = np.float64(kin[i, 1])
+    total = _pairwise_sum(m)
+    for j in range(n):
+        t[j] = m[j] * dx[j]
+    cx = _pairwise_sum(t) / total               # about their centre of mass
+    for j in range(n):
+        dx[j] -= cx
+        t[j] = m[j] * dy[j]
+    cy = _pairwise_sum(t) / total
+    for j in range(n):
+        dy[j] -= cy
+        t[j] = m[j] * vx[j]
+    ux = _pairwise_sum(t) / total
+    for j in range(n):
+        t[j] = m[j] * vy[j]
+    uy = _pairwise_sum(t) / total
+    for j in range(n):
+        t[j] = m[j] * (dx[j] * dx[j] + dy[j] * dy[j])
+    inertia = _pairwise_sum(t)
+    om = 0.0
+    if inertia > 0:                                    # its spin, as a solid body
+        for j in range(n):
+            t[j] = m[j] * (dx[j] * (vy[j] - uy) - dy[j] * (vx[j] - ux))
+        om = _pairwise_sum(t) / inertia
+    if lock:
+        om = 0.0
+    for j in range(n):                                 # (from the values read above: a cell listed twice gets the
+        i = idx[j]                                     #   same, as numpy's fancy -= gave it)
+        kin[i, 0] = np.float32(vx[j] - damping * ((vx[j] - ux) + om * dy[j]))
+        kin[i, 1] = np.float32(vy[j] - damping * ((vy[j] - uy) - om * dx[j]))
+
+
+@njit(cache=True)
+def owned_cells(cx, cy, r, k, w, h, owner, wrap):
+    """The cells within r of (cx, cy) - as World._disk_cells counts them, in the same order - that hold star k's
+    particles (owner k + 1). (World._star_cells ran on numpy temporaries at ~0.2 ms a star, several times a tick.)"""
+    x0, x1 = np.int64(np.floor(cx - r)), np.int64(np.floor(cx + r)) + 2
+    y0, y1 = np.int64(np.floor(cy - r)), np.int64(np.floor(cy + r)) + 2
+    out = np.empty(max(0, (x1 - x0) * (y1 - y0)), np.int64)
+    n = 0
+    for yy in range(y0, y1):
+        dy = yy - cy
+        for xx in range(x0, x1):
+            dx = xx - cx
+            if dx * dx + dy * dy > r * r:
+                continue
+            if wrap:
+                x_, y_ = xx % w, yy % h
+            elif xx < 0 or xx >= w or yy < 0 or yy >= h:
+                continue
+            else:
+                x_, y_ = xx, yy
+            i = y_ * w + x_
+            if owner[i] == k + 1:
+                out[n] = i
+                n += 1
+    return out[:n]
+
+
+@njit(cache=True)
 def star_motion(stars, w, h, mass, kin, owner, out, wrap):
     """Each star's body - its particles (owner k + 1 within radius r of (x, y): rows of x, y, r) that rest on another
     of its particles, towards its centre - not the loose matter round it: out rows get their mass and momentum (and,

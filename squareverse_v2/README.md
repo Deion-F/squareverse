@@ -22,7 +22,9 @@ also have ◀ ▶ arrows beside their value for fine steps (0.1 for gravity stre
 shows its figures beside it (the step time by the speed, the collapse threshold by collapse, and so on); the rarely
 needed settings and the performance figures fold away under Advanced. The mouse tool section picks what a left click
 does: pour, ghosts, erase, place a star / an auto star / repulsor / super well / spawner, select (and drag) a body to see and change
-it, or delete one. Every setting also has a keyboard shortcut: **H** lists them. F1–F5 load the presets (rain, disk,
+it, or delete one. Under it are only the settings of the tool picked, and the cursor shows what a click places: a
+label under it (mass, radius, particle mass or spawn rate) for a super well, repulsor, star or spawner, and for a
+super well its core, dotted point of no return and faint whirlpool range as they will be. Every setting also has a keyboard shortcut: **H** lists them. F1–F5 load the presets (rain, disk,
 cloud, binary, systems). The starting scene is systems (`DEFAULT_PRESET`): a super well in the middle orbited by
 three stars, and two or three more scattered at random round it with one or two stars each (`sv/presets.py`
 `systems`, `SYSTEM_*`). Each star is set off at the circular speed round its own well, with the well taking the
@@ -43,7 +45,8 @@ the mass in the universe (particles, ghosts and what super wells hold) in the to
 while the menu is open. The GPU figure is Windows' own (the busiest engine type, all processes, as Task Manager shows
 it), read by a `powershell.exe` left running in the background (`sv/usage.py`); without one it shows n/a. The app
 starts with gravity at ×0.6 reaching 120 cells (gone at 240; the disk preset sets its own 20 cells, `DISK_REACH`:
-it was made for that), placed stars set off in orbit (see below), rotation at 3 cells/tick, a 40 px brush and pour mass 4 (`sv/config.py`;
+it was made for that), placed stars set off in orbit (see below), rotation at 3 cells/tick, a 40 px brush, pour mass 4, placed super wells of 1,000,000 (`SUPER_PLACE_MASS`) and placed repulsors of 250,000
+(`REPULSOR_PLACE_MASS`) (`sv/config.py`;
 the tests pin the tuning they were written for in `tests/conftest.py`). The menu is `sv/menu.py`, built on the small
 widget kit in `sv/ui.py`.
 
@@ -57,8 +60,12 @@ widget kit in `sv/ui.py`.
   less in the collapse check (menu: Stars collapse at, x1 to x20), so it collapses into a super well only if its densest
   20 × 20-cell window holds the collapse threshold (66,667 at strength 0.6) times that factor, 267k at the default. At
   the defaults 20 px pour 1024 (110k), 12 px pour 2048 and 4096 (85k, 170k) and pour 512 stay stars; 40 px pour 1024
-  (densest window 279k) and 20 px pour 4096 (439k) collapse at once. With the Star tool picked and collapse on, the brush
-  turns amber at `STAR_COLLAPSE_WARN` (0.7) of the limit and red, with the note "collapses into a super well", when over. `,` / `.` rebuild it
+  (densest window 279k) and 20 px pour 4096 (439k) collapse at once. With the Star tool picked and collapse on, the cursor
+  (counting matter already under it) turns amber at `STAR_COLLAPSE_WARN` (0.7) of the limit and red, with the note "collapses into a super well", when over.
+  The tool's settings are Size (the brush), Particle mass (its core) and a typed Star mass, which sizes the brush to the
+  nearest star of that mass; a note gives the largest size that still holds together at that particle mass (red when the
+  current one collapses). The Pour tool's cursor goes amber and red the same way when filling the brush there would collapse
+  (`World.placement_collapse`). `,` / `.` rebuild it
   lighter or heavier, its radius × √(mass factor), each ring holding particles as heavy as it does now. Shift+click
   with the Star tool, or any placement with the menu's "Stars arrive as ghosts" on (`GHOST_STARS`), places a ghost
   star instead: its particles fly together through everything, feeling gravity, and land as a star `GHOST_TICKS`
@@ -114,9 +121,10 @@ widget kit in `sv/ui.py`.
   Shift+drag pulls a star along, X deletes the nearest one with its particles, and `,` / `.` make it lighter or
   heavier: it is rebuilt where it is, moving as it was, as a star placed at its new mass would be. Hover a star to see its mass, particles, radius, ring and how much of its recent mass it holds.
   The menu counts the stars formed, exploded and torn apart.
-* **Repulsors:** Shift+G places a repulsor weighing the brush circle's area × the pour mass × `WELL_DENSITY` (64): a
-  solid, spinning body that pushes instead of pulling and stays put. Its size follows its mass (the brush at pour
-  mass 1, bigger for heavier pours), and `,` / `.` resize it with its mass, so its body and reach match a fresh one's. Particles can't enter it; they bounce off and slide round its surface. (A solid attracting
+* **Repulsors:** Shift+G (or the Repulsor tool) places a repulsor weighing `REPULSOR_PLACE_MASS` (250,000), whatever the
+  pour mass and brush: a solid, spinning body that pushes instead of pulling and stays put. Its mass is picked in the menu
+  (`REPULSOR_PLACE_MASSES`: 50k to 2M), typed (k / M suffixes), or set by the Size slider (`REPULSOR_SIZE_PX`, 2 to 320 px;
+  the mouse wheel too). Its size follows its mass at `WELL_DENSITY` (64) and the other way round. `,` / `.` resize a placed one with its mass, so its body and reach match a fresh one's. Particles can't enter it; they bounce off and slide round its surface. (A solid attracting
   well with the same body can still be made in code with `World.add_well`.) Shift+drag moves it, X deletes it.
 * **Star formation:** every 60 ticks, the densest knots of matter (up to 12, `STAR_FORM_SEEDS`) are checked, and a
   knot that looks like a young star becomes one: its particles, where they are and moving as they move, become the
@@ -128,7 +136,11 @@ widget kit in `sv/ui.py`.
   within 8 cells of a star's capture ring, of a repulsor or three times its radius, near a super well's core, or
   against a solid border (a pile on the floor isn't a star), and at most one forms per check. See `STAR_FORM_*`. Scenes
   of one particle mass (like the cloud preset) can't form stars, since nothing is layered.
-* **Super wells:** B places one (as heavy as a brush-sized well, and never lighter than the collapse threshold). It
+* **Super wells:** B (or the Super well tool) places one weighing `SUPER_PLACE_MASS` (1,000,000 at start), never lighter than
+  the collapse threshold nor heavier than the top of `SUPER_EXPLODE_RANGE` (50M). Pick the mass in the menu (a "min" button for the
+  collapse threshold, then 1M to 9M in steps of `SUPER_PLACE_STEP`, below the supernova mass), type it (k / M suffixes: 2.5M, 300k; Enter or a click
+  elsewhere sets it, Esc cancels), or drag the Core size slider (the mass becomes what that core takes: core = `SUPER_CORE` + `SUPER_CORE_GROWTH` × √mass).
+  With the Super well tool the mouse wheel steps the mass by 1M instead of resizing the brush. Over the supernova mass the cursor warns that it will explode. It
   is a tiny black core that deletes every particle, repulsor and super well touching it and adds their mass to its own. Its pull
   grows with that mass and follows the same law as every other mass, fading with distance (see Gravity reach). Inside its faint circle (the whirlpool's range, drawn solid and dim in `SUPER_WHIRL_COLOR`) it
   whirls everything round the way it spins (`SUPER_SWIRL_*`), at full strength right out to the circle (it fades in
@@ -286,9 +298,9 @@ widget kit in `sv/ui.py`.
   * Gravity strength × 0.60 (the default; × 1.2 works too, with a faster orbit) and a reach of at least about 115
     cells (the default 120 holds stars 10 cells across 105–125 cells out with 90% of their mass for a minute;
     everywhere, all the way right, is what the measurements below were made at).
-  * The super well: B with **pour mass 1** and the default 40 px brush: 80,000 mass, faint circle 22 cells. Up to
-    about 160,000 (pour mass 2) is fine. The default pour mass 16 makes a 1.3M well, whose tide tears a pour-16
-    star apart wherever an orbit fits in the universe.
+  * The super well: B with its mass set to **80,000** (typed as 80k; faint circle 22 cells). Up to
+    about 160,000 is fine. A 1.3M well, whose tide tears a pour-16 star apart wherever an orbit fits in the
+    universe, is the sort of mass to avoid (the default 1M is near it).
   * The star: G with pour mass 16 and the default brush: about 6,900 mass, 20 cells across in radius at first,
     settling to about 10 (losing 8% of its mass, as it would anywhere). This needs radiation on (the default): off,
     the star doesn't fuse its light envelope into its core, stays loose and big, and the tide peels it, slowing it
@@ -320,7 +332,7 @@ widget kit in `sv/ui.py`.
   that collide bounce off at a random angle of up to `COLLISION_SCATTER` (0.3 rad, about 17°) from straight back, as
   if they met a little off-centre, so a stream glances off what it hits instead of piling up in a line behind it
   (momentum is still conserved; resting contact and stars' particles are unaffected). Advanced → Particles has a
-  slider for it. Keys 1–5 pour a
+  slider for it. (The menu calls this the Particle mass: it is what Pour pours and the core of a star and a spawner's pieces are made of.) Keys 1–5 pour a
   fixed mass (`POUR_MASSES`: 1, 4, 16, 64, 256), and 6 pours particles with a random mass between the min and max of
   `RANDOM_MASS` (1–256) in `sv/config.py`. The menu has a second row of heavy masses (`HEAVY_POUR_MASSES`: 512, 1024,
   2048, 4096; Shift+1–4) and "Rnd heavy" (`RANDOM_HEAVY_MASS`: 512–4096; Shift+6), for dense stars that hold

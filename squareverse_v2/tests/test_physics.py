@@ -1011,7 +1011,8 @@ def test_super_well_explodes_past_the_threshold_and_releases_all_its_mass():
     check_consistent(w)
 
 
-def test_explosion_ring_starts_at_the_well_and_the_blast_pushes_particles_away():
+def test_explosion_ring_starts_at_the_well_and_the_blast_pushes_particles_away(monkeypatch):
+    monkeypatch.setattr(config, "SUPER_BLAST_COAST", 0.0)   # the debris stops with the front (coasting: below)
     w = make_world(pw=1200, ph=800)
     w.merge_on = w.split_on = False
     w.g_scale = 1e-9                                 # nothing else moves anything
@@ -1038,7 +1039,8 @@ def test_explosion_ring_starts_at_the_well_and_the_blast_pushes_particles_away()
     check_consistent(w)
 
 
-def test_blast_debris_lands_where_it_comes_to_rest():
+def test_blast_debris_lands_where_it_comes_to_rest(monkeypatch):
+    monkeypatch.setattr(config, "SUPER_BLAST_COAST", 0.0)   # the debris stops with the front (coasting: below)
     w = make_world(pw=1200, ph=800)
     w.merge_on = w.split_on = False
     w.g_scale = 1e-9                                 # nothing else moves anything
@@ -1054,6 +1056,39 @@ def test_blast_debris_lands_where_it_comes_to_rest():
     reach = min(config.SUPER_BLAST_RADIUS * w.blast_scale(config.SUPER_EXPLODE_MASS + 10), 0.45 * min(w.w, w.h))
     assert np.mean(r < 0.5 * reach) > 0.15
     assert np.mean(r > 1.1 * reach) < 0.02           # nothing thrown far out to find room
+
+
+def test_blast_debris_flies_on_past_the_front_slowing_smoothly_and_stops_short_of_the_edge():
+    w = make_world(pw=1200, ph=800)                  # 600 x 400 cells, walled
+    w.merge_on = w.split_on = False
+    w.g_scale = 1e-9                                 # nothing else moves anything
+    w.add_super_well(600, 400, config.SUPER_EXPLODE_MASS + 10).heavy = True   # cell (300, 200); its grace over
+    reach = min(config.SUPER_BLAST_RADIUS * w.blast_scale(config.SUPER_EXPLODE_MASS + 10), 0.45 * min(w.w, w.h))
+    speeds, stopped = [], None
+    for t in range(600):
+        w.step()
+        if not w.blasts:                             # its debris's edge has come to rest
+            break
+        assert int((w.mass > 0).sum()) == 0          # none of it lands while it flies
+        side = np.abs(w.ghost_y - 200) < 0.3 * np.abs(w.ghost_x - 300)   # along x, where there is room
+        speeds.append(np.median(np.hypot(w.ghost_vx[side], w.ghost_vy[side])))
+        if stopped is None and w.blasts[0].r >= reach:
+            stopped = t
+    run(w, 40)                                       # the last few pieces cool and land
+    assert w.ghost_count() == 0                      # all landed once it had come to rest
+    assert stopped is not None and len(speeds) > stopped + 30   # it flew on well after the front stopped ...
+    s = np.array(speeds[2:])
+    assert (np.diff(s) <= 1e-6 + 0.02 * s[:-1]).all()   # ... only ever slowing, never stalling and speeding up again
+    assert s[stopped - 2] > 0.25 * s[0]              # still moving briskly when the front stopped
+    yy, xx = np.nonzero(w.mass.reshape(w.h, w.w) > 0)
+    dx, dy = xx - 300, yy - 200
+    r = np.hypot(dx, dy)
+    side = np.abs(dy) < 0.3 * np.abs(dx)             # along x there is room to coast; along y the walls are close
+    assert np.percentile(r[side], 99) > 1.3 * reach  # it went on well past where the front stopped ...
+    assert np.mean(r < 0.5 * reach) > 0.03           # ... still filling the inside, not all thrown to the edge
+    margin = 3                                       # none piled against the walls
+    assert xx.min() >= margin and yy.min() >= margin and xx.max() <= w.w - 1 - margin and yy.max() <= w.h - 1 - margin
+    check_consistent(w)
 
 
 def test_ghosts_pass_through_particles_and_land_after_their_time():

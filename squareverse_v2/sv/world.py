@@ -33,6 +33,12 @@ def super_core(mass):
     return config.SUPER_CORE + config.SUPER_CORE_GROWTH * math.sqrt(mass)
 
 
+def super_mass_for_core(radius):
+    """The mass of a super well whose core is radius cells across (super_core's inverse; 0 at or below the smallest
+    core)."""
+    return (max(0.0, radius - config.SUPER_CORE) / config.SUPER_CORE_GROWTH) ** 2
+
+
 def final_star(target, k):
     """Where star k's particles end up when each star k goes to target[k]: itself, another star or -1 (none)."""
     while k >= 0 and target[k] != k:
@@ -61,7 +67,9 @@ def box_sum(a, r):
 class Blast:
     """An explosion's shock front: a ring round (x, y) at radius r (cells) slowing as it nears `reach`, pushing the
     particles it passes up to `push` cells out. Its debris (ghosts tagged with `tag`) expands with it, each piece
-    keeping its share of the front's radius. `settled` counts the ticks since the front stopped."""
+    keeping its share of the front's radius - or, with `spread`, with an edge of its own that slows the same way but
+    only comes to rest `spread` x reach further out (World._coast_room), `p` of the way there. `settled` counts the
+    ticks since the front stopped."""
     x: float
     y: float
     r: float
@@ -75,10 +83,21 @@ class Blast:
     source: object = None       # a body it stays centred on while that lasts (a merged super well)
     settled: int = 0
     settle: int = config.SUPER_BLAST_SETTLE   # without wind, it goes on damping for this many ticks after it stops
+    spread: float = 0.0         # its debris flies on past the front, coming to rest this x reach further out ...
+    p: float = 0.0              # ... and has gone this share of the way
 
     def speed(self, r):
         """Speed of the front at radius r: v0 when it starts, none at its edge."""
         return self.v0 * np.sqrt(np.maximum(0.0, 1.0 - np.asarray(r) / self.reach))
+
+    def debris_rate(self):
+        """How fast its debris's edge goes on (share of the way per tick, x sqrt of the share left): where it has
+        all the room, it leaves at v0 like the front and slows the same way, only over (1 + spread) x the reach."""
+        return self.v0 / (self.reach * (1.0 + self.spread))
+
+    def coasting(self):
+        """Whether its debris is still flying on past the front."""
+        return self.spread > 0 and self.p < 1.0
 
 
 @dataclass(eq=False, slots=True)
@@ -263,6 +282,7 @@ class World:
         self.merge_on = config.MERGE_ON
         self.split_on = config.SPLIT_ON
         self.scatter = config.COLLISION_SCATTER   # radians: how far off head-on loose particles bounce
+        self.star_damping = config.STAR_DAMPING   # share of a star's particles' jostling that fades a tick
         self.lean_on = config.LEAN_ON
         self.radiation_on = config.RADIATION_ON   # merging, splitting and fusion give off heat
         self.heat_rows = np.zeros((HEAT_ROWS, 5))  # heat shed this tick, for one core (see kernels._shed)...
@@ -497,6 +517,35 @@ class World:
         c[1:, 1:] = grid.cumsum(0).cumsum(1)
         window = c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]
         return float(window.max()), self.star_collapse_limit()
+
+    def placement_collapse(self, px, py, radius_px, pour_mass, star=False):
+        """What a click at a pixel would leave in the densest collapse window round it (COLLAPSE_BLOCKS x SG_BLOCK
+        cells square, at any offset), counting the matter already there as check_collapse does: (that, the limit it
+        collapses at). star: the star add_star would place with this brush and pour mass - everything in its circle
+        becomes the star's, so counts star_collapse times less, and both figures are in star units
+        (star_collapse_limit()). Else the brush circle filled with pour-mass particles, as holding the button down
+        to pour ends up. Over the limit, it collapses into a super well at the next check."""
+        c, k = self.cell, config.COLLAPSE_BLOCKS * config.SG_BLOCK
+        cx, cy, r = px / c, py / c, max(1.0, radius_px / c)
+        x0, y0 = max(0, math.floor(cx - r) - k + 1), max(0, math.floor(cy - r) - k + 1)
+        x1, y1 = min(self.w, math.floor(cx + r) + k + 1), min(self.h, math.floor(cy + r) + k + 1)
+        sc = self.star_collapse if star else 1.0
+        if x1 <= x0 or y1 <= y0:
+            return 0.0, self.collapse_threshold() * sc
+        grid = self.mass.reshape(self.h, self.w)[y0:y1, x0:x1].astype(np.float64)
+        owned = self.owner.reshape(self.h, self.w)[y0:y1, x0:x1] > 0
+        gy, gx = np.mgrid[y0:y1, x0:x1]
+        d = np.hypot(gx - cx, gy - cy) / r                # as _disk_cells measures it
+        inside = d <= 1.0
+        empty = inside & (grid == 0)
+        pour = round(sum(pour_mass) / 2) if isinstance(pour_mass, tuple) else pour_mass
+        grid[empty] = self._layer_masses(d[empty], pour) if star else min(pour, config.MAX_MASS)
+        grid[inside | owned if star else owned] /= self.star_collapse
+        kh, kw = min(k, grid.shape[0]), min(k, grid.shape[1])
+        s = np.zeros((grid.shape[0] + 1, grid.shape[1] + 1))
+        s[1:, 1:] = grid.cumsum(0).cumsum(1)
+        window = s[kh:, kw:] - s[:-kh, kw:] - s[kh:, :-kw] + s[:-kh, :-kw]
+        return float(window.max()) * sc, self.collapse_threshold() * sc
 
     def rebuild_field(self):
         """Mark the solid wells' ground and the super wells' cores, and work out the field: global gravity and the
@@ -1033,42 +1082,27 @@ class World:
 
     def _damp_stars(self):
         """Internal friction: each star's particles' motion relative to the star - apart from its moving and turning
-        as a whole - fades by STAR_DAMPING a tick. Its particles bounce off each other nearly elastically (so a star
+        as a whole - fades by star_damping (STAR_DAMPING; menu: Advanced → Stars) a tick. Its particles bounce off each other nearly elastically (so a star
         keeps its momentum), and with nothing to calm them a tide's shear (its near side orbiting faster than its far
         side) set them jostling until the star puffed up and was torn apart; real stars lose that energy. What fades
         is fitted so the star's momentum stays as it was, and its spin too - except close to a heavy super well, whose
         tide spun stars up until they flung their outskirts off: there it turns towards once an orbit (tidal locking).
         """
-        if not config.STAR_DAMPING:
+        if not self.star_damping:
             return
         for k, st in enumerate(self.stars):
             idx = self._star_cells(k, st)
             if idx.size < 3:
                 continue
-            m = self.mass[idx].astype(np.float64)
-            ys, xs = np.divmod(idx, self.w)
-            dx, dy = xs - st.x, ys - st.y
-            if self.wrap:
-                dx -= self.w * np.floor(dx / self.w + 0.5)
-                dy -= self.h * np.floor(dy / self.h + 0.5)
-            total = m.sum()
-            dx -= (m * dx).sum() / total                 # about their centre of mass
-            dy -= (m * dy).sum() / total
-            vx, vy = self.kin[idx, 0].astype(np.float64), self.kin[idx, 1].astype(np.float64)
-            ux, uy = vx - (m * vx).sum() / total, vy - (m * vy).sum() / total
-            inertia = (m * (dx * dx + dy * dy)).sum()
-            om = (m * (dx * uy - dy * ux)).sum() / inertia if inertia > 0 else 0.0   # its spin, as a solid body
-            wl = self.orbit_well(st.x, st.y)
-            if wl is not None and wl.mass > 10 * st.mass and self.tide_share(self.distance(st.x, st.y, wl.x, wl.y)):
-                om = 0.0                                 # close to a heavy super well: its spin fades too
-            self.kin[idx, 0] -= config.STAR_DAMPING * (ux + om * dy)
-            self.kin[idx, 1] -= config.STAR_DAMPING * (uy - om * dx)
+            wl = self.orbit_well(st.x, st.y)            # close to a heavy super well: its spin fades too
+            lock = bool(wl is not None and wl.mass > 10 * st.mass
+                        and self.tide_share(self.distance(st.x, st.y, wl.x, wl.y)))
+            kernels.damp_star(idx, st.x, st.y, self.star_damping, lock, self.w, self.h, self.mass, self.kin,
+                              self.wrap)
 
     def _star_cells(self, k, st):
         """The cells holding star k's particles."""
-        xs, ys, _, _ = self._disk_cells(st.x, st.y, st.ring + 2.0)
-        idx = ys * self.w + xs
-        return idx[self.owner[idx] == k + 1]
+        return kernels.owned_cells(st.x, st.y, st.ring + 2.0, k, self.w, self.h, self.owner, self.wrap)
 
     def _remap_owner(self, target):
         """Star k's particles go to star target[k] (-1: to none)."""
@@ -1134,14 +1168,13 @@ class World:
                 st.vx, st.vy = px / m, py / m
         carried = []
         push = np.zeros(2)
+        drag = self.drag_rows()
         for k, st in enumerate(self.stars):
-            turn, fx, fy = self.frame_turn(st.x, st.y)
+            turn, fx, fy = self.frame_turn(st.x, st.y, rows=drag)
             if turn:
                 c, sn = math.cos(turn), math.sin(turn)
                 st.vx, st.vy = c * st.vx - sn * st.vy, sn * st.vx + c * st.vy
-                xs, ys, _, _ = self._disk_cells(st.x, st.y, st.ring + 2.0)
-                idx = ys * self.w + xs
-                idx = idx[self.owner[idx] == k + 1]
+                idx = self._star_cells(k, st)
                 vx, vy = self.kin[idx, 0].copy(), self.kin[idx, 1].copy()
                 self.kin[idx, 0], self.kin[idx, 1] = c * vx - sn * vy, sn * vx + c * vy
             st.ox += st.vx + fx
@@ -1163,9 +1196,8 @@ class World:
                 cy += sy
             st.ox, st.oy = min(max(st.ox, -0.5), 0.5), min(max(st.oy, -0.5), 0.5)
             if push.any():                               # the knocks it took ploughing on, shared by all of it
-                xs, ys, _, _ = self._disk_cells(st.x + cx, st.y + cy, st.ring + 2.0)
-                idx = ys * self.w + xs
-                idx = idx[self.owner[idx] == k + 1]
+                idx = kernels.owned_cells(st.x + cx, st.y + cy, st.ring + 2.0, k, self.w, self.h, self.owner,
+                                          self.wrap)
                 held = float(self.mass[idx].sum())
                 if held > 0:
                     self.kin[idx, 0] += push[0] / held
@@ -1574,7 +1606,10 @@ class World:
         shoves every particle it passes away, further the nearer it was (see `_step_blasts`). The debris expands with
         the front, each piece at its own share of the front's radius (spread so it ends up evenly over the area the
         front swept clear: SUPER_BLAST_FILL), and cools as it flies, breaking into lighter pieces (see
-        `_cool_blasts`). Collapse is held off for SUPER_EXPLODE_CALM ticks so the debris can spread."""
+        `_cool_blasts`). The debris doesn't stop with the front: its edge slows the same way but only comes to rest
+        SUPER_BLAST_COAST x the reach further out, where the universe has room, so it keeps its momentum and lands
+        spread thinner, still as ghosts until then. Collapse is held off for SUPER_EXPLODE_CALM ticks so the debris
+        can spread."""
         self.remove_well(wl)
         rng = self.rng
         r0 = max(wl.core() + 1.0, 2.0)
@@ -1584,7 +1619,8 @@ class World:
         drag = min(0.5, config.SUPER_BLAST_DRAG / f)
         blast = Blast(wl.x, wl.y, r0, reach, self.blast_serial, min(config.SUPER_BLAST_SPEED * math.sqrt(f),
                       0.95 * config.VMAX), config.SUPER_BLAST_PUSH * config.SUPER_BLAST_DRAG / drag, drag,
-                      settle=round(config.SUPER_BLAST_SETTLE * f))
+                      settle=round(config.SUPER_BLAST_SETTLE * f), spread=max(config.SUPER_BLAST_COAST, 0.0))
+        blast.p = r0 / (reach * (1.0 + blast.spread))   # the debris's edge starts where the front does
         self.blasts.append(blast)
         n = max(1, round(wl.mass / config.SUPER_BLAST_HOT_MASS))
         masses = self._split_mass(wl.mass, n)
@@ -1626,11 +1662,15 @@ class World:
                 b.settled += 1
             else:
                 # the front has stopped: no ring to shove (r_in past r_out), only the fading behind it
-                kernels.blast_push(b.x, b.y, b.reach + 1.0, b.reach, b.reach, 0.0, b.drag, False, 0.0,
-                                   self.w, self.h, self.mass, self.kin, self.stamp, self.flag, self.solid, self.wrap)
+                if b.settled < b.settle:
+                    kernels.blast_push(b.x, b.y, b.reach + 1.0, b.reach, b.reach, 0.0, b.drag, False, 0.0,
+                                       self.w, self.h, self.mass, self.kin, self.stamp, self.flag, self.solid,
+                                       self.wrap)
                 b.settled += 1
             b.r = r_new
-        self.blasts = [b for b in self.blasts if b.settled < (b.blow if b.wind else b.settle)]
+            if b.spread:
+                b.p = min(1.0, b.p + b.debris_rate() * math.sqrt(1.0 - b.p))
+        self.blasts = [b for b in self.blasts if b.settled < (b.blow if b.wind else b.settle) or b.coasting()]
 
     def _cool_blasts(self):
         """Blast debris (ghosts tagged with their blast's number) expands with its front while the blast lasts, each
@@ -1655,7 +1695,20 @@ class World:
                 dy -= self.h * np.floor(dy / self.h + 0.5)
             d = np.maximum(np.hypot(dx, dy), 1e-9)
             ux, uy = dx / d, dy / d
-            speed = np.minimum(d / b.r, 1.0) * float(b.speed(b.r))   # none once the front has stopped
+            if b.spread:
+                # the debris's own edge, p of the way to its full reach in each direction and slowing all the way;
+                # each piece at its share of the edge's radius (so it stays as evenly spread)
+                full = b.reach + self._coast_room(b, ux, uy)
+                edge = np.maximum(b.p * full, 1e-9)
+                ahead = d > edge                         # scattered past the edge as it broke up: back onto it
+                if ahead.any():
+                    k = sel[ahead]
+                    gx, gy = b.x + ux[ahead] * edge[ahead], b.y + uy[ahead] * edge[ahead]
+                    self.ghost_x[k], self.ghost_y[k] = (gx % self.w, gy % self.h) if self.wrap else (gx, gy)
+                    d = np.minimum(d, edge)
+                speed = d / edge * full * b.debris_rate() * math.sqrt(1.0 - b.p)
+            else:
+                speed = np.minimum(d / b.r, 1.0) * float(b.speed(b.r))   # none once the front has stopped
             vx, vy = self.ghost_vx[sel], self.ghost_vy[sel]
             along = vx * ux + vy * uy
             self.ghost_vx[sel] = speed * ux + 0.9 * (vx - along * ux)   # sideways drift fades
@@ -1676,9 +1729,35 @@ class World:
         hot = self.ghost_tag > 0
         over = ~np.isin(self.ghost_tag, list(active))
         still = np.hypot(self.ghost_vx, self.ghost_vy) < 0.1
+        held = np.isin(self.ghost_tag, [t for t, b in active.items() if b.coasting()])
+        if held.any():                                   # flying-on debris lands only when its edge has stopped
+            still &= ~held
+            self.ghost_age[held] = np.minimum(self.ghost_age[held], config.GHOST_TICKS - 1)
         done = hot & (self.ghost_m <= config.SUPER_BLAST_COOL_TO) & (over | still)
         self.ghost_tag[done] = 0
         self.ghost_age[done] = np.maximum(self.ghost_age[done], config.GHOST_TICKS)   # lands where it came to rest
+
+    def _coast_room(self, b, ux, uy):
+        """How much further than its reach blast b's debris may coast along directions (ux, uy) from its centre:
+        b.spread x its reach, less where the edge of the universe (a round one's rim, or a walled window's sides)
+        is nearer, stopping SUPER_BLAST_COAST_MARGIN short of it. With wrapping borders there is no edge."""
+        room = np.full(ux.shape, b.spread * b.reach)
+        gap = config.SUPER_BLAST_COAST_MARGIN            # kept clear all along the edge, not just straight ahead
+        if self.round:
+            px, py = b.x + 0.5 - self.w / 2, b.y + 0.5 - self.h / 2
+            rr = max(min(self.w, self.h) / 2 - gap, 0.0)
+            pu = px * ux + py * uy
+            edge = -pu + np.sqrt(np.maximum(pu * pu - (px * px + py * py - rr * rr), 0.0))
+        elif not self.wrap:
+            tiny = 1e-9
+            ex = np.where(ux > tiny, (self.w - 1 - gap - b.x) / np.maximum(ux, tiny),
+                          np.where(ux < -tiny, (b.x - gap) / np.maximum(-ux, tiny), np.inf))
+            ey = np.where(uy > tiny, (self.h - 1 - gap - b.y) / np.maximum(uy, tiny),
+                          np.where(uy < -tiny, (b.y - gap) / np.maximum(-uy, tiny), np.inf))
+            edge = np.minimum(ex, ey)
+        else:
+            return room
+        return np.clip(np.minimum(room, edge - b.reach), 0.0, None)
 
     def scale_spin(self, wl, factor):
         """Spin a super well faster or slower, keeping its direction, between 0.05 and SUPER_SPIN_MAX."""
@@ -2133,22 +2212,26 @@ class World:
         that (a light super well can't hold back something at top speed anywhere outside its core)."""
         return horizon_for(self.g_scale * wl.pull(), self.softening(wl), self.kinv, wl.core())
 
-    def frame_turn(self, x, y, body=None):
+    def drag_rows(self):
+        """What frame_turn needs of each spinning super well: (the well, drag_share, reach, pull strength, softening,
+        range). Worked out once for many bodies while the wells stand still (carry_stars)."""
+        return [(wl, self.drag_share(wl), self.reach(wl), self.g_scale * wl.pull(), self.softening(wl),
+                 self.well_range(wl)) for wl in self.wells if wl.is_super and wl.spin]
+
+    def frame_turn(self, x, y, body=None, rows=None):
         """How the super wells' turning space carries a body at (x, y) this tick: (how far it turns in all, how far it
-        is carried along x and y). Not a super well (they only drag each other when spiralling in: _inspiral)."""
+        is carried along x and y). Not a super well (they only drag each other when spiralling in: _inspiral). rows:
+        drag_rows(), when already at hand."""
         turn = cx = cy = 0.0
         if getattr(body, "is_super", False):
             return turn, cx, cy
-        for wl in self.wells:
-            if wl.is_super and wl.spin:
-                dx, dy = self.delta(wl.x, wl.y, x, y)
-                om = kernels.frame_turn(dx, dy, self.drag_share(wl), self.reach(wl), self.g_scale * wl.pull(),
-                                        self.softening(wl), self.kinv, config.SUPER_DRAG_EDGE,
-                                        config.SUPER_DRAG_TURN_MAX, config.VMAX, self.well_range(wl),
-                                        config.SUPER_SWIRL_EDGE)
-                if om:
-                    ex, ey = kernels.frame_carry(dx, dy, om)
-                    turn, cx, cy = turn + om, cx + ex, cy + ey
+        for wl, share, reach, strength, soft, inner in self.drag_rows() if rows is None else rows:
+            dx, dy = self.delta(wl.x, wl.y, x, y)
+            om = kernels.frame_turn(dx, dy, share, reach, strength, soft, self.kinv, config.SUPER_DRAG_EDGE,
+                                    config.SUPER_DRAG_TURN_MAX, config.VMAX, inner, config.SUPER_SWIRL_EDGE)
+            if om:
+                ex, ey = kernels.frame_carry(dx, dy, om)
+                turn, cx, cy = turn + om, cx + ex, cy + ey
         return turn, cx, cy
 
     def _carry(self, b):
@@ -2609,6 +2692,7 @@ class World:
         self.merge_on = config.MERGE_ON
         self.split_on = config.SPLIT_ON
         self.scatter = config.COLLISION_SCATTER   # radians: how far off head-on loose particles bounce
+        self.star_damping = config.STAR_DAMPING
         self.radiation_on = config.RADIATION_ON
         self.orbit = config.ORBIT
         self.orbit_speed = self.orbit_speed_for(config.ORBIT_EDGE_SPEED)

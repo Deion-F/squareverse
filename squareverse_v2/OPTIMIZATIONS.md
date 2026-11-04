@@ -204,3 +204,43 @@ Checks: every change is bit-identical. Seeded single-core runs of disk and syste
 round scenes with super-well mergers, swallowed wells, a held well and waves, hash to the same state as `4a8102a`
 every 25–50 ticks. The band overlay renders the same pixels. (All-cores runs don't repeat even at `4a8102a`: use
 `--cpu` for such checks.)
+
+## 2026-11-03: stars' per-tick glue after `55da239` / `70c0ef8` (reach 120, star damping, frame dragging)
+
+Measured headless at 1920×1080, cell 2 (a round universe 1102 cells across), all cores, no GPU, in a busy systems
+scene: the systems preset plus 5 more super wells of 300k with 3 stars each, all spun to 3, a 75k-particle dust ring
+and 20 small blobs (~50–77k particles, ~15–20 stars, 8 super wells, global orbit off). Each figure is the median of the
+per-run tick medians, runs alternating HEAD (`387e1d7`) / now, from the same seeded start.
+
+| scene | HEAD | now | runs |
+|---|---|---|---|
+| busy, all cores, ticks 0–150 | 36.0 (34.3–42.7) | 31.2 (28.6–32.3) | 5 each |
+| busy, `--cpu` | 58.6 (56.7–66.3) | 51.6 (50.7–54.3) | 3 each |
+| systems preset, ticks 0–300 | 6.4 (6.1–7.4) | 5.4 (4.9–5.6) | 5 each |
+
+Where the time went: not in frame dragging. `kernels.step` with `SUPER_DRAG = 0` was within noise of it on (14.0 vs
+14.1 ms). It was the stars' Python glue, about 1 ms a star a tick (`step_stars` 17.0 ms for 15 stars):
+
+- `World._disk_cells` (numpy `meshgrid` and masks, ~180 µs) ran ~42 times a tick to find a star's cells, in
+  `_star_cells`, `_damp_stars` and twice in `carry_stars`. Now `kernels.owned_cells` (16 µs), same cells, same order.
+- `_damp_stars` (new in `55da239`) did ~25 numpy calls a star (~130 µs). Now `kernels.damp_star` (~16 µs), with
+  `kernels._pairwise_sum`, which adds up exactly as numpy does (pairwise, blocks of 8 below 128), so it is
+  bit-identical. Checked against `np.sum` on random arrays of every length 0–3000 and up to 100k. Keep it
+  non-recursive: a recursive cached kernel segfaulted every time it was loaded back from numba's disk cache.
+- `World.frame_turn` worked out each spinning well's reach, softening, range and drag share again for every star.
+  `carry_stars` now passes `drag_rows()`, worked out once a tick.
+
+`step_stars` came down from 17.0 to 8.6 ms in that scene. Seeded `--cpu` runs of the busy and plain systems scenes
+hash to the same state as HEAD every 25 ticks for 200 ticks.
+
+Still costly, not changed:
+
+- **Global orbit on:** `_carry_blobs` took 14.5 ms a tick in the busy scene (`find_blobs` 8.8 ms, a one-core flood
+  fill; `carry_blobs` 6.3; `occupied_par` 1.9). Unchanged since `9428b5e`.
+- `kernels.star_shift`: ~110 µs a call, ~1.5 calls a star a tick. Its `argsort` order (ties included) decides who
+  moves first, so a different sort would change results.
+- `_set_ring` (~47 µs a star) and `orbit_well`, in pure Python. Switching them to numpy's `hypot` would not be
+  bit-identical.
+- **The frame:** at zoom 0.49 `draw_world` costs ~15–20 ms a frame. That is `world.render` 4–9 ms, pygame
+  `smoothscale` (one core) 9.5–11 ms and blit + fill ~2 ms. Plain `scale` takes 3 ms but looks different. A
+  `prange` port of pygame's shrink filter would look the same.

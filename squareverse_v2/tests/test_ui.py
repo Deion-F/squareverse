@@ -125,3 +125,66 @@ def test_star_brush_turns_red_when_the_star_would_collapse():
             assert any(screen.get_at((x, 130))[:3] != (0, 0, 0) for x in range(100, 300)) == over   # the note
     finally:
         pygame.quit()
+
+
+def test_number_field_takes_a_typed_mass_and_keeps_keys_from_shortcuts(ui):
+    def frame(value, events=()):
+        for e in events:
+            if e.type == pygame.KEYDOWN:
+                assert ui.handle_key(e)                   # no shortcut sees it while typing
+            else:
+                ui.handle(e)
+        ui.begin()
+        value = ui.number_field("m", "Mass", value, 1.0, 50e6)
+        ui.end()
+        return value
+
+    v = frame(frame(1e6))                                 # lays the panel out
+    box = (ui.x + ui.w - 22 - 60, ui.panel.y + 12 + 10)
+    v = frame(v, click(box))
+    assert ui.editing == ("m", "")
+    keys = [pygame.event.Event(pygame.KEYDOWN, key=0, unicode=c) for c in "2.5m"]
+    v = frame(v, keys + [pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, unicode="\r")])
+    assert v == 2.5e6 and ui.editing is None
+    v = frame(v, click(box))
+    v = frame(v, [pygame.event.Event(pygame.KEYDOWN, key=0, unicode="9"),
+                  pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, unicode="")])
+    assert v == 2.5e6                                     # Esc backs out
+    assert not ui.handle_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_b, unicode="b"))
+
+
+def test_super_well_tool_links_mass_and_core():
+    pygame.init()
+    pygame.display.set_mode((800, 600))
+    try:
+        from sv.app import App
+        from sv.world import World, super_core
+        a = App(World(800, 600, 2, seed=1))
+        a.tool = "super"
+        a.super_mass = 3e6
+        assert a.tool_radius_px() == pytest.approx(super_core(3e6) * 2)    # the cursor is the core it places
+        a.scroll_size(1)
+        assert a.super_mass == 4e6                                         # the wheel steps whole millions
+        a.scroll_size(-5)
+        assert a.super_mass == a.world.collapse_threshold()                # ...down to the lightest there is
+        a.set_super_core_px(10 * 2)
+        assert super_core(a.super_mass) == pytest.approx(10, rel=0.01)    # a core size sets the mass it takes
+        wl = a.place("super", 400, 300)
+        assert wl.is_super and wl.mass == a.super_mass
+        a.set_repulsor_px(80)
+        rep = a.place("repulsor", 200, 300)
+        assert rep.sign < 0 and rep.radius * 2 == pytest.approx(80, rel=0.01)
+    finally:
+        pygame.quit()
+
+
+def test_placement_collapse_counts_what_is_already_there():
+    from sv.world import World
+    w = World(400, 300, 2, seed=1)
+    most, limit = w.placement_collapse(200, 150, 30, 256)
+    assert most > limit                                    # a brush full of 256s collapses
+    assert w.placement_collapse(200, 150, 30, 16)[0] < limit
+    star = w.placement_collapse(200, 150, 20, 64, star=True)
+    assert star == pytest.approx(w.star_collapse_check(20, 64))            # on empty space, as the star check
+    w.brush(200, 150, 30, 1024)                                            # heavy matter already there
+    assert w.placement_collapse(200, 150, 20, 64, star=True)[0] > star[0]

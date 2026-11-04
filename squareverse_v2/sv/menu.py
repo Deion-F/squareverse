@@ -6,7 +6,8 @@ import math
 
 from . import config
 from .presets import PRESETS
-from .world import DIRS, VIEW_MODES, Spawner, Star
+from .render import mass_label
+from .world import DIRS, VIEW_MODES, Spawner, Star, Well, super_core
 
 # the mouse tools: what a left click on the universe does
 TOOLS = [("pour", "Pour"), ("ghosts", "Ghosts"), ("erase", "Erase"), ("star", "Star"), ("auto", "Auto star"),
@@ -15,6 +16,8 @@ TOOLS = [("pour", "Pour"), ("ghosts", "Ghosts"), ("erase", "Erase"), ("star", "S
          ("delete", "Delete")]
 POUR_OPTIONS = ([(m, str(m)) for m in config.POUR_MASSES] + [(tuple(config.RANDOM_MASS), "Random")]     # 6 a row:
                 + [(m, str(m)) for m in config.HEAVY_POUR_MASSES] + [(tuple(config.RANDOM_HEAVY_MASS), "Rnd heavy")])
+WARN = (235, 190, 90)                            # a note that what the tool places won't last as it is
+DANGER = config.ORBIT_BAND_NONE_COLOR            # ...that it collapses into a super well at once
 REACH_MIN, REACH_MAX = 10, 400                   # the Reach slider (cells); at its top end gravity reaches everywhere
 
 INFO = {
@@ -28,7 +31,9 @@ INFO = {
                "orbited by three stars, and a few more round it with a star or two each. Empty: nothing. "
                "Keys: F1-F5.",
     "tool": "What a left click on the universe does. Pour / Ghosts / Erase work while you hold the button down; the "
-            "others act once per click, at the brush's size. Ghosts are particles that pass through everything for "
+            "others act once per click. Under the tool are only its own settings, and the cursor shows what a click "
+            "places - its size, with a label saying what it is and how heavy - turning red when it would collapse "
+            "into a super well at once. Ghosts are particles that pass through everything for "
             f"{config.GHOST_TICKS} ticks, then land. A star is a ball of particles held together by its own gravity; "
             "Auto star puts a star in a stable orbit round the super well clicked near, choosing its size, density, "
             "orbit and spot itself (up to three evenly spaced on one orbit; the green band shows where, a red "
@@ -38,16 +43,32 @@ INFO = {
             "drag it to move it. Right click always erases; shift+click pours ghosts (with the Star tool, places a "
             "ghost star) or drags a body. Keys: G, "
             "shift+G, B, F, shift+F, X.",
-    "brush": "The size of the brush circle: where particles are poured or erased, and how big a placed star, "
-             "repulsor or spawner is. The mouse wheel changes it too.",
+    "brush": "The radius of the brush circle: where particles are poured or erased, and how big a placed star or "
+             "spawner is. The mouse wheel changes it too.",
     "pour": "The mass of each poured particle (heavier ones sink through lighter ones and pull harder), or a random "
-            "mass from {} to {} each. A placed star fills the brush circle with a core of particles of this mass, "
+            "mass from {} to {} each. A placed star fills its circle with a core of particles of this mass, "
             "its outer layers lighter in proportion (3/8, then 1/8 of it), so this sets what it is made of and how "
-            "heavy it is. A repulsor weighs the brush's area x this, its size following its mass: the brush's size "
-            "at pour mass 1, bigger for heavier pours. The second row is heavy matter (up to the heaviest a "
-            "particle can be), for dense stars that hold together near big super wells. Keys: 1-6, shift+1-4 and "
-            "shift+6 for the second row.".format(
-                *config.RANDOM_MASS),
+            "heavy it is. The second row is heavy matter (up to the heaviest a particle can be), for dense stars "
+            "that hold together near big super wells. Packed densely enough, heavy matter collapses into a super "
+            "well: with Pour, the cursor turns red when filling the brush there would do that. Keys: 1-6, shift+1-4 "
+            "and shift+6 for the second row.".format(*config.RANDOM_MASS),
+    "star_mass": "What the star weighs in all: its radius and particle mass set it, and typing a mass here sizes it "
+                 "for you (as near as the particle mass allows; it grows with its area). Pick a heavier particle "
+                 "mass for a small, dense star, a lighter one for a big, loose one.",
+    "super_mass": "What the super well weighs, in steps of {} or typed (k / M for thousands / millions: 2.5M, "
+                  "750k). Its core - the black disc that swallows what touches it - follows, and the cursor shows "
+                  "it with its point of no return (dotted) and its whirlpool's range (faint) as they will be. min is "
+                  "the lightest there can be: what dense matter collapses into, lower when gravity is stronger. At "
+                  "the supernova mass (Stars and black holes) or over, it explodes moments after it is placed. The "
+                  "mouse wheel steps it too. Key: B places one at the mouse.".format(
+                      mass_label(config.SUPER_PLACE_STEP)),
+    "super_size": "The radius of the super well's core. Its core grows with the square root of its mass, so the mass "
+                  "changes to what that core takes: dragging this is the other way to set the same thing.",
+    "repulsor_mass": "What the repulsor weighs: how hard it pushes. A repulsor is a solid body of fixed density, so "
+                     "its size follows its mass (and the other way round below). Type one in (k / M for thousands "
+                     "/ millions) or pick one. Key: shift+G places one at the mouse.",
+    "repulsor_size": "The repulsor's radius. It has a fixed density, so its mass changes to what that size weighs. "
+                     "The mouse wheel changes it too.",
     "gdir": "Uniform gravity pulling everything one way, like the ground in a sand game; off for space scenes. Keys: "
             "arrows, Q / E to turn it, 0 for off.",
     "strength": "Scales all gravity: the direction above, stars, wells, super wells and self-gravity. Stronger "
@@ -87,8 +108,9 @@ INFO = {
     "star_collapse": "How much denser than loose matter a star must be to collapse into a super well: its own "
                      "particles count this many times less in the collapse check (x1: the same as loose matter). "
                      "The figure in brackets is what a star must hold in a 20 x 20 cell window. With the Star tool "
-                     "picked, the brush turns amber when the star it would place is near that and red (with a "
-                     "note) when it would collapse at once; a smaller brush or lighter pour keeps it a star.",
+                     "picked, the cursor turns amber when the star it would place there (with whatever is already "
+                     "there) is near that and red (with a note) when it would collapse at once; the tool's settings "
+                     "say how big a star stays one at its particle mass.",
     "explode": "How heavy a super well gets before it goes supernova: all its mass blasts out as a ring of heavy "
                "debris that cools and lands as particles. Higher lets super wells grow bigger and hold more of the "
                "universe before they blow; lower makes supernovae more frequent. A well already over a lowered "
@@ -110,6 +132,11 @@ INFO = {
                "back, as if they met a little off-centre, so a stream glances off whatever it hits instead of "
                "queueing up in a line behind it. 0 bounces them straight back. Stars' particles always bounce "
                "straight. Momentum is kept either way.",
+    "star_damping": "Internal friction in stars: this share of the jostling of a star's particles (their motion "
+                    "against the star moving and turning as a whole) fades every tick. Higher holds stars together "
+                    "more stiffly, like one solid lump; lower lets them slosh and wobble, so they are easier to "
+                    "deform and tear. 0 turns it off. A star's momentum is kept either way. Starts at "
+                    "{:.0%}.".format(config.STAR_DAMPING),
     "lean": "Each particle carries a little universe of children that slosh about inside it; with this on they "
             "steer it. It is a random push about as strong as weak gravity, so it makes orbits wander. Key: J.",
     "view": "What the colours show: mass, speed, which way the children lean, or which particles are awake "
@@ -146,8 +173,8 @@ INFO = {
                    "last, put it outside the faint circle (inside, the whirlpool tears it up) and far enough out "
                    "that the tide doesn't strip it (heavier wells need smaller, denser stars; wells over about 5M "
                    "can't hold any at the default reach): a pour-16 star from a 20 px brush holds 114-135 cells from an 80,000 "
-                   "well (B at pour mass 1). Off: it starts at rest. With the Star tool picked, a green band round "
-                   "each super well shows where the star the brush and pour mass would place can orbit; none means "
+                   "well. Off: it starts at rest. With the Star tool picked, a green band round "
+                   "each super well shows where the star the tool would place can orbit; none means "
                    "nowhere. Auto star picks the star and the spot for you. Key: T.",
     "body_mass": "Make it lighter or heavier. A star is rebuilt as a fresh layered ball as dense as it is, growing "
                  "or shrinking with the square root of the change; a repulsor takes the size a freshly placed one of "
@@ -161,6 +188,79 @@ def kind(body):
     if isinstance(body, Spawner):
         return "Locked spawner" if body.locked else "Spawner"
     return "Super well" if body.is_super else ("Repulsor" if body.sign < 0 else "Solid well")
+
+
+def draw_tool_settings(ui, app):
+    """The settings of the mouse tool picked, and only what changes what it places. A body's mass and size are
+    linked: set either one and the other follows, so what a click places is always known beforehand."""
+    w, tool = app.world, app.tool
+    cells = lambda px: f"{px:.0f} px ({max(1.0, px / w.cell):.0f} cells)"   # noqa: E731
+    if tool == "super":
+        lo, hi = app.super_mass_range()
+        step = config.SUPER_PLACE_STEP
+        opts = [(lo, f"{mass_label(lo)} min")] + [(m, mass_label(m))
+                                                    for m in range(step, min(10 * step, int(w.explode_mass)), step)]
+        app.super_mass = ui.choice("super_mass", "Mass", opts, app.super_mass, INFO["super_mass"], columns=5)
+        app.super_mass = ui.number_field("super_typed", "Or type a mass", app.super_mass, lo, hi, INFO["super_mass"],
+                                         fmt=mass_label)
+        core = app.super_core_px()
+        size = ui.slider("super_size", "Core size", core, super_core(lo) * w.cell, super_core(hi) * w.cell,
+                         INFO["super_size"], lambda v: f"{v / w.cell:.2f} cells", step=0.25 * w.cell)
+        if size != core:
+            app.set_super_core_px(size)
+        m = app.placed_super_mass()
+        wl = Well(0.0, 0.0, m, is_super=True)
+        ui.stats([("mass", f"{m:,.0f}"), ("point of no return", f"{w.horizon(wl):.0f} cells"),
+                  ("whirlpool", f"{w.well_range(wl):.0f} cells")])
+        if m >= w.explode_mass:
+            ui.note(f"At or over the supernova mass ({mass_label(w.explode_mass)}): it explodes moments after it is "
+                    "placed.", WARN)
+    elif tool == "repulsor":
+        lo, hi = app.repulsor_mass_range()
+        app.repulsor_mass = ui.choice("repulsor_mass", "Mass", [(m, mass_label(m)) for m in config.REPULSOR_PLACE_MASSES],
+                                      app.repulsor_mass, INFO["repulsor_mass"], columns=6)
+        app.repulsor_mass = ui.number_field("repulsor_typed", "Or type a mass", app.repulsor_mass, lo, hi,
+                                            INFO["repulsor_mass"], fmt=mass_label)
+        px = app.repulsor_px()
+        size = ui.slider("repulsor_size", "Size", px, *config.REPULSOR_SIZE_PX, INFO["repulsor_size"], cells, log=True,
+                         step=4)
+        if size != px:
+            app.set_repulsor_px(size)
+    elif tool == "auto":
+        ui.note("Click near a super well: Auto star picks the star's size, particle mass and orbit itself. The green "
+                "band round each super well shows where it would go.")
+    elif tool in ("select", "delete"):
+        ui.note("Click a star, well or spawner to select it (drag to move it)." if tool == "select" else
+                "Click a star, well or spawner to delete it (X deletes the one nearest the mouse).")
+    else:
+        lo, hi = config.PLACE_SIZE_PX
+        label = {"star": "Size", "spawner": "Size", "locked": "Size"}.get(tool, "Brush size")
+        app.brush_px = ui.slider("brush", label, app.brush_px, lo, hi, INFO["brush"], cells, integer=True, step=1)
+        if tool != "erase":
+            app.pour_mass = ui.choice("pour", "Particle mass" + (" (its core)" if tool == "star" else ""),
+                                      POUR_OPTIONS, app.pour_mass, INFO["pour"], columns=6)
+        if tool == "star":
+            mass = app.star_mass()
+            typed = ui.number_field("star_mass", "Star mass", mass, 1, 1e9, INFO["star_mass"], fmt=mass_label)
+            if typed != mass:
+                app.set_star_mass(typed)
+            if w.collapse_on:
+                most = app.largest_star_px()
+                if most is None:
+                    ui.note("Every star of this particle mass collapses into a super well at once: pick a lighter "
+                            "one.", DANGER)
+                elif app.brush_px > most:
+                    ui.note(f"Collapses into a super well at once: at this particle mass a star holds together up to "
+                            f"{most} px ({mass_label(app.star_mass(most))} mass).", DANGER)
+                elif most < hi:
+                    ui.note(f"Holds together up to {most} px ({mass_label(app.star_mass(most))} mass) at this "
+                            "particle mass.")
+            app.ghost_stars = ui.toggle("ghost_stars", "Stars arrive as ghosts", app.ghost_stars, INFO["ghost_stars"],
+                                        note=f"{len(w.ghost_stars)} arriving" if w.ghost_stars else None)
+            app.orbit_stars = ui.toggle("orbit_stars", "Stars start in orbit", app.orbit_stars, INFO["orbit_stars"])
+        elif tool in ("spawner", "locked"):
+            r = max(1.0, app.brush_px / w.cell)
+            ui.stats([("pours", f"{math.pi * r * r * config.SPAWNER_RATE * config.FPS:,.0f} particles/s")])
 
 
 def draw_menu(ui, app, fps):
@@ -197,12 +297,8 @@ def draw_menu(ui, app, fps):
 
     if ui.section("tool", "Mouse tool"):
         app.tool = ui.choice("tool", "Left click", TOOLS, app.tool, INFO["tool"], columns=3)
-        app.brush_px = ui.slider("brush", "Brush size", app.brush_px, 2, 160, INFO["brush"], "{} px",
-                                 integer=True, step=1)
-        app.pour_mass = ui.choice("pour", "Pour mass", POUR_OPTIONS, app.pour_mass, INFO["pour"], columns=6)
-        app.ghost_stars = ui.toggle("ghost_stars", "Stars arrive as ghosts", app.ghost_stars, INFO["ghost_stars"],
-                                    note=f"{len(w.ghost_stars)} arriving" if w.ghost_stars else None)
-        app.orbit_stars = ui.toggle("orbit_stars", "Stars start in orbit", app.orbit_stars, INFO["orbit_stars"])
+        ui.gap(4)
+        draw_tool_settings(ui, app)
         ui.gap()
 
     body = app.selected
@@ -324,6 +420,9 @@ def draw_menu(ui, app, fps):
             w.lean_on = ui.toggle("lean", "Children steer", w.lean_on, INFO["lean"])
             w.scatter = math.radians(ui.slider("scatter", "Bounce angle", math.degrees(w.scatter), 0, 45,
                                                INFO["scatter"], "up to {:.0f}°", step=1))
+        if ui.section("adv_stars", "Stars", level=1):
+            w.star_damping = ui.slider("star_damping", "Star damping", w.star_damping, 0.0, 0.5,
+                                       INFO["star_damping"], "{:.0%} a tick", step=0.01)
         if ui.section("adv_display", "Display", level=1):
             app.view = ui.choice("view", "Colour by", list(enumerate(VIEW_MODES)), app.view, INFO["view"],
                                  columns=4)

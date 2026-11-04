@@ -10,18 +10,19 @@ from .world import DIRS, VIEW_MODES, Star, Well
 
 HELP = [
     ("menu button / Tab", "open the control menu (bottom right): every setting, with an (i) explaining it"),
-    ("LMB / RMB / wheel", "use the mouse tool (pour by default; pick one in the menu) / erase / brush size"),
+    ("LMB / RMB / wheel", "use the mouse tool (pour by default; pick one in the menu) / erase / its size (with the "
+                          "Super well tool, its mass in steps of 1M)"),
     ("shift+LMB", f"pour ghosts: feel gravity but pass through everything for {config.GHOST_TICKS} ticks"),
-    ("1-5 / 6", "pour mass " + " / ".join(str(m) for m in config.POUR_MASSES)
+    ("1-5 / 6", "particle mass " + " / ".join(str(m) for m in config.POUR_MASSES)
      + " / random {}-{}".format(*config.RANDOM_MASS)),
-    ("shift+1-4 / shift+6", "heavy pour mass " + " / ".join(str(m) for m in config.HEAVY_POUR_MASSES)
+    ("shift+1-4 / shift+6", "heavy particle mass " + " / ".join(str(m) for m in config.HEAVY_POUR_MASSES)
      + " / random {}-{}".format(*config.RANDOM_HEAVY_MASS)),
-    ("G / shift+G", "place star (a ball of particles, core of pour-mass particles, held by its own gravity) / solid "
-                    "repulsor"),
+    ("G / shift+G", "place star (a ball of particles, core of particles of the particle mass, held by its own "
+                    "gravity) / repulsor of the Repulsor tool's mass"),
     ("shift+LMB, Star tool", "place a ghost star: flies through everything, lands as a star"),
     ("T", "placed stars set off in orbit round the super well pulling hardest on them, on/off"),
     ("F / shift+F", "place particle spawner: brush size sets the rate; shift locks it in place"),
-    ("B", "place super well (swallows what touches its core; overlapping ones merge)"),
+    ("B", "place super well of the Super well tool's mass (swallows what touches its core; overlapping ones merge)"),
     ("shift+B", "collapse: dense mass becomes a super well, on/off"),
     ("shift+drag on a body", "move a well or spawner, or pull a star along (heavy super wells are slow)"),
     ("X", "delete nearest star (and its particles), well or spawner"),
@@ -51,6 +52,15 @@ HELP = [
 
 def pour_label(m):
     return "{}-{} random".format(*m) if isinstance(m, tuple) else str(m)
+
+
+def mass_label(m):
+    """A mass, short: 6,936 / 321k / 2.5M."""
+    if m >= 999_500:
+        return f"{m / 1e6:.3g}M"
+    if m >= 9_999.5:
+        return f"{m / 1e3:.3g}k"
+    return f"{m:,.0f}"
 
 
 def _oval(center, radius, stretch, angle, n=28):
@@ -509,10 +519,11 @@ class Renderer:
             pygame.draw.line(self.screen, (120, 190, 255), (c[0] + r * math.cos(a0), c[1] + r * math.sin(a0)),
                              (c[0] + r * math.cos(a1), c[1] + r * math.sin(a1)), 2)
 
-    def draw_brush(self, tool, pos, radius, collapse=None):
+    def draw_brush(self, tool, pos, radius, collapse=None, label=None, warn=None):
         """The brush circle at the mouse, coloured by what a click will do: pour, erase, or place a body. collapse:
-        for a star, (the most it would hold in a collapse window, the limit; World.star_collapse_check) - near the
-        limit the circle turns amber, over it red (it would collapse into a super well at once), with a note."""
+        (what the densest collapse window would hold, the limit; World.placement_collapse) - near the limit the circle
+        turns amber, over it red (it would collapse into a super well at once), with a note. label: what a click
+        places, written under it; warn: (a note, its colour) under that, which colours the circle too."""
         if tool in ("select", "delete", "auto"):      # (Auto star picks its own size: it shows where it goes)
             color = {"select": (120, 190, 255), "delete": (230, 110, 110), "auto": (230, 150, 80)}[tool]
             pygame.draw.circle(self.screen, color, pos, 6, 1)
@@ -520,13 +531,41 @@ class Renderer:
         color = {"erase": (150, 80, 80), "star": (230, 150, 80), "repulsor": config.REPULSOR_COLOR,
                  "super": config.SUPER_RANGE_COLOR, "spawner": config.SPAWNER_COLOR,
                  "locked": config.SPAWNER_COLOR}.get(tool, (70, 76, 90))
+        notes = [(label, config.FG)] if label else []
+        if warn:
+            color = warn[1]
+            notes.append(warn)
         if collapse is not None and collapse[0] >= config.STAR_COLLAPSE_WARN * collapse[1]:
             over = collapse[0] >= collapse[1]
             color = config.ORBIT_BAND_NONE_COLOR if over else (235, 190, 90)
-            note = self.small.render(f"{'collapses into a super well' if over else 'near collapse'}: densest "
-                                     f"20x20 {collapse[0] / 1000:,.0f}k / {collapse[1] / 1000:,.0f}k", True, color)
-            self.screen.blit(note, (pos[0] - note.get_width() // 2, pos[1] + radius + 6))
+            what = "collapses into a super well" if tool == "star" else "filling it collapses into a super well"
+            notes.append((f"{what if over else 'near collapse'}: densest 20x20 "
+                          f"{mass_label(collapse[0])} / {mass_label(collapse[1])}", color))
         pygame.draw.circle(self.screen, color, pos, radius, 1)
+        y = pos[1] + radius + 6
+        for text, col in notes:
+            surf = self.small.render(text, True, col)
+            bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 2), pygame.SRCALPHA)
+            bg.fill((*config.BG, 170))
+            self.screen.blit(bg, (pos[0] - bg.get_width() // 2, y - 1))
+            self.screen.blit(surf, (pos[0] - surf.get_width() // 2, y))
+            y += surf.get_height() + 2
+
+    def draw_super_preview(self, world, pos, mass):
+        """What the Super well tool would place at window px pos: its whirlpool's range (faint), its point of no
+        return (dotted) and its core, as a placed one of this mass is drawn."""
+        wl = Well(0.0, 0.0, mass, is_super=True)
+        k = self.cam.k
+        pygame.draw.circle(self.screen, config.SUPER_WHIRL_COLOR, pos, max(1, round(world.well_range(wl) * k)), 1)
+        core = max(3, round(wl.core() * k))
+        horizon = world.horizon(wl) * k
+        if horizon > core + 2:
+            dots = max(24, int(2 * math.pi * horizon / 9))
+            for d in range(dots):
+                a = 2 * math.pi * d / dots
+                pygame.draw.circle(self.screen, config.SUPER_RANGE_COLOR,
+                                   (int(pos[0] + horizon * math.cos(a)), int(pos[1] + horizon * math.sin(a))), 1)
+        pygame.draw.circle(self.screen, (0, 0, 0), pos, core)
 
     def draw_status(self, world, app, fps):
         """Always in the top-left corner: how many particles there are, how many ticks run per second, and the frame

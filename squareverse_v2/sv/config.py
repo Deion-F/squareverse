@@ -34,6 +34,12 @@ DISK_FILL = 0.6                        # ...filling this share of its ring's cel
 TICKS_PER_FRAME = 1                    # + / -
 BRUSH_PX = 40                          # brush circle radius (mouse wheel), in px at zoom 1
 POUR_MASS = 4                          # a mass, or "random" for RANDOM_MASS (keys 1-6)
+SUPER_PLACE_MASS = 1_000_000           # a placed super well's mass (B, Super well tool); its core size follows it
+SUPER_PLACE_STEP = 1_000_000           #   the menu's mass buttons and the mouse wheel step it by this
+REPULSOR_PLACE_MASS = 250_000          # a placed repulsor's mass (shift+G, Repulsor tool); its size follows it
+REPULSOR_PLACE_MASSES = (50_000, 100_000, 250_000, 500_000, 1_000_000, 2_000_000)   # the menu's mass buttons
+PLACE_SIZE_PX = (2, 160)               # the brush, a star or a spawner: radius range in px at zoom 1 (mouse wheel)
+REPULSOR_SIZE_PX = (2, 320)            # a repulsor's radius range in px at zoom 1
 VIEW = "mass"                          # mass, speed, children or awake (V)
 INSPECTOR_ON = True                    # I
 HELP_ON = False                        # H
@@ -343,4 +349,10 @@ SUPER_BLAST_PUSH = 60.0                # the front shoves every particle it pass
 SUPER_BLAST_DRAG = 0.1                 #   behind the front, outward motion fades by this much per tick (so a shoved
                                        #   particle coasts about 1 / this x its speed, not for ever)
 SUPER_BLAST_SETTLE = 40                #   and keeps fading for this many ticks after the front has stopped
+SUPER_BLAST_COAST = 1.0                # the debris doesn't stop with the front: it keeps flying (still ghosts, so it
+                                       #   can't clump yet), slowing the same way, to rest this x the front's reach
+                                       #   further out (so 2x as far in all), less where the universe's edge is
+                                       #   closer; 0 = it stops with the front
+SUPER_BLAST_COAST_MARGIN = 10.0        #   ... stopping at least this many cells short of the universe's edge (room
+                                       #   for the pieces' scatter and landing GHOST_LAND_NEAR away)
 SUPER_EXPLODE_CALM = 180               # ticks after an explosion before anything can collapse again

@@ -34,6 +34,20 @@ DIM = config.DIM
 DARK = (16, 18, 23)
 
 
+def parse_number(text):
+    """A typed number: digits with an optional k / M (thousands / millions) after them, commas and spaces ignored
+    ("2.5M", "300k", "1,500,000"). None if it isn't one."""
+    t = text.replace(",", "").replace(" ", "").lower()
+    scale = {"k": 1e3, "m": 1e6}.get(t[-1:], 1.0)
+    if scale != 1.0:
+        t = t[:-1]
+    try:
+        v = float(t) * scale
+    except ValueError:
+        return None
+    return v if math.isfinite(v) else None
+
+
 def wrap(font, text, width):
     """Lines of text no wider than width (px)."""
     lines = []
@@ -68,6 +82,9 @@ class UI:
         self.scroll = 0
         self.content_h = 0
         self.panel = None             # the panel as last drawn (None while the menu is closed)
+        self.editing = None           # (key, text typed so far) of the number box being typed in
+        self.typed = None             # (key, number) just entered in a number box, until the box takes it
+        self._edit_seen = False       # the box being typed in was laid out this frame
         self.x = self.w = self.y = self.y0 = 0
         self._bg = None
 
@@ -88,11 +105,13 @@ class UI:
     def handle(self, e):
         """Take a mouse event if it is the menu's. Returns True if it was."""
         if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            typing = self.editing is not None
+            self._commit()                               # a click anywhere enters what was typed...
             if self.over(e.pos):
                 self.click = e.pos
                 return True
-            if self.info is not None:                    # a click anywhere else closes an explanation
-                self.info = self.info_rect = None
+            if typing or self.info is not None:          # ...and one off the menu does only that, or closes an
+                self.info = self.info_rect = None        #   explanation
                 return True
         elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
             self.active = None
@@ -100,6 +119,31 @@ class UI:
             self.scroll -= e.y * 40
             return True
         return False
+
+    def handle_key(self, e):
+        """Take a key press while a number box is being typed in: it takes them all, so no shortcut fires. Enter
+        enters the number, Esc backs out. Returns True if it took the key."""
+        if self.editing is None:
+            return False
+        key, text = self.editing
+        if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._commit()
+        elif e.key == pygame.K_ESCAPE:
+            self.editing = None
+        elif e.key == pygame.K_BACKSPACE:
+            self.editing = (key, text[:-1])
+        elif e.unicode and e.unicode in "0123456789.,kKmM" and len(text) < 14:
+            self.editing = (key, text + e.unicode)
+        return True
+
+    def _commit(self):
+        """Enter what was typed in the number box being typed in (nothing if it isn't a number), and stop typing."""
+        if self.editing is not None:
+            key, text = self.editing
+            v = parse_number(text)
+            if v is not None:
+                self.typed = (key, v)
+            self.editing = None
 
     def take_click(self, rect, clip=True):
         """Whether this frame's click landed on rect (inside the visible panel, if clip); it is used up if so."""
@@ -209,6 +253,10 @@ class UI:
         self._draw_info()
         if self.click is not None and p.collidepoint(self.click):
             self.click = None                            # a click on empty panel does nothing
+        if not self._edit_seen:                          # its box is gone (another tool, a folded section)
+            self.editing = None
+        self._edit_seen = False
+        self.typed = None
         self._let_go()
 
     def _let_go(self):
@@ -223,6 +271,7 @@ class UI:
         self.panel = self.info_rect = None
         self.info = None
         self.click = None
+        self.editing = self.typed = None
         self._let_go()
 
     def _draw_info(self):
@@ -360,6 +409,39 @@ class UI:
         value = min(max(round(k * step, 6), lo), hi)
         return int(round(value)) if integer else value
 
+    def number_field(self, key, label, value, lo, hi, info=None, fmt=str, note=None):
+        """A number you can type: click the box, type it (k / M for thousands / millions, see parse_number), Enter or
+        a click elsewhere to set it, Esc to back out. fmt formats the value shown. Returns the value (a typed one
+        kept in [lo, hi])."""
+        if self.typed is not None and self.typed[0] == key:
+            value = min(max(self.typed[1], lo), hi)
+            self.typed = None
+        y = self._row(ROW_H + 2)
+        box = pygame.Rect(self.x + self.w - 22 - 120, y + 2, 120, ROW_H - 4)
+        if self.take_click(box):
+            self.editing = (key, "")
+        editing = self.editing is not None and self.editing[0] == key
+        self._edit_seen |= editing
+        if not self._visible(y, ROW_H):
+            return value
+        tx = self.x + self.text(label, self.x, y + 5)
+        if note:
+            self.text(note, tx + 8, y + 7, DIM, self.small)
+        pygame.draw.rect(self.screen, DARK, box, border_radius=4)
+        pygame.draw.rect(self.screen, ACCENT if editing else EDGE, box, 1, border_radius=4)
+        if editing:
+            text = self.editing[1]
+            caret = "|" if pygame.time.get_ticks() // 500 % 2 == 0 else ""
+            if text:
+                self.text(text + caret, box.x + 8, box.y + 4)
+            else:
+                self.text(caret + "e.g. 2.5M, 300k", box.x + 8, box.y + 5, DIM, self.small)
+        else:
+            self.text(fmt(value), box.right - 8, box.y + 4, ACCENT, right=True)
+            self.text("type", box.x + 6, box.y + 5, DIM, self.small)
+        self._info_button(key, label, info, y, ROW_H)
+        return value
+
     def choice(self, key, label, options, value, info=None, columns=None):
         """Buttons for one of several options, the chosen one lit. options: (value, text) pairs. columns: lay them
         out in that many equal columns (else as many as fit). Returns the value."""
@@ -472,14 +554,14 @@ class UI:
                 x += self.text(label, x, y + k * line_h, DIM, self.small) + 4
                 x += self.text(value, x, y + k * line_h, TEXT, self.small) + gap
 
-    def note(self, text):
+    def note(self, text, color=DIM):
         """A line or two of small explanatory text."""
         lines = wrap(self.small, text, self.w)
         line_h = self.small.get_linesize()
         y = self._row(line_h * len(lines) + 4)
         if self._visible(y, line_h * len(lines)):
             for k, line in enumerate(lines):
-                self.text(line, self.x, y + k * line_h, DIM, self.small)
+                self.text(line, self.x, y + k * line_h, color, self.small)
 
     def gap(self, h=6):
         self._row(h)
