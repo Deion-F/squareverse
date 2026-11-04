@@ -1654,16 +1654,61 @@ def field(w, h, block, wells, near, gx, gy, fx, fy, phi, wrap, kinv):
 
 
 @njit(cache=True)
+def _in_disc(xx, cx, dy, r):
+    dx = xx - cx
+    return dx * dx + dy * dy <= r * r
+
+
+@njit(cache=True)
+def _wake_disc_row(yy, cx, cy, r, x0, x1, xmin, ymin, w, h, mass, flag):
+    """wake_disk() along row yy of its span: the cells of a row inside a disc are one run, so it finds the run's ends
+    (the same test per cell) and wakes what lies between without testing each cell."""
+    dy = _axis(yy, cy, h, ymin)
+    row = (yy % h) * w
+    if xmin:                                             # the disc spans the whole wrapped axis: cell by cell
+        for xx in range(x0, x1):
+            dx = _axis(xx, cx, w, True)
+            if dx * dx + dy * dy <= r * r:
+                wake(row + xx, mass, flag)
+        return
+    if dy * dy > r * r or x0 >= x1:
+        return
+    m = min(max(np.int64(np.floor(cx)), x0), x1 - 1)    # the cell nearest the centre (or the next one) is in the
+    if not _in_disc(m, cx, dy, r):                      #   run if anything is
+        m = min(m + 1, x1 - 1)
+        if not _in_disc(m, cx, dy, r):
+            return
+    s = np.sqrt(max(r * r - dy * dy, 0.0))
+    lo = min(max(np.int64(np.floor(cx - s)), x0), m)
+    if _in_disc(lo, cx, dy, r):
+        while lo > x0 and _in_disc(lo - 1, cx, dy, r):
+            lo -= 1
+    else:
+        while not _in_disc(lo, cx, dy, r):
+            lo += 1
+    hi = max(min(np.int64(np.floor(cx + s)) + 1, x1 - 1), m)
+    if _in_disc(hi, cx, dy, r):
+        while hi < x1 - 1 and _in_disc(hi + 1, cx, dy, r):
+            hi += 1
+    else:
+        while not _in_disc(hi, cx, dy, r):
+            hi -= 1
+    if lo >= 0 and hi < w:
+        m, f = mass[row + lo:row + hi + 1], flag[row + lo:row + hi + 1]
+        for k in range(m.size):                          # (flag is 0 or 1: or-ing in vectorizes, a branch didn't)
+            f[k] |= np.uint8(m[k] != 0)
+    else:
+        for xx in range(lo, hi + 1):
+            wake(row + xx % w, mass, flag)
+
+
+@njit(cache=True)
 def wake_disk(cx, cy, r, w, h, mass, flag, wrap):
     """Wake every particle within r cells of (cx, cy)."""
     x0, x1, xmin = _span(cx, r, w, wrap)
     y0, y1, ymin = _span(cy, r, h, wrap)
     for yy in range(y0, y1):
-        dy = _axis(yy, cy, h, ymin)
-        for xx in range(x0, x1):
-            dx = _axis(xx, cx, w, xmin)
-            if dx * dx + dy * dy <= r * r:
-                wake((yy % h) * w + xx % w, mass, flag)
+        _wake_disc_row(yy, cx, cy, r, x0, x1, xmin, ymin, w, h, mass, flag)
 
 
 @njit(cache=True, parallel=True)
@@ -1672,11 +1717,14 @@ def wake_disk_par(cx, cy, r, w, h, mass, flag, wrap):
     x0, x1, xmin = _span(cx, r, w, wrap)
     y0, y1, ymin = _span(cy, r, h, wrap)
     for yy in prange(y0, y1):
-        dy = _axis(yy, cy, h, ymin)
-        for xx in range(x0, x1):
-            dx = _axis(xx, cx, w, xmin)
-            if dx * dx + dy * dy <= r * r:
-                wake((yy % h) * w + xx % w, mass, flag)
+        _wake_disc_row(yy, cx, cy, r, x0, x1, xmin, ymin, w, h, mass, flag)
+
+
+@njit(cache=True)
+def wake_disks(discs, w, h, mass, flag, wrap):
+    """wake_disk() for each row of discs (x, y, r)."""
+    for k in range(discs.shape[0]):
+        wake_disk(discs[k, 0], discs[k, 1], discs[k, 2], w, h, mass, flag, wrap)
 
 
 @njit(cache=True, parallel=True)
@@ -1826,6 +1874,130 @@ def star_field(stars, w, h, block, cw, ch, sfx, sfy, wrap, kinv):
             sfy[by * cw + bx] = sy
 
 
+@njit(cache=True, parallel=True)
+def star_field_par(stars, w, h, block, cw, ch, sfx, sfy, wrap, kinv):
+    """star_field() on all cores, a row of blocks each (the same sums in the same order)."""
+    for by in prange(ch):
+        cy = by * block + (block - 1) * 0.5
+        for bx in range(cw):
+            cx = bx * block + (block - 1) * 0.5
+            sx = sy = 0.0
+            for k in range(stars.shape[0]):
+                dx = _axis(stars[k, 0], cx, w, wrap)
+                dy = _axis(stars[k, 1], cy, h, wrap)
+                rho = np.sqrt(dx * dx + dy * dy + stars[k, 3])
+                f = stars[k, 2] / (rho * rho * rho) * fade(rho, kinv)[0]
+                sx += dx * f
+                sy += dy * f
+            sfx[by * cw + bx] = sx
+            sfy[by * cw + bx] = sy
+
+
+@njit(cache=True)
+def remap_owner(owner, table):
+    """owner[i] = table[owner[i]] (stars renumbered or merged: World._remap_owner), without numpy's temporary."""
+    for i in range(owner.size):
+        o = owner[i]
+        if o != 0:
+            owner[i] = table[o]
+
+
+@njit(cache=True)
+def disc_moments(x, y, r, w, h, mass, wrap):
+    """Over the cells within r of cell (x, y) (whole numbers; as World._disk_cells counts them): the mass, and its
+    moments mass x dx and mass x dy. Sums of whole numbers, so exactly numpy's (World._knot_centre)."""
+    m = mx = my = 0.0
+    for yy in range(y - r, y + r + 2):
+        for xx in range(x - r, x + r + 2):
+            dx, dy = xx - x, yy - y
+            if dx * dx + dy * dy > r * r:
+                continue
+            i = _cell(xx, yy, w, h, wrap)
+            if i >= 0 and mass[i] != 0:
+                mi = np.float64(mass[i])
+                m += mi
+                mx += dx * mi
+                my += dy * mi
+    return m, mx, my
+
+
+@njit(cache=True)
+def packed_radius(x, y, r_max, fill, w, h, mass, wrap):
+    """World._packed_radius on cell (x, y): the largest whole radius up to r_max of a disc at least `fill` full of
+    particles. A cell counts from the smallest whole radius it is within (ceil of its distance: on whole offsets
+    that is the smallest k with k^2 >= dx^2 + dy^2, as np.ceil(np.hypot()) gives)."""
+    cells = np.zeros(r_max + 1, np.int64)
+    full = np.zeros(r_max + 1, np.int64)
+    for yy in range(y - r_max, y + r_max + 2):
+        for xx in range(x - r_max, x + r_max + 2):
+            dx, dy = xx - x, yy - y
+            d2 = dx * dx + dy * dy
+            if d2 > r_max * r_max:
+                continue
+            i = _cell(xx, yy, w, h, wrap)
+            if i < 0:
+                continue
+            k = np.int64(np.sqrt(np.float64(d2)))
+            while k * k < d2:
+                k += 1
+            while k > 0 and (k - 1) * (k - 1) >= d2:
+                k -= 1
+            cells[k] += 1
+            if mass[i] != 0:
+                full[k] += 1
+    nc = nf = 0
+    nc += cells[0]
+    nf += full[0]
+    for k in range(1, r_max + 1):
+        nc += cells[k]
+        nf += full[k]
+        if not np.float64(nf) >= fill * np.float64(max(nc, 1)):
+            return k - 1
+    return r_max
+
+
+@njit(cache=True)
+def _median(a):
+    """np.median of a (not empty): the middle value, or the mean of the middle two, as numpy works it out."""
+    s = np.sort(a)
+    n = s.size
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+@njit(cache=True)
+def layered(lm, r, cuts, gap, k, pure):
+    """World.layered on log masses lm at shares r of the knot's radius, divided at each of cuts in turn (the same
+    medians, means and comparisons, without numpy's ~40 calls a cut)."""
+    for f in cuts:
+        na = 0
+        for q in range(r.size):
+            na += r[q] <= f
+        nb = r.size - na
+        if na < k or nb < k:
+            continue
+        a, b = np.empty(na), np.empty(nb)
+        ia = ib = 0
+        for q in range(r.size):
+            if r[q] <= f:
+                a[ia] = lm[q]
+                ia += 1
+            else:
+                b[ib] = lm[q]
+                ib += 1
+        ma, mb = _median(a), _median(b)
+        if ma - mb < gap:
+            continue
+        t = (ma + mb) / 2
+        above = below = 0
+        for v in a:
+            above += v > t
+        for v in b:
+            below += v <= t
+        if above / na >= pure and below / nb >= pure:
+            return True
+    return False
+
+
 @njit(cache=True)
 def update_stars(stars, w, h, mass, kin, owner, best, sums, wrap, kinv):
     """Work out which particles belong to which star. stars rows: x, y (where its centre is expected), vx, vy, pull
@@ -1879,6 +2051,71 @@ def update_stars(stars, w, h, mass, kin, owner, best, sums, wrap, kinv):
                 ux, uy = kin[i, 0] - vx, kin[i, 1] - vy
                 sums[k, 0] += m
                 sums[k, 1] += m * (dx + kin[i, 2])         # where it is within its cell, too
+                sums[k, 2] += m * (dy + kin[i, 3])
+                sums[k, 3] += m * kin[i, 0]
+                sums[k, 4] += m * kin[i, 1]
+                sums[k, 5] += 1.0
+                sums[k, 6] += dx
+                sums[k, 7] += dy
+                sums[k, 8] += d2
+                sums[k, 9] += m * (dx * uy - dy * ux)
+                sums[k, 10] += m * d2
+
+
+@njit(cache=True, parallel=True)
+def update_stars_par(stars, w, h, mass, kin, owner, best, sums, wrap, kinv):
+    """update_stars() on all cores, the same result: which star a particle goes to, a grid row at a time (each cell
+    still sees the stars in turn), then each star's sums, a star at a time (each in the same order)."""
+    owner[:] = 0
+    sums[:] = 0.0
+    n = stars.shape[0]
+    spans = np.empty((n, 6), np.int64)
+    for k in range(n):
+        x0, x1, xmin = _span(stars[k, 0], stars[k, 6], w, wrap)
+        y0, y1, ymin = _span(stars[k, 1], stars[k, 6], h, wrap)
+        spans[k, 0], spans[k, 1], spans[k, 2], spans[k, 3], spans[k, 4], spans[k, 5] = x0, x1, xmin, y0, y1, ymin
+    for g in prange(h):
+        for k in range(n):
+            yy = spans[k, 3] + (g - spans[k, 3]) % h     # the one of its rows (if any) on grid row g
+            if yy >= spans[k, 4]:
+                continue
+            cx, cy, vx, vy, s, s2, r = stars[k, 0], stars[k, 1], stars[k, 2], stars[k, 3], stars[k, 4], \
+                stars[k, 5], stars[k, 6]
+            dy = _axis(yy, cy, h, spans[k, 5] != 0)
+            for xx in range(spans[k, 0], spans[k, 1]):
+                dx = _axis(xx, cx, w, spans[k, 2] != 0)
+                d2 = dx * dx + dy * dy
+                if d2 > r * r:
+                    continue
+                i = (yy % h) * w + xx % w
+                if mass[i] == 0:
+                    continue
+                ux, uy = kin[i, 0] - vx, kin[i, 1] - vy
+                rho = np.sqrt(d2 + s2)
+                if 0.5 * (ux * ux + uy * uy) >= s / rho * fade(rho, kinv)[1]:
+                    continue
+                depth = d2 / (r * r)
+                if owner[i] == 0 or depth < best[i]:
+                    owner[i] = k + 1
+                    best[i] = depth
+    for k in prange(n):
+        cx, cy, vx, vy, r = stars[k, 0], stars[k, 1], stars[k, 2], stars[k, 3], stars[k, 6]
+        x0, x1, xmin = spans[k, 0], spans[k, 1], spans[k, 2] != 0
+        y0, y1, ymin = spans[k, 3], spans[k, 4], spans[k, 5] != 0
+        for yy in range(y0, y1):
+            dy = _axis(yy, cy, h, ymin)
+            for xx in range(x0, x1):
+                dx = _axis(xx, cx, w, xmin)
+                d2 = dx * dx + dy * dy
+                if d2 > r * r:
+                    continue
+                i = (yy % h) * w + xx % w
+                if owner[i] != k + 1:
+                    continue
+                m = np.float64(mass[i])
+                ux, uy = kin[i, 0] - vx, kin[i, 1] - vy
+                sums[k, 0] += m
+                sums[k, 1] += m * (dx + kin[i, 2])
                 sums[k, 2] += m * (dy + kin[i, 3])
                 sums[k, 3] += m * kin[i, 0]
                 sums[k, 4] += m * kin[i, 1]
@@ -2136,6 +2373,29 @@ def star_motion(stars, w, h, mass, kin, owner, out, wrap):
                     out[k, c + 2] += m * kin[i, 1]
 
 
+@njit(cache=True, parallel=True)
+def star_motion_par(stars, w, h, mass, kin, owner, out, wrap):
+    """star_motion() on all cores, a star at a time (the same sums)."""
+    out[:] = 0.0
+    for k in prange(stars.shape[0]):
+        cx, cy, r = stars[k, 0], stars[k, 1], stars[k, 2]
+        x0, x1, xmin = _span(cx, r, w, wrap)
+        y0, y1, ymin = _span(cy, r, h, wrap)
+        for yy in range(y0, y1):
+            dy = _axis(yy, cy, h, ymin)
+            for xx in range(x0, x1):
+                dx = _axis(xx, cx, w, xmin)
+                if dx * dx + dy * dy > r * r:
+                    continue
+                i = (yy % h) * w + xx % w
+                if owner[i] == k + 1 and mass[i] != 0:
+                    m = np.float64(mass[i])
+                    c = 0 if _held_up(xx % w, yy % h, k + 1, -dx, -dy, w, h, mass, owner, wrap) >= 0 else 3
+                    out[k, c] += m
+                    out[k, c + 1] += m * kin[i, 0]
+                    out[k, c + 2] += m * kin[i, 1]
+
+
 @njit(cache=True)
 def star_shift(k, sx, sy, cx, cy, r, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner, solid, hole,
                absorbed, push, star_mass, wrap):
@@ -2235,6 +2495,89 @@ def star_shift(k, sx, sy, cx, cy, r, e, wall_e, w, h, mass, kin, quad, shade, st
         wake_around(i, w, h, mass, flag, wrap)
         moved += 1
     return moved
+
+
+@njit(cache=True)
+def _carry_star(k, plan, nsteps, steps, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner, solid, hole,
+                absorbed, push, wrap):
+    """World.carry_stars' work on the grid for star k (plan row: x, y, r, cos and sin of its turn or 0 and 0 for
+    none, its mass): turn its particles' velocities (in float32, as numpy did), carry it nsteps[k] cells
+    (star_shift, steps[k]) and share the knocks it took (push) out over all of it."""
+    x, y, r, c, sn, star_mass = plan[k, 0], plan[k, 1], plan[k, 2], plan[k, 3], plan[k, 4], plan[k, 5]
+    if c != 0.0 or sn != 0.0:
+        c32, s32 = np.float32(c), np.float32(sn)
+        for i in owned_cells(x, y, r, k, w, h, owner, wrap):
+            vx, vy = kin[i, 0], kin[i, 1]
+            kin[i, 0] = c32 * vx - s32 * vy
+            kin[i, 1] = s32 * vx + c32 * vy
+    cx = cy = 0
+    for q in range(nsteps[k]):
+        sx, sy = steps[k, q, 0], steps[k, q, 1]
+        star_shift(k, sx, sy, x + cx, y + cy, r, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner, solid,
+                   hole, absorbed, push, star_mass, wrap)
+        cx += sx
+        cy += sy
+    if push[0] != 0.0 or push[1] != 0.0:
+        idx = owned_cells(x + cx, y + cy, r, k, w, h, owner, wrap)
+        held = 0
+        for i in idx:
+            held += np.int64(mass[i])
+        if held > 0:
+            px, py = push[0] / np.float64(held), push[1] / np.float64(held)
+            for i in idx:                                # (float32 += float64, as numpy does it)
+                kin[i, 0] = np.float32(np.float64(kin[i, 0]) + px)
+                kin[i, 1] = np.float32(np.float64(kin[i, 1]) + py)
+
+
+@njit(cache=True)
+def carry_stars(plan, nsteps, steps, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner, solid, hole,
+                absorbed, push, wrap):
+    """_carry_star() for every star in turn (push: a row per star)."""
+    for k in range(plan.shape[0]):
+        _carry_star(k, plan, nsteps, steps, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner, solid, hole,
+                    absorbed, push[k], wrap)
+
+
+@njit(cache=True)
+def carry_levels(plan, nsteps, steps, w, h, wrap):
+    """When each star can be carried (carry_stars_par): the cells star k touches lie within r + 3 of the line it
+    is carried along; two stars whose such regions overlap are carried in their turn (the later one at a later
+    level), the rest side by side. A region reaching half way round a wrapped grid overlaps everything."""
+    n = plan.shape[0]
+    mx, my, rad = np.empty(n), np.empty(n), np.empty(n)
+    for k in range(n):
+        cx = cy = 0
+        for q in range(nsteps[k]):
+            cx += steps[k, q, 0]
+            cy += steps[k, q, 1]
+        mx[k], my[k] = plan[k, 0] + 0.5 * cx, plan[k, 1] + 0.5 * cy
+        rad[k] = plan[k, 2] + 4.0 + 0.5 * np.sqrt(np.float64(cx * cx + cy * cy))
+    level = np.zeros(n, np.int64)
+    for k in range(n):
+        whole = wrap and 4.0 * rad[k] >= min(w, h)
+        for j in range(k):
+            if level[j] < level[k]:                      # (it would come before k anyway)
+                continue
+            if not (whole or (wrap and 4.0 * rad[j] >= min(w, h))):
+                dx = _axis(mx[j], mx[k], w, wrap)
+                dy = _axis(my[j], my[k], h, wrap)
+                if dx * dx + dy * dy >= (rad[j] + rad[k]) * (rad[j] + rad[k]):
+                    continue
+            level[k] = level[j] + 1
+    return level
+
+
+@njit(cache=True, parallel=True)
+def carry_stars_par(order, starts, plan, nsteps, steps, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner,
+                    solid, hole, absorbed, push, wrap):
+    """carry_stars() on all cores, the same result: the stars of a level (order[starts[l]:starts[l + 1]], from
+    carry_levels) touch different cells, so they are carried side by side, and stars that share cells still go in
+    their turn. absorbed and push: a row per star."""
+    for lv in range(starts.size - 1):
+        for q in prange(starts[lv], starts[lv + 1]):
+            k = order[q]
+            _carry_star(k, plan, nsteps, steps, e, wall_e, w, h, mass, kin, quad, shade, stamp, flag, owner, solid,
+                        hole, absorbed[k], push[k], wrap)
 
 
 # --- blobs carried by the global orbit ------------------------------------------------------------------

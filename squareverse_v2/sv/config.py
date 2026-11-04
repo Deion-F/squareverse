@@ -11,11 +11,16 @@ MAX_TICKS_PER_FRAME = 8
 STRIP_SIZE = 20                        # cells: on all cores the particles run in strips at least this thick, and
                                        #   at least 2 x (MAX_STEPS + 2) so two running together never meet; thinner
                                        #   strips share clumps of matter out more evenly
-WAKE_PAR_RADIUS = 64.0                 # cells: a moved well wakes the particles in its reach on all cores only when
-                                       #   that is wider than this (starting the cores costs more than a small disc)
+WAKE_PAR_RADIUS = 300.0                # cells: a moved well wakes the particles in its reach on all cores only when
+                                       #   that is wider than this (starting the cores costs more than a small disc:
+                                       #   one core wakes a 200-cell disc in ~40 us, the cores' tail is ~250 us)
+STAR_CARRY_PAR = 8                     # stars carried on all cores once there are this many (kernels.carry_stars_par)
 
 # --- Starting state of the app ----------------------------------------------
 DEFAULT_PRESET = "systems"             # rain, disk, cloud, binary, systems or empty (--preset overrides)
+SYSTEM_REACH = 120.0                   # the systems and binary presets keep the gravity reach and strength their orbits
+SYSTEM_SCALE = 0.6                     #   were tuned for (at the default 30 a star orbiting a super well spirals in
+                                       #   within a few turns: TO_DO.md)
 SYSTEM_WELL = 80_000                   # the systems preset: super wells this heavy (B at pour mass 1, default brush),
 SYSTEM_ORBIT = 120.0                   #   each orbited this far out (cells: the middle of where they can, 92-135 at a
 SYSTEM_STAR_RADIUS = 10.0              #   reach of 120) by stars of this size (cells; a 20 px brush: three of the
@@ -28,7 +33,8 @@ SYSTEM_EDGE = 10.0                     # their stars clear of the edge by this (
 SYSTEM_BALANCE = 0.1                   # where the others' pulls on the middle one cancel to under this share of one's
                                        #   at the nearest they may be (else its stars are dragged off their orbits,
                                        #   as its well responds less: Well.fall)
-DISK_REACH = 20.0                      # the disk preset's gravity reach (cells), which it was made for
+DISK_REACH = 20.0                      # the disk preset's gravity reach (cells) and strength, which it was made for
+DISK_SCALE = 0.6
 DISK_MASS = 20_000_000                 # the disk preset's total mass, in particles of every mass from 1 up
 DISK_FILL = 0.6                        # ...filling this share of its ring's cells
 TICKS_PER_FRAME = 1                    # + / -
@@ -124,10 +130,12 @@ HEAT_COLOR = RADIATION_COLOR           #   heat looked like the stars' own parti
 G_SCALE_STEP = 1.25                    # < / > multiply or divide all gravity by this
 GLOBAL_G = 0.2                         # global gravity (arrow keys), at gravity scale 1
 GRAVITY_DIR = None                     # starting global gravity: None or down, down-left, left, ... (arrows, Q/E, 0)
-GRAVITY_SCALE = 0.6                    # starting strength of all gravity (< / >)
+GRAVITY_SCALE = 1.2                    # starting strength of all gravity (< / >): strong up close ...
 G = 0.002                              # gravitational constant: particles, wells and super wells all pull with
                                        #   accel = G * mass * r / (r^2 + soft^2)^1.5, in full out to the softened
-GRAVITY_REACH = 120.0                  #   distance R (this many cells), then fading smoothly to nothing at 2 R
+GRAVITY_REACH = 30.0                   #   distance R (this many cells; ... but short: in a universe this small a long
+                                       #   reach gathers a supernova's debris into a few big clumps whose stars all
+                                       #   merge, while 30 leaves ~40 separate stars), then fading smoothly to nothing at 2 R
                                        #   (kernels.fade), so things must come close to interact and further apart
                                        #   don't at all; orbits within R are stable, past ~1.16 R none is (0: it
                                        #   reaches all the way)
@@ -143,12 +151,12 @@ STAR_SOFTENING = 0.6                   # a star pulls as a point at its centre o
 STAR_FIELD_BLOCK = 8                   # its pull is summed every this many cells and blended in between, except
                                        #   within its ring (or 3 blocks / 4 softening lengths): exact there
 STAR_CAPTURE_ACCEL = 0.02              # its capture ring: where its pull drops to this, cut down to its Roche lobe
-STAR_RING_MAX = 4.0                    #   against a heavier neighbour, but at most this x its radius and at least
+STAR_RING_MAX = 2.0                  #   against a heavier neighbour, but at most this x its radius and at least
 STAR_RING_MIN = 1.0                    #   this x its largest radius lately (or 2 cells)
 STAR_RING_GROWTH = 0.25                #   and it widens by at most this many cells per tick
                                        # Its particles are those inside the ring whose speed relative to it is
                                        #   below escape speed (bound to it); the most tightly bound star wins.
-STAR_DAMPING = 0.2                     # internal friction: a star's particles' jostling (motion relative to the star
+STAR_DAMPING = 0.2                   # internal friction: a star's particles' jostling (motion relative to the star
                                        #   moving and turning as a whole) fades by this share a tick (see
                                        #   World._damp_stars); without it a tide's shear tore fast-orbiting stars apart
 STAR_HILL_RING = 1.5                   # near a much heavier body a star's capture ring is cut to this x its Hill radius
@@ -162,8 +170,10 @@ STAR_MIN_PARTICLES = 12                #   heavier body's tide reaching into it 
 STAR_SHOCK_MIN = 0.3                   # stars touching faster than this (relative speed, cells/tick) shock the
 STAR_SHOCK = 1.0                       #   matter where they touch: it splashes out sideways at up to this x their
 STAR_SHOCK_DEPTH = 1.0                 #   relative speed (from their common motion), as deep into each as they move
-                                       #   in this many ticks, and only stays if bound. Slower, touching, they merge,
-STAR_MERGE = 0.5                       #   as do stars whose centres come within this x the larger's radius
+                                       #   in this many ticks, and only stays if bound. Slower, they merge once sunk
+STAR_TOUCH_MERGE = 0.6                 #   into each other this far (centres closer than this x the sum of their radii;
+                                       #   1 = as soon as they touch), so neighbours resting against each other stay two
+STAR_MERGE = 0.5                       #   stars; and any whose centres come within this x the larger's radius merge
 STAR_BLAST_REACH = 4.0                 # an exploding star's blast reaches this x its radius + 10 cells,
 STAR_BLAST_SPEED = 3.0                 #   starting at this speed (cells/tick); its particles ride the front
 STAR_BLAST_PUSH = 0.4                  #   as debris, and it shoves what it passes this x its reach
@@ -183,7 +193,8 @@ ORBIT_BAND_STABLE = 2.8                #   ... out to where the pull falls as fa
                                        #   well (and 0.6 of the way to where their pulls balance), inside the edge
 ORBIT_BAND_COLOR = (110, 220, 140)
 ORBIT_BAND_NONE_COLOR = (235, 110, 95)  # round a super well the star can't orbit anywhere: a dashed circle
-AUTO_STAR_RECIPES = ((16, 10), (16, 8), (64, 8), (16, 6), (64, 6), (256, 6), (512, 6), (1024, 6), (1024, 4))
+AUTO_STAR_RECIPES = ((16, 10), (16, 8), (64, 8), (16, 6), (64, 6), (256, 6), (512, 6), (1024, 6), (1024, 4),
+                     (1024, 3))        # (at a reach of 30 only the last, densest ones can orbit)
                                        # the Auto star tool's stars, (pour mass, radius in cells), tried in this
                                        #   order until one can orbit the super well clicked near (skipping any over half
                                        #   the collapse threshold: it would collapse into a super well itself) ...
@@ -195,15 +206,15 @@ ORBIT_STARS = True                     # a placed star sets off in orbit round t
 GHOST_STARS = False                    # placed stars arrive as ghost stars, landing GHOST_TICKS later (menu; shift+click
                                        #   with the Star tool always places one)
 STAR_FORM_ON = True                    # a knot of matter with a heavy core inside a lighter envelope becomes a star
-STAR_FORM_EVERY = 60                   #   holding its mass (checked every this many ticks, round up to
-STAR_FORM_SEEDS = 12                   #   this many of the densest spots). A knot is the largest disc round a
+STAR_FORM_EVERY = 10                   #   holding its mass (checked every this many ticks, round up to
+STAR_FORM_SEEDS = 200                  #   this many of the densest spots). A knot is the largest disc round a
 STAR_FORM_RADIUS = (4, 30)             #   spot, between these radii (cells: about 50 to 2,800 particles), that is
 STAR_FORM_FILL = 0.8                   #   at least this full, where the packing ends. Its core's typical mass
 STAR_FORM_LAYER_RATIO = 2.0            #   must be at least this x its envelope's,
 STAR_FORM_PURITY = 0.6                 #   with this share of each side's particles on its own side of the divide
 STAR_FORM_MIN_LAYER = 3                #   and at least this many particles on each side. None forms within this
 STAR_FORM_GAP = 8                      #   many cells of a star's capture ring, a solid well or a super well's
-STAR_FORM_PER_CHECK = 1                #   core, and at most this many form per check. It must weigh at least 2x
+STAR_FORM_PER_CHECK = 200              #   core, and at most this many form per check. It must weigh at least 2x
 STAR_FORM_BOUND = 0.8                  #   STAR_MIN_MASS, with this share of its mass bound to it (slower than
                                        #   escape speed relative to it)
 WELL_REBUILD_MOVE = 0.5                # cells a well moves before the field is recomputed

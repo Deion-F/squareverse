@@ -244,3 +244,83 @@ Still costly, not changed:
 - **The frame:** at zoom 0.49 `draw_world` costs ~15–20 ms a frame. That is `world.render` 4–9 ms, pygame
   `smoothscale` (one core) 9.5–11 ms and blit + fill ~2 ms. Plain `scale` takes 3 ms but looks different. A
   `prange` port of pygame's shrink filter would look the same.
+
+## 2026-11-04: many small stars (star formation every 10 ticks, up to 200 at once)
+
+Measured headless at 1920×1080, cell 2 (round, 1102 cells across), in the scene the new star formation was tuned on:
+collapse and orbit off, one super well of 11M at the centre. It goes supernova, its debris lands ~272 ticks in (L),
+~130–160 stars form by L+100 and merge down to ~10 by L+600. Seed 1, each figure the median of 3 runs, taken alternating
+the uncommitted working tree before this work / now, after `World.warmup`. The window is L+80..L+280 (the star peak).
+The formation burst is L..L+80. All-cores runs had the load of another experiment on the machine part of the time (load
+average 2–7). One single-core run on each side was disturbed (161 and 130 ms) and is left out of the medians below.
+
+| | all cores before | all cores now | one core before | one core now |
+|---|---|---|---|---|
+| tick, median | 88.0 | 73.5 | 133.7 | 112.4 |
+| tick, worst 50-tick window (median) | 113.4 | 84.0 | 155.9 | 127.4 |
+| tick, 95th percentile | 143.8 | 109.1 | 179.5 | 140.7 |
+| `step_stars` | 48.5 | 28.6 | 43.8 | 25.0 |
+| a `form_stars` check (every 10 ticks), L+80.. | 43.2 | 15.3 | 43.6 | 11.3 |
+| a `form_stars` check, L..L+80 | 68.4 | 32.1 | 61.6 | 23.5 |
+| worst tick, L..L+80 | 141.9 | ~102–122 | 157.9 | 98.4 |
+
+The presets (`--benchmark 300 --no-gpu`, 3 runs each, alternating) are within noise or a little faster: systems step
+3.08 → 2.40 ms, rain 8.21 → 7.91, disk 23.9 → 22.4.
+
+Where the time went (all cores, before): `step_stars` was 53 of a 99 ms tick:
+
+- `carry_stars` 22 ms, almost all `kernels.star_shift` (~138 calls a tick, the moving of each star's particles).
+- `kernels.wake_disk` 11.4 ms: ~54 discs a tick of radius 45–180 (a moving star's reach). It tested every cell, did two
+  integer modulos per cell, and branched on `mass`.
+- `_set_ring` 6 ms: a Python loop over every star and super well for each star.
+- `star_field` 6 ms on one core; `update_stars`, `star_motion`, `star_sink`, `_shock_stars`, `_remap_owner` 2–3 ms each.
+- `form_stars`: ~145 candidate knots a check, each costing ~25 numpy calls in `_knot_centre` and `_packed_radius` and
+  ~40 a cut in `layered`, plus `_near_body`'s loop over every star. That made 45–70 ms every 10 ticks.
+
+What changed (every change bit-identical; see the checks below):
+
+- **`kernels.wake_disk`** finds the run of cells each row of the disc covers (the same per-cell test, applied only at
+  the run's ends) and or-s the flags in with a loop that vectorizes (`flag` is only ever 0 or 1). It is 20–30× faster
+  (r = 82: 240 → 8–12 µs). `step_stars` gathers its discs into one `kernels.wake_disks` call: 54 large discs went from
+  33 ms to 1.2 ms. `WAKE_PAR_RADIUS` went from 64 to 300: one core now beats the cores' start-up tail (~250 µs at
+  p99) up to r ≈ 300.
+- **`_set_ring`** looks only at the bodies `_ring_bodies` picks out for all stars at once in numpy: those whose tide
+  reaches the star and whose Roche lobe, at its smallest, could come inside the ring's bounds or its radius. The bound
+  uses `_SHARE_MAX`, tide_share's top (it overshoots 1 in the taper), and a 1e-9 margin. The rest cannot change what
+  it finds. **`_shock_stars`** and the **merge loop** look at the pairs `_gaps` finds close. Stars that have taken
+  part in a merge this tick have moved and grown, so every pair with one of them is checked exactly. **`_near_body`**
+  prefilters the same way.
+- **Carrying the stars** is planned in Python first (turn, steps; none of it depends on the grid), then run by
+  `kernels.carry_stars`. On all cores, once there are `STAR_CARRY_PAR` (8) stars, `kernels.carry_levels` puts stars
+  whose touched regions (r + 4 round the line they are carried along) overlap at successive levels, and
+  `kernels.carry_stars_par` carries each level's stars side by side, with a row each for `absorbed` and `push`. Stars
+  that share cells still go in their turn, so the result is the same. The turn of a star's velocities is done in float32 as
+  numpy did, and the shared-out knocks as float64 cast back (numpy promotes the `np.float64` scalar), which
+  was checked against the old numpy code on 40 turned stars. `carry_stars` 22 → 10.6 ms on all cores.
+- All cores only: `star_field_par` (a row of blocks per thread), `update_stars_par` (owners a grid row at a time,
+  each cell still seeing the stars in turn; then the sums a star at a time) and `star_motion_par`. One core and
+  cores: `kernels.remap_owner` instead of numpy's `table[owner]`.
+- **`form_stars`**: `kernels.disc_moments` (`_knot_centre`: sums of whole numbers, so exact in any order),
+  `kernels.packed_radius` (the smallest k with k² ≥ dx² + dy², which is what `ceil(hypot)` gives on whole offsets),
+  `kernels.layered` (the log stays numpy's, which may differ from numba's in the last bit; the medians and means are
+  done as numpy does them).
+- `warmup()` also compiles the new kernels, so the app doesn't stall on first use. A cold cache now takes ~58 s to
+  compile everything instead of ~45 s.
+
+Checks: seeded single-core runs hash (mass, kin, owner, flag, quad, stamp, ghosts, stars, wells) to the same state as
+before every 25 ticks: this scene for 600 ticks, the same scene wrapped for 500, the systems preset for 300 and the
+systems preset with its super wells spun to 3 for 200. The parallel paths were also forced on in single-core runs of
+those scenes, and they hash the same. The parallel kernels match the serial ones exactly on real mid-run states, round
+and wrapped, with rings that span the whole axis. The new `wake_disk` matches the old one on 4,000 random discs and
+batches, wrapped or not, with radii from 0 to 80 and centres off the grid. 186 tests pass.
+
+Still costly, not changed:
+
+- `kernels.star_shift`, ~8.5 ms on all cores (13 on one): per particle it moves and wakes. Its `argsort` tie order
+  decides who goes first (a particle shoved aside lands in the cell a tied neighbour moves into), so no other sort can
+  be used.
+- `star_sink` (~2–4 ms) draws from numba's global RNG in cell order, so it stays on one core.
+- `kernels.step` / `step_tiles` (15–20 ms on all cores) and the supernova debris ghosts (`step_ghosts` ~9 ms) now cost
+  more than the stars in this scene.
+- On all cores, the Python-side `step_stars` is ~2–4 ms slower than on one core for the same work: the serial
+  kernels between parallel ones run slower there (cache and clock effects).

@@ -11,7 +11,8 @@ import pygame
 
 from . import config
 
-PANEL_W = 380                 # px
+PANEL_W = 450                 # px: wide enough that the top figures (up to 10M particles, 1B mass, 100M ticks) stay
+                              #   on one line, so the menu doesn't jump as they grow
 PAD = 12
 ROW_H = 26
 BUTTON = 44                   # the hamburger button

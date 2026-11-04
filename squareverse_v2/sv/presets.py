@@ -53,6 +53,7 @@ def disk(world, count=None):
     world.set_round(True)
     world.reset()
     world.set_reach(config.DISK_REACH)               # tuned for it: reaching everywhere it runs twice as slowly
+    world.set_gravity_scale(config.DISK_SCALE)
     world.set_orbit(1)
     world.set_self_gravity(True)
     w, h = world.w, world.h
@@ -91,6 +92,8 @@ def binary(world, count=None):
     world.set_round(True)
     world.reset()
     w, h = world.w, world.h
+    world.set_reach(config.SYSTEM_REACH)              # the gravity its orbits were tuned for
+    world.set_gravity_scale(config.SYSTEM_SCALE)
     a = world.vh * 0.09                               # each star's distance from the centre (cells)
     r = 0.03 * min(world.vw, world.vh)                # each star's radius (cells)
     mass = 30000.0                                    # under the collapse mass: stars are made of particles
@@ -121,6 +124,8 @@ def systems(world, count=None):
     cell size 2); a much smaller one hasn't room to keep the systems apart."""
     world.set_round(True)
     world.reset()
+    world.set_reach(config.SYSTEM_REACH)              # the gravity its orbits were tuned for
+    world.set_gravity_scale(config.SYSTEM_SCALE)
     rng = world.rng
     c = world.cell
     cx, cy = world.w / 2, world.h / 2

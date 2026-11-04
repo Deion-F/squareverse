@@ -53,6 +53,11 @@ def roche_lobe(q):
     return 0.49 * q3 * q3 / (0.6 * q3 * q3 + math.log1p(q3))
 
 
+_LAYER_CUTS = np.arange(0.3, 0.75, 0.05)           # where layered() tries dividing a knot (share of its radius)
+_SHARE_MAX = 1.01 * max(tide_share(1.0 + i / 10000.0, 1.0) * 1.0 for i in range(10001))   # tide_share's top
+                                                 #   (it overshoots 1 in the taper), with a margin: see _ring_bodies
+
+
 def box_sum(a, r):
     """Sum of a 2-D array over the (2r + 1)-square round each cell (cut off at the edges)."""
     h, w = a.shape
@@ -683,25 +688,17 @@ class World:
     def _knot_centre(self, x, y, r):
         """The cell at the centre of mass of the particles within r of (x, y), refined twice (a mean shift)."""
         for _ in range(2):
-            gx, gy, dx, dy = self._disk_cells(x, y, r)
-            m = self.mass[gy * self.w + gx].astype(np.float64)
-            if m.sum() <= 0:
+            m, mx, my = kernels.disc_moments(x, y, r, self.w, self.h, self.mass, self.wrap)
+            if m <= 0:
                 break
-            x = int(round(x + (dx * m).sum() / m.sum())) % self.w if self.wrap else \
-                min(max(int(round(x + (dx * m).sum() / m.sum())), 0), self.w - 1)
-            y = int(round(y + (dy * m).sum() / m.sum())) % self.h if self.wrap else \
-                min(max(int(round(y + (dy * m).sum() / m.sum())), 0), self.h - 1)
+            x = int(round(x + mx / m)) % self.w if self.wrap else min(max(int(round(x + mx / m)), 0), self.w - 1)
+            y = int(round(y + my / m)) % self.h if self.wrap else min(max(int(round(y + my / m)), 0), self.h - 1)
         return x, y
 
     def _packed_radius(self, x, y, r_max):
         """The largest radius (cells, whole numbers up to r_max) of a disc round (x, y) at least STAR_FORM_FILL full
-        of particles, or 0."""
-        gx, gy, dx, dy = self._disk_cells(x, y, r_max)
-        ring = np.ceil(np.hypot(dx, dy)).astype(np.int64)            # the smallest whole radius each cell is in
-        cells = np.cumsum(np.bincount(ring, minlength=r_max + 1))
-        full = np.cumsum(np.bincount(ring, weights=self.mass[gy * self.w + gx] > 0, minlength=r_max + 1))
-        packed = full[1:r_max + 1] >= config.STAR_FORM_FILL * np.maximum(cells[1:r_max + 1], 1)
-        return r_max if packed.all() else int(np.argmin(packed))
+        of particles, or 0 (kernels.packed_radius)."""
+        return kernels.packed_radius(x, y, r_max, config.STAR_FORM_FILL, self.w, self.h, self.mass, self.wrap)
 
     def _near_body(self, x, y, r):
         """Whether a knot of radius r at (x, y) would come within STAR_FORM_GAP of a star's capture ring, of a solid
@@ -714,7 +711,14 @@ class World:
             reach = wl.core() if wl.is_super else 3 * wl.radius
             if self.distance(wl.x, wl.y, x, y) < reach + r + config.STAR_FORM_GAP:
                 return True
-        for st in self.stars:
+        if not self.stars:
+            return False
+        sx, sy = np.array([st.x for st in self.stars]), np.array([st.y for st in self.stars])
+        ring = np.array([st.ring for st in self.stars])
+        near = self._gaps(np.array([float(x)]), np.array([float(y)]), sx, sy)[0] < \
+            (ring + r + config.STAR_FORM_GAP) * (1.0 + 1e-9)
+        for k in np.flatnonzero(near):                   # (only those numpy finds near enough need an exact look)
+            st = self.stars[k]
             if self.distance(st.x, st.y, x, y) < st.ring + r + config.STAR_FORM_GAP:
                 return True
         return False
@@ -750,20 +754,9 @@ class World:
         inside a lighter envelope: dividing it at some radius, the core's typical (median) mass is at least
         STAR_FORM_LAYER_RATIO x the envelope's, with STAR_FORM_PURITY of each side's particles on its own side of the
         mass between them, and at least STAR_FORM_MIN_LAYER particles in each."""
-        lm = np.log(self.mass[idx].astype(np.float64))
-        gap, k, pure = math.log(config.STAR_FORM_LAYER_RATIO), config.STAR_FORM_MIN_LAYER, config.STAR_FORM_PURITY
-        for f in np.arange(0.3, 0.75, 0.05):
-            inner = r <= f
-            a, b = lm[inner], lm[~inner]
-            if a.size < k or b.size < k:
-                continue
-            ma, mb = np.median(a), np.median(b)
-            if ma - mb < gap:
-                continue
-            t = (ma + mb) / 2
-            if (a > t).mean() >= pure and (b <= t).mean() >= pure:
-                return True
-        return False
+        lm = np.log(self.mass[idx].astype(np.float64))     # (numpy's log: numba's may differ in the last bit)
+        return kernels.layered(lm, np.asarray(r, np.float64), _LAYER_CUTS, math.log(config.STAR_FORM_LAYER_RATIO),
+                               config.STAR_FORM_MIN_LAYER, config.STAR_FORM_PURITY)
 
     def _new_star(self, idx):
         """Make the particles in cells idx a star, where they are and moving as they move. Returns it."""
@@ -1108,7 +1101,7 @@ class World:
         """Star k's particles go to star target[k] (-1: to none)."""
         table = np.zeros(len(target) + 1, np.int16)
         table[1:] = np.asarray(target) + 1
-        self.owner[:] = table[self.owner]
+        kernels.remap_owner(self.owner, table)
 
     def _drop_stars(self, target):
         """Remove the stars whose target isn't themselves; the particles of each go to the star it names (merged)
@@ -1120,17 +1113,18 @@ class World:
             self.held = None
         self.stars = [self.stars[k] for k in survivors]
 
-    def _set_ring(self, st, grow=True):
+    def _set_ring(self, st, grow=True, bodies=None):
         """A star's capture ring: where its pull drops to STAR_CAPTURE_ACCEL, cut down to its Roche lobe against
         each other star and super well - against a much heavier body STAR_HILL_RING x its Hill radius (where that
         body's tide, with the orbit's own share, matches its pull), as the point-mass Roche lobe, a third smaller,
         dropped particles still bound to it (at most half the way to the other body); between STAR_RING_MIN x its largest
-        radius lately (and 2 cells) and STAR_RING_MAX x its radius, widening by at most STAR_RING_GROWTH a tick."""
+        radius lately (and 2 cells) and STAR_RING_MAX x its radius, widening by at most STAR_RING_GROWTH a tick.
+        bodies: only these could cut it (see _ring_bodies); default all."""
         r = reach_for(self.g_scale * st.pull(), config.STAR_CAPTURE_ACCEL, self.kinv)
         lo = max(2.0, config.STAR_RING_MIN * st.size)
         st.reach = min(max(r, lo), max(lo, config.STAR_RING_MAX * st.radius))   # drawn only: no Roche cut
         st.tide = None
-        for b in self.stars + self.wells:
+        for b in self.stars + self.wells if bodies is None else bodies:
             if b is st or (isinstance(b, Well) and not b.is_super) or b.mass <= 0:
                 continue
             d = self.distance(st.x, st.y, b.x, b.y)
@@ -1151,6 +1145,42 @@ class World:
         doesn't stretch a star at all."""
         return tide_share(d, self.kinv)
 
+    def _gaps(self, xs, ys, bx, by):
+        """Distances (cells) from each of (xs, ys) to each of (bx, by), as numpy works them out, a hair short of what
+        distance() gives: for picking out, all at once, the few pairs that need an exact look."""
+        dx, dy = bx[None, :] - xs[:, None], by[None, :] - ys[:, None]
+        if self.wrap:
+            dx -= self.w * np.floor(dx / self.w + 0.5)
+            dy -= self.h * np.floor(dy / self.h + 0.5)
+        return np.hypot(dx, dy) * (1.0 - 1e-9) - 1e-9
+
+    def _ring_bodies(self):
+        """For each star, the stars and super wells (in _set_ring's order) whose Roche lobe could cut its capture
+        ring or make it a tide's - those near enough for their tide to reach it and heavy enough for their lobe, at
+        its smallest (tide_share at most _SHARE_MAX), to come inside the ring's bounds or its radius. The others
+        can't change what _set_ring finds: a lobe beyond min(reach, the most the ring may be) leaves the ring as it
+        is, and only a lobe inside its radius makes a tide."""
+        bodies = [b for b in self.stars + self.wells if (b.is_super if isinstance(b, Well) else True) and b.mass > 0]
+        if not bodies:
+            return [[] for _ in self.stars]
+        bx, by = np.array([b.x for b in bodies]), np.array([b.y for b in bodies])
+        bm = np.array([b.mass for b in bodies])
+        sx, sy = np.array([st.x for st in self.stars]), np.array([st.y for st in self.stars])
+        d = self._gaps(sx, sy, bx, by)
+        top = np.empty(len(self.stars))
+        for k, st in enumerate(self.stars):
+            r = reach_for(self.g_scale * st.pull(), config.STAR_CAPTURE_ACCEL, self.kinv)
+            lo = max(2.0, config.STAR_RING_MIN * st.size)
+            top[k] = max(min(r, max(lo, config.STAR_RING_MAX * st.radius)), st.radius)
+        q = np.maximum(np.array([st.mass for st in self.stars]), 1.0)[:, None] / (bm[None, :] * _SHARE_MAX)
+        q3 = q ** (1 / 3)
+        share = np.maximum(0.49 * q3 * q3 / (0.6 * q3 * q3 + np.log1p(q3)),
+                           np.minimum(0.5, config.STAR_HILL_RING * (q / 3.0) ** (1 / 3)))
+        near = np.maximum(d, 0.0) * share * (1.0 - 1e-9) < top[:, None] * (1.0 + 1e-9) + 1e-9
+        if self.kinv > 0.0:
+            near &= d * self.kinv < kernels.REACH_TAPER
+        return [[bodies[j] for j in np.flatnonzero(row)] for row in near]
+
     def carry_stars(self):
         """Move each star as a whole at its velocity - the momentum of its body (the particles packed together, not
         loose matter it has captured) over its mass, as this tick's forces left it: once it has gone half a cell, all
@@ -1159,50 +1189,55 @@ class World:
         as a whole too, turning its particles' velocities with it (so it isn't torn apart particle by particle).
         Returns how far each was carried."""
         motion = np.zeros((len(self.stars), 6))
-        kernels.star_motion(np.array([(st.x, st.y, st.ring + 2.0) for st in self.stars], np.float64), self.w, self.h,
-                            self.mass, self.kin, self.owner, motion, self.wrap)
+        (kernels.star_motion_par if self.cores else kernels.star_motion)(
+            np.array([(st.x, st.y, st.ring + 2.0) for st in self.stars], np.float64), self.w, self.h, self.mass,
+            self.kin, self.owner, motion, self.wrap)
         for st, row in zip(self.stars, motion):
             m, px, py = row[:3] if row[0] > 0 else row[3:]
             if m > 0:
                 st.ax, st.ay = px / m - st.vx, py / m - st.vy
                 st.vx, st.vy = px / m, py / m
+        n = len(self.stars)
         carried = []
-        push = np.zeros(2)
+        plan = np.zeros((n, 6))                          # what kernels.carry_stars does to each star's particles:
+        nsteps = np.zeros(n, np.int64)                   #   worked out first (none of it depends on the grid)
+        steps = np.zeros((n, config.MAX_STEPS, 2), np.int64)
         drag = self.drag_rows()
         for k, st in enumerate(self.stars):
             turn, fx, fy = self.frame_turn(st.x, st.y, rows=drag)
+            plan[k] = st.x, st.y, st.ring + 2.0, 0.0, 0.0, max(st.mass, 1.0)
             if turn:
                 c, sn = math.cos(turn), math.sin(turn)
                 st.vx, st.vy = c * st.vx - sn * st.vy, sn * st.vx + c * st.vy
-                idx = self._star_cells(k, st)
-                vx, vy = self.kin[idx, 0].copy(), self.kin[idx, 1].copy()
-                self.kin[idx, 0], self.kin[idx, 1] = c * vx - sn * vy, sn * vx + c * vy
+                plan[k, 3:5] = c, sn
             st.ox += st.vx + fx
             st.oy += st.vy + fy
             cx, cy = 0, 0
-            push[:] = 0.0
             for _ in range(config.MAX_STEPS):
                 sx = 1 if st.ox >= 0.5 else (-1 if st.ox <= -0.5 else 0)
                 sy = 1 if st.oy >= 0.5 else (-1 if st.oy <= -0.5 else 0)
                 if sx == 0 and sy == 0:
                     break
-                kernels.star_shift(k, sx, sy, st.x + cx, st.y + cy, st.ring + 2.0, config.RESTITUTION,
-                                   config.WALL_E, self.w, self.h, self.mass, self.kin, self.quad, self.shade,
-                                   self.stamp, self.flag, self.owner, self.solid, self.hole, self.absorbed, push,
-                                   max(st.mass, 1.0), self.wrap)
+                steps[k, nsteps[k]] = sx, sy
+                nsteps[k] += 1
                 st.ox -= sx
                 st.oy -= sy
                 cx += sx
                 cy += sy
             st.ox, st.oy = min(max(st.ox, -0.5), 0.5), min(max(st.oy, -0.5), 0.5)
-            if push.any():                               # the knocks it took ploughing on, shared by all of it
-                idx = kernels.owned_cells(st.x + cx, st.y + cy, st.ring + 2.0, k, self.w, self.h, self.owner,
-                                          self.wrap)
-                held = float(self.mass[idx].sum())
-                if held > 0:
-                    self.kin[idx, 0] += push[0] / held
-                    self.kin[idx, 1] += push[1] / held
             carried.append((cx, cy))
+        push = np.zeros((n, 2))                          # the knocks each took ploughing on, shared by all of it
+        grid = (config.RESTITUTION, config.WALL_E, self.w, self.h, self.mass, self.kin, self.quad, self.shade,
+                self.stamp, self.flag, self.owner, self.solid, self.hole)
+        if self.cores and n >= config.STAR_CARRY_PAR:   # stars apart from each other side by side, on all cores
+            level = kernels.carry_levels(plan, nsteps, steps, self.w, self.h, self.wrap)
+            order = np.argsort(level, kind="stable")
+            starts = np.searchsorted(level[order], np.arange(level.max() + 2))
+            absorbed = np.zeros((n, self.absorbed.size), np.int64)
+            kernels.carry_stars_par(order, starts, plan, nsteps, steps, *grid, absorbed, push, self.wrap)
+            self.absorbed += absorbed.sum(axis=0)
+        else:
+            kernels.carry_stars(plan, nsteps, steps, *grid, self.absorbed, push, self.wrap)
         return carried
 
     def step_stars(self):
@@ -1221,8 +1256,8 @@ class World:
                           self.g_scale * st.pull(), st.softening() ** 2, st.ring + 1.0)
                          for st, (cx, cy) in zip(stars, carried)], np.float64)
         sums = np.zeros((len(stars), 11))
-        kernels.update_stars(rows, self.w, self.h, self.mass, self.kin, self.owner, self.best, sums, self.wrap,
-                             self.kinv)
+        (kernels.update_stars_par if self.cores else kernels.update_stars)(
+            rows, self.w, self.h, self.mass, self.kin, self.owner, self.best, sums, self.wrap, self.kinv)
         keep = 1.0 - config.STAR_SMOOTH
         fade = 0.5 ** (1.0 / config.STAR_PEAK_HALF_LIFE)
         for k, st in enumerate(stars):
@@ -1240,22 +1275,42 @@ class World:
             st.peak = max(st.smooth, st.peak * fade)
             st.size = max(st.radius, st.size * fade)
             st.age += 1
-        self._shock_stars()
+        xs, ys = np.array([st.x for st in stars]), np.array([st.y for st in stars])
+        gaps = self._gaps(xs, ys, xs, ys)                # (stars stay put from here until they merge)
+        self._shock_stars(gaps)
         self.stats[kernels.S_SINKS] += kernels.star_sink(
             np.array([(st.x, st.y, st.ring) for st in stars], np.float64), config.SINK_CHANCE, self.w, self.h,
             self.mass, self.kin, self.quad, self.shade, self.stamp, self.owner, self.wrap)
         target = list(range(len(stars)))
-        for i in range(len(stars)):                      # stars whose centres meet, or that touch gently, merge
-            for j in range(i + 1, len(stars)):
+        n = len(stars)
+        size, radius = np.array([st.size for st in stars]), np.array([st.radius for st in stars])
+        reach = np.maximum(config.STAR_MERGE * np.maximum(size[:, None], size[None, :]),
+                           config.STAR_TOUCH_MERGE * (radius[:, None] + radius[None, :]))
+        close = [[int(j) for j in np.flatnonzero(row[i + 1:] < reach[i, i + 1:] * (1.0 + 1e-9)) + i + 1]
+                 for i, row in enumerate(gaps)]
+        merged = set()                                   # (these have moved and grown: check them exactly)
+        for i in range(n):                               # stars whose centres meet, or that touch gently, merge
+            j, p = i, 0
+            while True:                                  # the next pair that may merge: close, or one has merged
+                if i in merged:
+                    j += 1
+                else:
+                    while p < len(close[i]) and close[i][p] <= j:
+                        p += 1
+                    j = min(close[i][p:p + 1] + [k for k in merged if k > j], default=n)
+                if j >= n:
+                    break
                 a, b = stars[i], stars[j]
                 if target[i] != i or target[j] != j or not (a.count and b.count):
                     continue
                 d = self.distance(a.x, a.y, b.x, b.y)
                 if d < config.STAR_MERGE * max(a.size, b.size) or (
-                        d < a.radius + b.radius and math.hypot(b.vx - a.vx, b.vy - a.vy) < config.STAR_SHOCK_MIN):
+                        d < config.STAR_TOUCH_MERGE * (a.radius + b.radius)
+                        and math.hypot(b.vx - a.vx, b.vy - a.vy) < config.STAR_SHOCK_MIN):
                     big, small = (i, j) if a.mass >= b.mass else (j, i)
                     self._merge_stars(stars[big], stars[small])
                     target[small] = big
+                    merged.add(big)
         unstable = [k for k, st in enumerate(stars) if target[k] == k and (
             st.count < config.STAR_MIN_PARTICLES or st.age >= config.STAR_SETTLE and (
                 st.smooth < config.STAR_UNSTABLE_SHARE * st.peak or st.smooth < config.STAR_MIN_MASS))]
@@ -1282,36 +1337,40 @@ class World:
         if target != list(range(len(stars))):
             self._drop_stars(target)
         self._damp_stars()
-        for st in self.stars:
-            self._set_ring(st)
+        wake = []
+        for st, bodies in zip(self.stars, self._ring_bodies()):
+            self._set_ring(st, bodies=bodies)
             wx, wy, wm = st.woke
             moved = self.distance(st.x, st.y, wx, wy)
             if moved > config.WELL_REBUILD_MOVE or abs(st.mass - wm) > 0.1 * max(wm, 1.0):
-                kernels.wake_disk(st.x, st.y, self.reach(st) + moved + 1.0, self.w, self.h, self.mass, self.flag,
-                                  self.wrap)
+                wake.append((st.x, st.y, self.reach(st) + moved + 1.0))
                 st.woke = (st.x, st.y, st.mass)
+        if wake:                                         # (in one go: waking doesn't change what _set_ring sees)
+            kernels.wake_disks(np.array(wake, np.float64), self.w, self.h, self.mass, self.flag, self.wrap)
         if self.held in self.stars and self.held.target is not None:
             self._drag_star(self.held)
 
-    def _shock_stars(self):
+    def _shock_stars(self, gaps):
         """Stars whose circles (their radii) overlap while moving apart or together faster than STAR_SHOCK_MIN shock
         the matter where they touch, as deep into each as they move relative to each other in STAR_SHOCK_DEPTH
         ticks: it splashes out sideways at up to STAR_SHOCK x their relative speed and stays only if it is still
-        bound. A grazing touch shaves their surfaces; a fast head-on crash scatters much of both."""
+        bound. A grazing touch shaves their surfaces; a fast head-on crash scatters much of both. gaps: their
+        distances as _gaps gives them (only the pairs it finds touching are looked at exactly)."""
         stars = self.stars
-        for i, a in enumerate(stars):
-            for j in range(i + 1, len(stars)):
-                b = stars[j]
-                if not (a.count and b.count) or self.distance(a.x, a.y, b.x, b.y) >= a.radius + b.radius:
-                    continue
-                u = math.hypot(b.vx - a.vx, b.vy - a.vy)
-                if u < config.STAR_SHOCK_MIN:
-                    continue
-                small, big, ks, kb = (a, b, i, j) if a.radius <= b.radius else (b, a, j, i)
-                depth = config.STAR_SHOCK_DEPTH * u
-                kernels.star_shock(small.x, small.y, small.radius + depth, big.x, big.y, big.radius + depth, ks, kb,
-                                   config.STAR_SHOCK * u, self.w, self.h, self.mass, self.kin, self.owner,
-                                   self.stamp, self.flag, self.wrap)
+        radius = np.array([st.radius for st in stars])
+        for i, j in zip(*np.nonzero(np.triu(gaps < (radius[:, None] + radius[None, :]) * (1.0 + 1e-9), 1))):
+            i, j = int(i), int(j)
+            a, b = stars[i], stars[j]
+            if not (a.count and b.count) or self.distance(a.x, a.y, b.x, b.y) >= a.radius + b.radius:
+                continue
+            u = math.hypot(b.vx - a.vx, b.vy - a.vy)
+            if u < config.STAR_SHOCK_MIN:
+                continue
+            small, big, ks, kb = (a, b, i, j) if a.radius <= b.radius else (b, a, j, i)
+            depth = config.STAR_SHOCK_DEPTH * u
+            kernels.star_shock(small.x, small.y, small.radius + depth, big.x, big.y, big.radius + depth, ks, kb,
+                               config.STAR_SHOCK * u, self.w, self.h, self.mass, self.kin, self.owner,
+                               self.stamp, self.flag, self.wrap)
 
     def _merge_stars(self, big, small):
         """small merges into big: what they hold, and how much they held lately, add up; big moves to their common
@@ -1457,8 +1516,8 @@ class World:
                                np.float64).reshape(-1, 6)
         self.star_f = np.zeros((len(self.stars), 3))
         if self.stars:
-            kernels.star_field(self.star_pulls, self.w, self.h, b, self.scw, self.sch, self.sfx, self.sfy, self.wrap,
-                               self.kinv)
+            (kernels.star_field_par if self.cores else kernels.star_field)(
+                self.star_pulls, self.w, self.h, b, self.scw, self.sch, self.sfx, self.sfy, self.wrap, self.kinv)
 
     def _order_stars(self):
         """Re-rank the cells round each star for processing in its own frame (kernels.star_order)."""
@@ -3118,6 +3177,13 @@ def warmup(cores=False):
         for _ in range(3):
             w.step()
         w.render(0)
+        plan = np.array([(20.0, 20.0, 8.0, 0.0, 0.0, 3000.0)])      # (carried on all cores once there are a few)
+        steps = np.zeros((1, config.MAX_STEPS, 2), np.int64)
+        level = kernels.carry_levels(plan, np.zeros(1, np.int64), steps, w.w, w.h, w.wrap)
+        kernels.carry_stars_par(np.argsort(level), np.array([0, 1]), plan, np.zeros(1, np.int64), steps,
+                                config.RESTITUTION, config.WALL_E, w.w, w.h, w.mass, w.kin, w.quad, w.shade, w.stamp,
+                                w.flag, w.owner, w.solid, w.hole, np.zeros((1, w.absorbed.size), np.int64),
+                                np.zeros((1, 2)), w.wrap)
     w = World(32, 32, 1, seed=0)
     w.add_well(4, 4, 50.0, radius=2.0)
     w.add_super_well(24, 24, 50)
@@ -3133,6 +3199,10 @@ def warmup(cores=False):
     for _ in range(config.COLLAPSE_EVERY):
         w.step()
     w.form_stars()
+    held = np.flatnonzero(w.mass)[:8]                    # (form_stars may not get as far as these here)
+    w.layered(held, np.linspace(0.0, 1.0, held.size))
+    w._knot_centre(16, 8, 4)
+    w._packed_radius(16, 8, 5)
     kernels.star_shock(10.0, 12.0, 4.0, 14.0, 12.0, 4.0, 0, 1, 1.0, w.w, w.h, w.mass, w.kin, w.owner, w.stamp,
                        w.flag, w.wrap)
     if w.stars:

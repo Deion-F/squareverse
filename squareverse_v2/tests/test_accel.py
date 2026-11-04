@@ -47,6 +47,7 @@ def test_strips_conserve_mass_and_children(gdir, wrap, orbit):
     w.set_wrap(wrap)
     w.set_orbit(orbit)
     w.merge_on = w.split_on = True
+    w.star_form_on = False                # stars' fusion changes the count too: only merges and splits here
     w.add_well(200, 160, 200000.0)        # heavy well: fast impacts, so splits really happen
     rng = np.random.default_rng(0)
     w.place_many(rng.integers(0, w.w, 6000), rng.integers(0, w.h, 6000), rng.choice([1, 4, 16], 6000))

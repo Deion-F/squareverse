@@ -716,8 +716,8 @@ def test_disk_preset_settings_and_presets_reset_them():
     from sv.presets import disk, rain
     w = make_world(pw=400, ph=300)
     disk(w)
-    assert not w.wells and w.orbit == 1 and w.sg_on and w.g_scale == config.GRAVITY_SCALE
-    assert w.reach_len == config.DISK_REACH          # the reach it was made for
+    assert not w.wells and w.orbit == 1 and w.sg_on and w.g_scale == config.DISK_SCALE
+    assert w.reach_len == config.DISK_REACH          # the reach and strength it was made for
     assert w.round and not w.wrap and (w.w, w.h) == (250, 250)    # a disc through the 200 x 150 window's corners
     assert w.particle_count() > 1000
     rain(w)
@@ -1398,13 +1398,16 @@ def test_star_falling_into_a_super_well_is_torn_apart_and_swallowed():
     assert sw.mass > 200000 and total(w) == before
 
 
-def test_gently_touching_stars_merge_into_one():
+def test_gently_touching_stars_stay_two_but_merge_once_sunk_into_each_other():
     w = make_world(pw=600, ph=400)
     place_star(w, 281, 200, 20)
     place_star(w, 319, 200, 20)                         # 19 cells apart, radius 10: touching, at rest
     before = w.total_mass()
-    run(w, 30)
-    assert len(w.stars) == 1 and w.stars[0].mass == before == w.total_mass()
+    run(w, 60)
+    assert len(w.stars) == 2                            # neighbours resting against each other stay two stars ...
+    run(w, 640)
+    assert len(w.stars) == 1                            # ... until, drawn into each other, they end as one
+    assert w.total_mass() == before and w.stars[0].mass > 0.9 * before   # (a little shed in the jostling)
 
 
 def test_drag_pulls_a_star_along_and_deleting_it_erases_its_particles():
@@ -1928,12 +1931,11 @@ def test_star_in_orbit_goes_round_the_well_pulling_hardest_or_stays_put_without_
 
 def test_systems_preset_puts_stars_in_orbit_round_super_wells_out_of_each_others_reach(monkeypatch):
     from sv.presets import systems
-    monkeypatch.setattr(config, "GRAVITY_REACH", 120.0)   # the app's reach (the tests pin 60)
     w = World(1920, 1080, 2, seed=3)                 # fullscreen, as it is laid out for
-    systems(w)
-    assert w.round and w.reach_len == 120.0
+    systems(w)                                       # (it sets its own reach and strength)
+    assert w.round and w.reach_len == config.SYSTEM_REACH and w.g_scale == config.SYSTEM_SCALE
     mid, others = w.wells[0], w.wells[1:]
-    assert all(wl.is_super for wl in w.wells) and 2 <= len(others) <= 3
+    assert all(wl.is_super for wl in w.wells) and config.SYSTEM_OTHERS[0] <= len(others) <= config.SYSTEM_OTHERS[1]
     assert mid.x == pytest.approx(w.w / 2) and mid.y == pytest.approx(w.h / 2)
     home = {st: min(w.wells, key=lambda wl: w.distance(st.x, st.y, wl.x, wl.y)) for st in w.stars}
     count = {id(wl): sum(h is wl for h in home.values()) for wl in w.wells}
