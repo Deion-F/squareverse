@@ -321,6 +321,7 @@ class World:
         self.star_damping = config.STAR_DAMPING   # share of a star's particles' jostling that fades a tick
         self.lean_on = config.LEAN_ON
         self.radiation_on = config.RADIATION_ON   # merging, splitting and fusion give off heat
+        self.show_radiation = config.SHOW_RADIATION   # draw it (off: it still acts, it just isn't drawn)
         self.rad_rows = np.zeros((HEAT_ROWS, 5))   # heat radiated by a heat step (kernels.heat_step) ...
         self.rad_pool = np.zeros(0)                #   ... and what is gathering to be, per self-gravity block
         self.radiation_recycle = config.RADIATION_RECYCLE   # radiation reaching the edge comes back in
