@@ -1656,11 +1656,14 @@ def radiation_step(gx, gy, gvx, gvy, gm, gtag, tag, quantum, w, h, mass, kin, fl
 
 
 @njit(cache=True)
-def render_ghosts(gx, gy, gm, gtag, w, h, mass_lut, tint, heat_color, wave_color, rgb):
+def render_ghosts(gx, gy, gm, gtag, w, h, mass_lut, tint, heat_color, wave_color, rgb, hide_rad=False):
     """Draw the ghosts see-through: their mass colour washed towards tint, blended half over what is there; heat
-    (tag HEAT_TAG) glows heat_color and gravitational waves (WAVE_TAG) wave_color, solid."""
+    (tag HEAT_TAG) glows heat_color and gravitational waves (WAVE_TAG) wave_color, solid. hide_rad: radiation
+    isn't drawn (it still acts as ever)."""
     for k in range(gm.size):
         if gm[k] == 0:
+            continue
+        if hide_rad and (gtag[k] == HEAT_TAG or gtag[k] == WAVE_TAG):
             continue
         i = _ghost_cell(gx[k], gy[k], w, h)
         if gtag[k] == HEAT_TAG or gtag[k] == WAVE_TAG:

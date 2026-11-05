@@ -123,6 +123,7 @@ FUSION_BARRIER = 9.0                   # the barrier two particles of masses a a
                                        #   temperature of ~6, two of 256 ~40
 
 # --- Radiation (heat) ------------------------------------------------------------------------------------
+SHOW_RADIATION = True                  # draw radiation (heat and wave particles); off it still acts, just isn't drawn
 RADIATION_ON = True                    # hot surfaces radiate (HEAT_RADIATE) and super well mergers send out waves
 HEAT_MIN_SPEED = 1.0                   # gravitational waves faster than this against a free particle push it
 HEAT_CONDUCT = 0.1                     # heat (energy that collisions, contacts and internal friction lose: see

@@ -2697,7 +2697,7 @@ class World:
         if self.ghost_m.size:
             kernels.render_ghosts(self.ghost_x, self.ghost_y, self.ghost_m, self.ghost_tag, self.w, self.h,
                                   self.mass_lut, self.ghost_tint, self.heat_color, self.wave_color,
-                                  self.rgb.reshape(-1, 3))
+                                  self.rgb.reshape(-1, 3), not self.show_radiation)
         for gs in self.ghost_stars:
             gx, gy = gs.x + gs.dx, gs.y + gs.dy
             if self.wrap:
@@ -2909,6 +2909,7 @@ class World:
         self.scatter = config.COLLISION_SCATTER   # radians: how far off head-on loose particles bounce
         self.star_damping = config.STAR_DAMPING
         self.radiation_on = config.RADIATION_ON
+        self.show_radiation = config.SHOW_RADIATION
         self.orbit = config.ORBIT
         self.orbit_speed = self.orbit_speed_for(config.ORBIT_EDGE_SPEED)
         self.g_scale = config.GRAVITY_SCALE

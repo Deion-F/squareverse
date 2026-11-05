@@ -362,6 +362,8 @@ widget kit in `sv/ui.py`.
   mass, carried off as particles. The heavy disk starts hot (over 1,000 heat particles a tick as
   it first collapses, when merges and splits run near 1,000 a tick each) and settles to about 12 a tick within
   1,000 ticks; on the disk a tick took 13.4 ms against 11.1 without radiation.
+  The menu toggle "Draw radiation" (just under "Radiation (heat)"; `SHOW_RADIATION`, on by default) hides heat and
+  wave particles from the drawing only: they still fly, push, heat and land as before.
 
 Resizing the window or going fullscreen resizes the world. The scene is kept and stays pinned to the side global
 gravity points at, or centred when there is no global gravity. Wells move with it.

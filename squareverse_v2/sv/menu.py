@@ -123,6 +123,8 @@ INFO = {
                  "stronger as they near, then a burst as they merge that fades as the merged core settles - up to "
                  "{:.1%} of their mass, flying straight through everything at the speed limit, then landing as "
                  "particles.".format(config.SUPER_GW_INSPIRAL + config.SUPER_GW_MERGER + config.SUPER_GW_RINGDOWN),
+    "show_radiation": "Draw the radiation particles (pale blue). Off, they are only hidden: they still fly, push, "
+                      "heat and are taken in exactly as before. Saves a little drawing time when there is a lot of it.",
     "recycle": "Radiation reaching the universe's edge comes back in from a random point of it, heading inwards, so "
                "the universe keeps all its energy. Off, it is gone for good (the note counts how much). Turn it off "
                "if radiation builds up faster than matter takes it in.",
@@ -401,6 +403,7 @@ def draw_menu(ui, app, fps):
         w.star_form_on = ui.toggle("formation", "Star formation", w.star_form_on, INFO["formation"])
         w.radiation_on = ui.toggle("radiation", "Radiation (heat)", w.radiation_on, INFO["radiation"],
                                    note=f"{w.heat_count() + w.wave_count():,} in flight" if w.radiation_on else None)
+        w.show_radiation = ui.toggle("show_radiation", "Draw radiation", w.show_radiation, INFO["show_radiation"])
         w.radiation_recycle = ui.toggle("recycle", "Radiation comes back", w.radiation_recycle, INFO["recycle"],
                                         note=None if w.radiation_recycle else f"{w.radiation_lost:,} quanta gone")
         w.collapse_on = ui.toggle("collapse", "Collapse into super wells", w.collapse_on, INFO["collapse"],
