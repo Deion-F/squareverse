@@ -81,7 +81,6 @@ def roche_lobe(q):
     return 0.49 * q3 * q3 / (0.6 * q3 * q3 + math.log1p(q3))
 
 
-_LAYER_CUTS = np.arange(0.3, 0.75, 0.05)           # where layered() tries dividing a knot (share of its radius)
 _SHARE_MAX = 1.01 * max(tide_share(1.0 + i / 10000.0, 1.0) * 1.0 for i in range(10001))   # tide_share's top
                                                  #   (it overshoots 1 in the taper), with a margin: see _ring_bodies
 
@@ -197,8 +196,8 @@ class Star:
     momentum. It pulls as a point of their total mass there, softened over STAR_SOFTENING x its radius, whether
     self-gravity is on or not (its particles aren't in the self-gravity mesh, so they count once).
 
-    Matter it captures becomes part of it and matter that escapes doesn't. A star that loses too much of what it
-    held (see STAR_UNSTABLE_SHARE) can't hold together and explodes. Where two stars overlap the matter in between is
+    Matter it captures becomes part of it and matter that escapes doesn't. A star no longer bound comes apart
+    quietly; one whose core has burned up to the peak rung explodes (World.step_stars). Where two stars overlap the matter in between is
     shocked out, and stars whose centres meet merge."""
     x: float
     y: float
@@ -222,6 +221,9 @@ class Star:
     tide: object = None         # the star or super well whose tide reaches into its body (its Roche lobe is smaller)
     woke: tuple = (0.0, 0.0, 0.0)   # (x, y, mass) when its surroundings were last woken
     target: object = None       # (x, y) it is being dragged towards
+    burn: float = 0.0           # the binding energy its fusing gives off, less what it takes, followed smoothly
+    burned: float = 0.0         # all the binding energy its fusing has given off, less what it took
+    fuel: bool = False          # its core was lighter than the peak rung when it formed: it has fuel to burn
 
     def pull(self):
         return config.G * self.mass
@@ -355,6 +357,7 @@ class World:
             self.rim, self.rim_mask = np.flatnonzero(outside), outside.astype(np.uint8)
         self.mass = np.zeros(n, np.uint16)
         self.kin = np.zeros((n, kernels.KIN), np.float32)   # vx, vy, ox, oy, heat
+        self.press = np.zeros(n)                            # stars' particles: the pressure of their weight (heat_step)
         self.quad = np.zeros((n, 4), np.uint16)
         self.shade = np.zeros(n, np.uint8)
         self.stamp = np.zeros(n, np.uint32)
@@ -742,15 +745,17 @@ class World:
         """Turn knots of matter that look like young stars into stars: their particles become a star's. A knot is
         found round each of the densest spots (up to STAR_FORM_SEEDS, apart from each other): the largest disc round
         it, STAR_FORM_RADIUS cells across, that is packed (STAR_FORM_FILL) - so it is round and solid in the middle -
-        and where the packing ends. It may be part of a larger body, such as a filament. It must be layered: a heavy
-        core inside a lighter envelope (see layered()), and hold itself together by its own gravity (see bound()).
+        and where the packing ends. It may be part of a larger body, such as a filament. It must hold itself together by
+        its own gravity (see bound()) - not rest on the floor under the global gravity (_self_held) - and have at least
+        STAR_MIN_PARTICLES particles - and it must ignite: its core pressed hard enough by its weight to fuse
+        (_ignites). A dense clump that wouldn't stays ordinary matter.
         None forms in or next to a star's capture ring, a solid well or a super well's core, or against a solid
         border, and at most STAR_FORM_PER_CHECK form at a time."""
         lo, hi = config.STAR_FORM_RADIUS
         b, cw, ch = self.sg.block, self.sg.cw, self.sg.ch
         rho = np.zeros(cw * ch)
         kernels.bin_mass(self.mass, self.w, self.h, b, cw, rho)
-        dens = box_sum(rho.reshape(ch, cw), 1)           # mass round each block: heavy, packed knots stand out
+        dens = box_sum(rho.reshape(ch, cw), 3)           # mass round each block (7 x 7): it peaks in a knot's middle
         for st in self.stars:                            # stars are the densest spots: look elsewhere
             r = int((st.ring + config.STAR_FORM_GAP) // b) + 1
             sx, sy = int(st.x) // b, int(st.y) // b
@@ -761,7 +766,7 @@ class World:
             if dens[by, bx] <= 0.0:
                 break
             dens[max(0, by - apart):by + apart + 1, max(0, bx - apart):bx + apart + 1] = 0.0
-            x, y = self._knot_centre(min(bx * b + b // 2, self.w - 1), min(by * b + b // 2, self.h - 1), 2 * b)
+            x, y = self._knot_centre(min(bx * b + b // 2, self.w - 1), min(by * b + b // 2, self.h - 1), 4 * b)
             r = self._packed_radius(x, y, hi + 1)
             if not lo <= r <= hi or self._near_body(x, y, r):
                 continue
@@ -770,7 +775,8 @@ class World:
             gx, gy, dx, dy = self._disk_cells(x, y, r)
             idx = gy * self.w + gx
             keep = self.mass[idx] > 0
-            if self.layered(idx[keep], np.hypot(dx, dy)[keep] / r) and self.bound(idx[keep]):
+            if len(idx[keep]) >= config.STAR_MIN_PARTICLES and self.bound(idx[keep]) and \
+                    self._self_held(idx[keep], r) and self._ignites(idx[keep], np.hypot(dx, dy)[keep]):
                 self._new_star(idx[keep])
                 self.stars_formed += 1
                 formed += 1
@@ -815,12 +821,13 @@ class World:
                 return True
         return False
 
-    def bound(self, idx):
-        """Whether a knot (cells idx) could hold itself together as a star: it weighs at least twice STAR_MIN_MASS,
-        and STAR_FORM_BOUND of its mass moves slower than escape speed relative to it, as a star would pull."""
+    def bound(self, idx, share=None):
+        """Whether a knot or star (cells idx) holds itself together by its own gravity: at least `share` (default
+        STAR_FORM_BOUND) of its mass moves slower than escape speed relative to it, as a star would pull."""
+        share = config.STAR_FORM_BOUND if share is None else share
         m = self.mass[idx].astype(np.float64)
         total = m.sum()
-        if total < 2 * config.STAR_MIN_MASS:
+        if total <= 0:
             return False
         dx, dy = self._offsets(idx)
         dx, dy = dx - (dx * m).sum() / total, dy - (dy * m).sum() / total
@@ -830,7 +837,57 @@ class World:
         soft = config.STAR_SOFTENING * radius
         rho = np.sqrt(dx * dx + dy * dy + soft * soft)
         bound = 0.5 * (vx * vx + vy * vy) < self.g_scale * config.G * total / rho * fade(rho, self.kinv)[1]
-        return m[bound].sum() >= config.STAR_FORM_BOUND * total
+        return m[bound].sum() >= share * total
+
+    def _self_held(self, idx, r):
+        """Whether a knot (cells idx, about r cells across) holds itself by its own gravity rather than resting on
+        something under the global gravity: its pull at its surface beats that gravity (a pile on the floor is no
+        star)."""
+        g = self.gravity_vector()
+        if g is None:
+            return True
+        return self.g_scale * config.G * float(self.mass[idx].sum()) / max(r, 1.0) ** 2 > math.hypot(*g)
+
+    def _ignites(self, idx, d):
+        """Whether a knot (cells idx, d cells from its middle) would ignite as a star: its weight presses its core (its
+        innermost quarter; the pressure as kernels.star_pressure sums it, ring by ring from the outside in) hard
+        enough that, with nothing moving, its core particles would fuse - on average at least once a heat step
+        between them (each touching two neighbours: kernels.heat_step's chance, FUSION_RATE x exp(-barrier /
+        energy), pressure counting as heat)."""
+        m = self.mass[idx].astype(np.float64)
+        ring = d.astype(np.int64)
+        held = np.bincount(ring, weights=m)
+        cells = np.bincount(ring).astype(np.float64)
+        inside = np.cumsum(held)
+        gs = self.g_scale * config.G
+        rk = np.arange(held.size) + 0.5
+        pull = gs * (inside - 0.5 * held) / rk ** 2 * fade(rk, self.kinv)[0]
+        layer = np.divide(held, cells, out=np.zeros_like(held), where=cells > 0) * pull
+        press = layer[::-1].cumsum()[::-1][ring]          # each particle's: the weight of all outside it
+        core = d <= np.percentile(d, 25)                  # its core (_core): the innermost quarter
+        mc, pc = m[core], press[core]
+        barrier = config.FUSION_BARRIER * mc * mc / (2.0 * mc ** (1.0 / 3.0))
+        tries = min(1.0, config.FUSION_RATE * config.HEAT_EVERY)
+        chance = np.exp(-barrier / np.maximum(pc, 1e-12))  # (_fuse_energy for two of mass m at pressure p: p)
+        return 2.0 * tries * float(chance.sum()) >= 1.0
+
+    def _core(self, idx, x, y):
+        """A star's core: the innermost quarter of its particles (cells idx) round its centre (x, y)."""
+        dx, dy = (idx % self.w) - x, (idx // self.w) - y
+        if self.wrap:
+            dx -= self.w * np.floor(dx / self.w + 0.5)
+            dy -= self.h * np.floor(dy / self.h + 0.5)
+        d2 = dx * dx + dy * dy
+        return idx[d2 <= np.percentile(d2, 25)] if idx.size else idx
+
+    def _core_spent(self, idx, st):
+        """Whether a star's core (_core: its innermost quarter) has burned to the peak rung or past it, mostly (by
+        mass): fusing there takes energy instead of giving it, so it can't keep itself burning."""
+        core = self._core(idx, st.x, st.y)
+        if not core.size:
+            return False
+        m = self.mass[core].astype(np.float64)
+        return m[self.mass[core] >= config.FUSION_PEAK].sum() >= 0.5 * m.sum()
 
     def _offsets(self, idx):
         """Offsets (dx, dy) of cells idx from the first of them, the short way round when the borders wrap."""
@@ -840,15 +897,6 @@ class World:
             dx -= self.w * np.floor(dx / self.w + 0.5)
             dy -= self.h * np.floor(dy / self.h + 0.5)
         return dx, dy
-
-    def layered(self, idx, r):
-        """Whether a knot (cells idx, r = their distance from its middle as a share of its radius) has a heavy core
-        inside a lighter envelope: dividing it at some radius, the core's typical (median) mass is at least
-        STAR_FORM_LAYER_RATIO x the envelope's, with STAR_FORM_PURITY of each side's particles on its own side of the
-        mass between them, and at least STAR_FORM_MIN_LAYER particles in each."""
-        lm = np.log(self.mass[idx].astype(np.float64))     # (numpy's log: numba's may differ in the last bit)
-        return kernels.layered(lm, np.asarray(r, np.float64), _LAYER_CUTS, math.log(config.STAR_FORM_LAYER_RATIO),
-                               config.STAR_FORM_MIN_LAYER, config.STAR_FORM_PURITY)
 
     def _new_star(self, idx):
         """Make the particles in cells idx a star, where they are and moving as they move. Returns it."""
@@ -861,8 +909,9 @@ class World:
         vx, vy = self.kin[idx, 0].astype(np.float64), self.kin[idx, 1].astype(np.float64)
         pvx, pvy = (vx * m).sum() / total, (vy * m).sum() / total
         radius = math.sqrt(max(2.0 * (((dx - dx.mean()) ** 2 + (dy - dy.mean()) ** 2).mean()), 1.0))
+        core = self._core(idx, cx, cy)
         st = Star(cx, cy, pvx, pvy, total, idx.size, radius, smooth=total, peak=total, size=radius,
-                  woke=(cx, cy, total))
+                  woke=(cx, cy, total), fuel=bool(np.median(self.mass[core]) < config.FUSION_PEAK))
         self.stars.append(st)
         self.owner[idx] = len(self.stars)
         self._set_ring(st, grow=False)
@@ -903,7 +952,7 @@ class World:
                 star = self._new_star(idx) if idx.size else None
         if well is not None and star is not None:
             m = float(star.masses.sum()) if isinstance(star, GhostStar) else star.mass
-            self.put_in_orbit(well, m, vx - well.vx, vy - well.vy)
+            self.put_in_orbit(well, m, vx - well.vx, vy - well.vy, star)
         return star
 
     def brush_star(self, radius_px, pour_mass):
@@ -1046,13 +1095,29 @@ class World:
         way = 1.0 if wl.spin >= 0 else -1.0             # > 0: clockwise on screen, as it spins
         return wl.vx - way * v * dy / d, wl.vy + way * v * dx / d
 
-    def put_in_orbit(self, wl, mass, rvx, rvy):
-        """A body of `mass` has been set moving at (rvx, rvy) against super well wl to orbit it (orbit_velocity):
-        the well takes the opposite momentum, so their common centre stays put - unless it is being dragged."""
-        if wl is not self.held:
-            k = mass / wl.mass
-            wl.vx -= k * rvx
-            wl.vy -= k * rvy
+    def put_in_orbit(self, wl, mass, rvx, rvy, new=None):
+        """A body of `mass` (the star `new`, if one) has been set moving at (rvx, rvy) against super well wl to orbit
+        it (orbit_velocity): the well and the stars already orbiting it take the opposite momentum together, so their
+        common centre stays put and their own orbits are left as they were - unless it is being dragged. (Given to
+        the well alone, its recoil set the next star placed round it off too fast for its orbit, and out at the
+        reach, where circular orbits are barely bound, that star left and its partner sank.)"""
+        if wl is self.held:
+            return
+        mine = [(k, st) for k, st in enumerate(self.stars) if st is not new and self.orbit_well(st.x, st.y) is wl]
+        k = mass / (wl.mass + sum(st.mass for _, st in mine))
+        dvx, dvy = -k * rvx, -k * rvy
+        wl.vx += dvx
+        wl.vy += dvy
+        for _, st in mine:
+            self.shift_star(st, dvx, dvy)
+
+    def shift_star(self, st, dvx, dvy):
+        """Change a star's velocity by (dvx, dvy): it and every particle of it."""
+        idx = self._star_cells(self.stars.index(st), st)
+        self.kin[idx, 0] += np.float32(dvx)
+        self.kin[idx, 1] += np.float32(dvy)
+        st.vx += dvx
+        st.vy += dvy
 
     def _layer_masses(self, d, pour_mass, expect=False):
         """Particle masses for a placed star's cells at d x its radius out: pour_mass in its core, and the lighter
@@ -1410,9 +1475,23 @@ class World:
                     self._merge_stars(stars[big], stars[small])
                     target[small] = big
                     merged.add(big)
-        unstable = [k for k, st in enumerate(stars) if target[k] == k and (
-            st.count < config.STAR_MIN_PARTICLES or st.age >= config.STAR_SETTLE and (
-                st.smooth < config.STAR_UNSTABLE_SHARE * st.peak or st.smooth < config.STAR_MIN_MASS))]
+        # A star comes apart when it no longer holds itself together: too few particles left to be one, or most of its
+        # matter faster than its escape speed (bound(), every STAR_FORM_EVERY ticks). It goes supernova when its core
+        # has burned to the peak rung - fusing can't give it energy any more - having formed with fuel (a core lighter
+        # than that: Star.fuel) and burned it; first, if it is dense enough, it collapses instead.
+        check = self.tick_count % config.STAR_FORM_EVERY == 0
+        unstable, dying = [], []
+        for k, st in enumerate(stars):
+            if target[k] != k:
+                continue
+            if st.count < config.STAR_MIN_PARTICLES:
+                unstable.append(k)
+            elif check and st.age >= config.STAR_FORM_EVERY:
+                idx = self._star_cells(k, st)
+                if not self.bound(idx, share=0.5):
+                    unstable.append(k)
+                elif st.fuel and st.burned > 0.0 and self._core_spent(idx, st):
+                    dying.append(k)
         for k in unstable:                               # one failing in another's embrace merges into it
             st = stars[k]
             touching = [j for j in range(len(stars)) if j != k and target[j] == j and stars[j].count
@@ -1423,16 +1502,15 @@ class World:
                 target[k] = j
         if target != list(range(len(stars))):          # the merged ones' particles are the other's now
             self._remap_owner([final_star(target, k) for k in range(len(target))])
-        for k in unstable:
-            st = stars[k]
-            if target[k] != k:
-                continue
-            target[k] = -1
-            if st.tide is not None or any(wl.is_super and self.distance(wl.x, wl.y, st.x, st.y) < self.well_range(wl)
-                                          for wl in self.wells):
-                self.stars_torn += 1                     # torn apart by a tide: its particles stream away
-            elif st.count:
-                self._explode_star(k, st)
+        for k in unstable:                               # it comes apart: its particles go their own ways
+            if target[k] == k:
+                target[k] = -1
+                self.stars_torn += 1
+        for k in dying:                                  # its fuel spent: supernova
+            if target[k] == k:
+                target[k] = -1
+                if stars[k].count:
+                    self._explode_star(k, stars[k])
         if target != list(range(len(stars))):
             self._drop_stars(target)
         self._damp_stars()
@@ -1487,6 +1565,8 @@ class World:
         big.mass, big.count = total, big.count + small.count
         big.smooth += small.smooth
         big.peak += small.peak
+        big.burned += small.burned
+        big.fuel = big.fuel or small.fuel
         big.radius = math.hypot(big.radius, small.radius)
         big.size = math.hypot(big.size, small.size)
         big.ring = max(big.ring, small.ring)
@@ -1501,7 +1581,8 @@ class World:
             return
         reach = max(min(config.STAR_BLAST_REACH * st.size + 10.0, 0.45 * min(self.w, self.h)), st.radius + 5.0)
         self.blast_serial += 1
-        blast = Blast(st.x, st.y, max(st.radius, 2.0), reach, self.blast_serial, config.STAR_BLAST_SPEED,
+        speed = math.sqrt(2.0 * self.g_scale * config.G * st.mass / max(st.radius, 1.0))   # its escape speed
+        blast = Blast(st.x, st.y, max(st.radius, 2.0), reach, self.blast_serial, min(speed, config.VMAX),
                       config.STAR_BLAST_PUSH * reach)
         self.blasts.append(blast)
         xs = idx % self.w + self.rng.uniform(-0.45, 0.45, idx.size)
@@ -1925,9 +2006,9 @@ class World:
         self.wake_all()
 
     def whirl_omega(self, wl):
-        """How fast a super well turns space round at its point of no return (rad/tick, > 0 clockwise; frame
-        dragging: kernels.frame_turn). Its spiral arms turn at this."""
-        d = max(self.horizon(wl), wl.core() + 1.0)
+        """How fast a super well turns space round (rad/tick, > 0 clockwise; frame dragging: kernels.frame_turn) at
+        twice its core's radius, where its spiral arms are drawn: they turn at this."""
+        d = max(2.0 * wl.core(), wl.core() + 1.0)
         return kernels.frame_turn(d, 0.0, self.drag_j(wl), self.drag_reach(), self.softening(wl), self.kinv,
                                   config.VMAX)
 
@@ -2485,11 +2566,21 @@ class World:
             k = config.HEAT_EVERY
             if self.rad_pool.size != self.sg.cw * self.sg.ch:
                 self.rad_pool = np.zeros(self.sg.cw * self.sg.ch)
+            self.press[:] = 0.0                          # a star's weight presses its particles together
+            if self.stars:
+                kernels.star_pressure(np.array([(st.x, st.y, st.ring + 1.0, k) for k, st in enumerate(self.stars)],
+                                               np.float64).reshape(-1, 4), self.g_scale * config.G, self.w, self.h,
+                                      self.mass, self.owner, self.press, self.wrap, self.kinv)
+            released = np.zeros((len(self.stars) + 1, 2))
             n, self.fused = kernels.heat_step(
-                self.w, self.h, self.mass, self.kin, self.quad, self.owner, self.flag, self.solid,
+                self.w, self.h, self.mass, self.kin, self.press, self.quad, self.owner, self.flag, self.solid,
                 min(0.5, config.HEAT_CONDUCT * k), min(0.5, config.HEAT_RADIATE * k) if self.radiation_on else 0.0,
                 self.radiation_cost(), config.LIGHT_SPEED, self.rad_rows, self.rad_pool, self.sg.block, self.merge_on,
-                config.MAX_MASS, *self.fusion(), config.FUSION_BARRIER, self.wrap)
+                config.MAX_MASS, *self.fusion(), config.FUSION_BARRIER, self.wrap, released,
+                min(1.0, config.FUSION_RATE * k))
+            for st, (gave, took) in zip(self.stars, released[1:]):   # each star's fusing: how much it gives off
+                st.burn = st.burn * (1.0 - config.STAR_SMOOTH) ** k + (gave - took)
+                st.burned += gave - took
             self.stats[kernels.S_MERGES] += self.fused     # (fusions where particles touch, counted with the rest)
             self._radiate(self.rad_rows[:n])
         if self.radiation_on:
@@ -3312,7 +3403,7 @@ def warmup(cores=False):
         w.step()
     w.form_stars()
     held = np.flatnonzero(w.mass)[:8]                    # (form_stars may not get as far as these here)
-    w.layered(held, np.linspace(0.0, 1.0, held.size))
+    w.bound(held)
     w._knot_centre(16, 8, 4)
     w._packed_radius(16, 8, 5)
     kernels.star_shock(10.0, 12.0, 4.0, 14.0, 12.0, 4.0, 0, 1, 1.0, w.w, w.h, w.mass, w.kin, w.owner, w.stamp,

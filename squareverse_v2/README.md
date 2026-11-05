@@ -24,8 +24,14 @@ needed settings and the performance figures fold away under Advanced. The mouse 
 does: pour, ghosts, erase, place a star / an auto star / repulsor / super well / spawner, select (and drag) a body to see and change
 it, or delete one. Under it are only the settings of the tool picked, and the cursor shows what a click places: a
 label under it (mass, radius, particle mass or spawn rate) for a super well, repulsor, star or spawner, and for a
-super well its core, dotted point of no return and faint whirlpool range as they will be. Every setting also has a keyboard shortcut: **H** lists them. F1–F5 load the presets (rain, disk,
-cloud, binary, systems). The starting scene is systems (`DEFAULT_PRESET`): a super well in the middle orbited by
+super well its core, dotted point of no return and faint whirlpool range as they will be. Every setting also has a keyboard shortcut: **H** lists them. F1–F6 load the presets (rain, disk,
+cloud, binary, systems, supernova). The starting scene is supernova (`DEFAULT_PRESET`): a round universe holding nothing
+but one super well in the middle, `SUPERNOVA_SHARE` (1.5) × the supernova mass (the world's explode mass, so 15,000,000 at the
+default `SUPER_EXPLODE_MASS`; `sv/presets.py` `supernova`). It explodes once its grace is over, and its debris makes the stars,
+wells and later supernovae. Measured at fullscreen 1920 × 1080, cell 2, on all cores: it goes supernova within 200 ticks; by tick 400 there are
+57 stars and 118k particles at about 156 ms a tick; by 600, 85 star supernovae and 27 collapses; by 1,200, 170 star
+supernovae and 31 collapses, wells merging back (the largest 9.5M) and about 10k particles at about 30 ms a tick.
+The systems preset (F5, the start before) is a super well in the middle orbited by
 three stars, and two or three more scattered at random round it with one or two stars each (`sv/presets.py`
 `systems`, `SYSTEM_*`). Each star is set off at the circular speed round its own well, with the well taking the
 opposite momentum, on the orbit described under "A star orbiting a super well" (80,000-mass wells, pour-16 stars 10
@@ -39,13 +45,16 @@ sink (120 to about 80–95 cells in 90 s) and shed some mass (to 66–79%). A mu
 systems apart (in the default 960 × 720 one they are pulled apart within a few seconds). The disk is heavy: 20 million mass (`DISK_MASS`; less in a small window, where
 no particle can be heavier than `MAX_MASS`) in particles of every mass from 1 to a few thousand, spread evenly over
 the orders of magnitude, filling 60% of its ring (`DISK_FILL`). That is enough for several super wells to grow to
-the supernova mass without any one of them holding most of the universe. The number of particles, the tick rate (ticks per second) and the frame rate always show in the
+the supernova mass without any one of them holding most of the universe. The binary preset's two stars orbit each other inside a ring of light particles; their common centre is set still
+(`World.shift_star`), as the stars come out a little unequal. The number of particles, the tick rate (ticks per second) and the frame rate always show in the
 top-left corner, and the CPU use (the machine's, and the simulation's share of all its cores), the GPU use and all
 the mass in the universe (particles, ghosts and what super wells hold) in the top-right one, or under the status line
 while the menu is open. The GPU figure is Windows' own (the busiest engine type, all processes, as Task Manager shows
 it), read by a `powershell.exe` left running in the background (`sv/usage.py`); without one it shows n/a. The app
-starts with gravity at ×0.6 reaching 120 cells (gone at 240; the disk preset sets its own 20 cells, `DISK_REACH`:
-it was made for that), placed stars set off in orbit (see below), rotation at 3 cells/tick, a 40 px brush, pour mass 4, placed super wells of 1,000,000 (`SUPER_PLACE_MASS`) and placed repulsors of 250,000
+starts with gravity at ×1.2 (`GRAVITY_SCALE`) reaching 60 cells (`GRAVITY_REACH`; gone at 120), and the rain, disk
+and cloud presets run at that. Systems and binary set their own ×0.6 reaching 120 (`SYSTEM_SCALE`, `SYSTEM_REACH`):
+within a reach of 60, stars sharing a super well sink or are flung out and no ring round a binary stays bound, which
+waits for bigger wells to hold more (TO_DO.md). Placed stars set off in orbit (see below), rotation at 3 cells/tick, a 40 px brush, pour mass 4, placed super wells of 1,000,000 (`SUPER_PLACE_MASS`) and placed repulsors of 250,000
 (`REPULSOR_PLACE_MASS`) (`sv/config.py`;
 the tests pin the tuning they were written for in `tests/conftest.py`). The menu is `sv/menu.py`, built on the small
 widget kit in `sv/ui.py`.
@@ -109,12 +118,17 @@ widget kit in `sv/ui.py`.
     they move relative to each other in a tick) is shocked: it splashes out sideways at up to their relative speed
     and stays only if it is still bound. A grazing touch shaves their surfaces; a head-on crash scatters much of
     both, and what stays bound is recaptured. Stars that touch gently, or whose centres meet, merge.
-  * *Instability:* a star that has lost more than half of the most it held lately (`STAR_UNSTABLE_SHARE`,
-    `STAR_PEAK_HALF_LIFE`), or is lighter than `STAR_MIN_MASS`, can't hold together. Touching another star, it merges
-    into it, and the remnant is judged the same way. With a heavier body's tide reaching into it (a much bigger star
-    or a super well), it is torn apart and its particles stream away. Otherwise it explodes like a small supernova:
-    its particles leave as debris riding a shock front out to `STAR_BLAST_REACH` × its size, which shoves what it
-    passes.
+  * *Burning and death:* a star's own weight presses its particles together, and that pressure counts as heat for
+    fusion (`kernels.star_pressure`), so a heavy star's core fuses with nothing moving; touching particles at rest try
+    to fuse `FUSION_RATE` (0.05) of the time (a collision is one try in itself). Each star keeps `burn` (the binding
+    energy its fusing gives off, less what it takes, smoothed) and `burned` (the total), and `fuel`: its core was lighter
+    than `FUSION_PEAK` (256) when it formed. A star that is no longer bound (fewer than 50% of its mass slower than
+    escape speed relative to it, or under `STAR_MIN_PARTICLES` particles) comes apart quietly and its particles go their
+    own ways (counted as torn apart). A star that had fuel, has burned, and whose core (its innermost quarter) is mostly
+    (by mass) at or past `FUSION_PEAK` can't burn any more and explodes like a small supernova: its particles leave
+    as debris riding a shock front out to `STAR_BLAST_REACH` × its size, which shoves what it passes, starting at its
+    escape speed (at most `VMAX`). Losing mass doesn't kill a star by itself. Touching another star, a failing one
+    merges into it.
   * *Black holes:* a star near a super well is stripped by its tide, torn apart, and its particles swirl into the
     core. A star dense enough to hold `COLLAPSE_MASS` × `STAR_COLLAPSE_FACTOR` (4) in a collapse window (its own
     particles count that many times less than loose matter) collapses into a super well itself.
@@ -126,16 +140,18 @@ widget kit in `sv/ui.py`.
   (`REPULSOR_PLACE_MASSES`: 50k to 2M), typed (k / M suffixes), or set by the Size slider (`REPULSOR_SIZE_PX`, 2 to 320 px;
   the mouse wheel too). Its size follows its mass at `WELL_DENSITY` (64) and the other way round. `,` / `.` resize a placed one with its mass, so its body and reach match a fresh one's. Particles can't enter it; they bounce off and slide round its surface. (A solid attracting
   well with the same body can still be made in code with `World.add_well`.) Shift+drag moves it, X deletes it.
-* **Star formation:** every 60 ticks, the densest knots of matter (up to 12, `STAR_FORM_SEEDS`) are checked, and a
-  knot that looks like a young star becomes one: its particles, where they are and moving as they move, become the
+* **Star formation:** every 10 ticks (`STAR_FORM_EVERY`), the densest knots of matter (up to 200, `STAR_FORM_SEEDS`,
+  found by their 7 × 7-block mass) are checked, and a knot that looks like a young star becomes one: its particles, where they are and moving as they move, become the
   star's. A knot is the largest disc round a dense spot that is at least 80% packed, between 4 and 30 cells in radius
   (about 50 to 2,800 particles), where the packing ends; it may be part of a larger body, such as an arm of a disk. It
-  must be layered: a heavy core inside a lighter envelope, the core's typical mass at least 2× the envelope's (a
-  smooth gradient counts), with most of each side's particles on its own side of the divide. It must hold itself
-  together: weigh at least 2× `STAR_MIN_MASS`, with 80% of its mass bound to it (`STAR_FORM_BOUND`). No star forms
+  must be bound: at least `STAR_MIN_PARTICLES` (12) particles, with 80% of its mass bound to it (`STAR_FORM_BOUND`).
+  It must be held together by its own gravity rather than resting on something under the global gravity
+  (`World._self_held`: its pull at its surface beats that gravity; a pile on the floor isn't a star). And it must
+  ignite (`World._ignites`): its core (the innermost quarter), pressed by the weight of the knot with nothing moving,
+  must on average fuse at least once per heat step (`HEAT_EVERY` ticks). A dense clump that wouldn't stays ordinary
+  matter, so heavier particles light at a smaller size than light ones. No star forms
   within 8 cells of a star's capture ring, of a repulsor or three times its radius, near a super well's core, or
-  against a solid border (a pile on the floor isn't a star), and at most one forms per check. See `STAR_FORM_*`. Scenes
-  of one particle mass (like the cloud preset) can't form stars, since nothing is layered.
+  against a solid border, and at most 200 form per check (`STAR_FORM_PER_CHECK`). See `STAR_FORM_*`.
 * **Super wells:** B (or the Super well tool) places one weighing `SUPER_PLACE_MASS` (1,000,000 at start), never lighter than
   the collapse threshold nor heavier than the top of `SUPER_EXPLODE_RANGE` (50M). Pick the mass in the menu (a "min" button for the
   collapse threshold, then 1M to 9M in steps of `SUPER_PLACE_STEP`, below the supernova mass), type it (k / M suffixes: 2.5M, 300k; Enter or a click
@@ -146,7 +162,8 @@ widget kit in `sv/ui.py`.
   whirls everything round the way it spins (`SUPER_SWIRL_*`), at full strength right out to the circle (it fades in
   only over the outer 15%). Nothing inside sleeps or rests on friction, so matter keeps circling unless other
   matter blocks its way, and spirals in over several turns. Its spiral arms show which way it spins, turning faster and brighter the faster it
-  spins. `;` / `'` spin the nearest super well slower / faster (up to `SUPER_SPIN_MAX`, 7). One placed with B starts at spin 1.5
+  spins; they are drawn where space turns at twice the core's radius (`World.whirl_omega`), not at the dotted point of no
+  return, where it turns too little to see. `;` / `'` spin the nearest super well slower / faster (up to `SUPER_SPIN_MAX`, 7). One placed with B starts at spin 1.5
   (`SUPER_SPIN_PLACED`), and one formed by collapse at 1.5 (`SUPER_SPIN_NATURAL`). A new one spins the same way as the
   global orbit when that is on, and either way at random when it is off. Above spin 1 it whirls
   matter faster than it would orbit and flings it out into a ring instead of drawing it in, but only inside its dotted
@@ -221,7 +238,7 @@ widget kit in `sv/ui.py`.
   orbit carries off one edge of the window goes on round its circle out of sight and comes back in on the far side,
   as if the universe really turned, where wrapping borders would bring it in on the opposite edge going the wrong
   way. Outside the disc is solid rim moving with the orbit, so matter flung out slides round it rather than piling
-  up; wells and spawners are kept inside. The disk, cloud, binary and systems presets are round, rain is the window. A round
+  up; wells and spawners are kept inside. The disk, cloud, binary, systems and supernova presets are round, rain is the window. A round
   universe has about twice the cells (600 × 600 for a 960 × 720 window at 2 px): on the disk scene a tick took about
   23% longer than the same particles in the window's rectangle (17.0 against 13.8 ms) and drawing 0.3 ms more.
 * **Camera:** ctrl+wheel or Z / shift+Z zoom out / in at the mouse, from where the whole universe fits the window
@@ -240,7 +257,7 @@ widget kit in `sv/ui.py`.
 * **Gravity reach:** every pull (stars, wells, repulsors, super wells, self-gravity; not the uniform direction or
   the global orbit) ends at a distance: it is the plain inverse-square pull out to R = `GRAVITY_REACH`, then less and
   less, smoothly (a smoothstep: half at 1.5 R), to nothing at all at 2 R (`kernels.REACH_TAPER`), d the softened
-  distance (120 at start, 20 in the disk preset; the menu's Reach slider, 10–400, or all the way right for no
+  distance (60 at start, 120 in the systems preset; the menu's Reach slider, 10–400, or all the way right for no
   fading). So things have to come near each other to interact, a heavy body can't run the whole universe, and
   bodies further apart than 2 R don't feel each other at all. The potential is what that pull climbs out of (zero
   beyond 2 R), so escape speeds are lower too. Circular orbits are as stable as unfaded ones out to R, but not
@@ -259,11 +276,11 @@ widget kit in `sv/ui.py`.
   torn up. At 50–60 only tiny dense stars fit (pour 256 from a 6 px brush, 25–68 cells out round an 80,000 well),
   and even they shed particles in such tight, fast orbits and dissolve within about a minute, while three sharing
   one well merge or fling each other out within 15–30 s (stars sharing an orbit only stay put if each is under about
-  0.1% of the well's mass). So the app starts with gravity reaching 120 cells (`GRAVITY_REACH`), where ordinary
-  stars fit. With "Stars start in orbit" on (the menu's Mouse
+  0.1% of the well's mass). So the systems preset sets gravity reaching 120 cells (`SYSTEM_REACH`), where ordinary
+  stars fit (the app's default reach is 60). With "Stars start in orbit" on (the menu's Mouse
   tool section, T; `ORBIT_STARS`, on at start) a placed star sets off on a circular orbit round the super well
-  pulling hardest on it, the way that well spins, and the well takes the opposite momentum (as much as it responds
-  to the star's pull) so the two don't drift off together (`World.add_star(orbit=True)`); off, it starts at rest and
+  pulling hardest on it, the way that well spins, and the well and the stars already orbiting it take the opposite momentum together (`World.put_in_orbit`,
+  `World.shift_star`), so the group doesn't drift off and the earlier stars' orbits are left as they were (`World.add_star(orbit=True)`); off, it starts at rest and
   just falls straight through. With the Star tool picked, a shaded green band round each super well shows where
   the star the brush and pour mass would place can orbit it (`World.orbit_band`, drawn by
   `Renderer.draw_orbit_bands`): outside the faint circle, far enough out that the star's own pull at its surface

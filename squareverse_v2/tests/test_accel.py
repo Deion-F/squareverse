@@ -77,6 +77,7 @@ def test_strips_run_every_awake_particle_once():
 
 def test_strips_keep_a_star_together_and_its_mass():
     w = make_world(pw=600, ph=400)
+    w.merge_on = w.split_on = False                  # (no fusing in it: just how the strips carry it)
     st = w.add_star(300, 200, 40, mass=30000)
     count, x, y = st.count, st.x, st.y
     m0 = w.total_mass() + w.super_mass()

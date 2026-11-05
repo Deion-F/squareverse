@@ -44,7 +44,7 @@ HELP = [
     ("U", "universe: the window's rectangle / round, reaching past the window (rotation stays on its circles)"),
     ("+ / -", "ticks per frame"),
     ("space / N", "pause / single tick"),
-    ("F1-F5", "presets: rain, disk, cloud, binary, systems"),
+    ("F1-F6", "presets: rain, disk, cloud, binary, systems, supernova"),
     ("F11", "fullscreen (the window can also be resized)"),
     ("C / H / Esc", "clear / help / quit"),
 ]
@@ -629,7 +629,7 @@ class Renderer:
         lines = [
             (f"star   mass {st.mass:,.0f} in {st.count:,} particles   cell ({st.x:.0f}, {st.y:.0f})", config.FG),
             (f"v ({st.vx:+.3f}, {st.vy:+.3f})   radius {st.radius:.1f}   capture ring {st.ring:.1f} cells", config.FG),
-            (f"holds {hold:.0%} of the most it held lately (unstable below {config.STAR_UNSTABLE_SHARE:.0%})"
+            (f"holds {hold:.0%} of the most it held lately   burning {st.burn:,.0f}"
              f"   spin {abs(st.omega) * config.FPS:.2f} rad/s"
              + (f"   tide from a {'super well' if isinstance(st.tide, Well) else 'star'}" if st.tide else ""),
              config.DIM),

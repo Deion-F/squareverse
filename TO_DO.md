@@ -87,7 +87,40 @@ Progress:
 - The radiation "ripples" (user, 2026-11-05): gravitational waves - beams along the line through merging super wells
   (two-armed spirals), which flew straight, unbent, then landed as matter in the middle of nowhere ~50 ticks later;
   and, far fewer, quanta coming back in at the edge (`World.radiation_back` counts them). Waves are now energy only.
-- Step 6 coded (2026-11-05, uncommitted): spin = the angular momentum a super well holds (`Well.jz`; at most G M^2 / c,
+- Step 7 retune (2026-11-05, uncommitted): the disk preset is on the default reach 60 / strength 1.2; systems and
+  binary keep 120 / 0.6. Disk (`DISK_REACH` / `DISK_SCALE` gone): fullscreen, 244 stars form and 209 go supernova in
+  the first 300 ticks, 3 wells of 2-8M, ~5k particles left by 1,800 ticks, 52 -> 23 ms a tick (at its old 20 / 0.6:
+  slower burn, 7-11 wells, 74 -> 40 ms). Binary at reach 60 (two 30k stars 5 cells across, 24 apart, a ring 45-58
+  out): the pair held 1,800 ticks alone, but with its ring it merged by ~800 and came apart - a ring stable round a
+  binary needs ~2x its gap, past where orbits are bound (~0.78 x reach); its common centre is now set still
+  (`World.shift_star`). **Systems** (`SYSTEM_REACH` / `SYSTEM_SCALE`): within reach 60 no layout held - 20-200k
+  wells, orbits 38-56, pour 64-1024 stars 3-6 cells: one star of a well sinks, another is flung out at ~1 cell/tick. Two causes: the tide sinks stars in tight orbits
+  (open, see 2026-11-02 notes; damping their spin to the orbit's instead of to zero was tried again: no better), and
+  past ~0.78 x reach circular orbits are barely bound. Waits for "bigger wells hold more" above.
+  Fixed on the way: `put_in_orbit` gave a star's recoil to its well alone, so the next star placed round it was set
+  off ~6% too fast (the well was moving) - now the well and the stars already round it share it. Auto star test
+  stays xfail (its stars sit at ~135 of reach 120, barely bound).
+  Found: a burning binary's centre wanders ~0.1 cells/tick (not with radiation off): each quantum carries momentum c
+  (24), and the random recoils add up - real in kind, far too big in size; ideas: emit in opposite pairs, or
+  lighter quanta.
+- Step 5 coded (2026-11-05, uncommitted): stars from their own weight. A knot becomes a star when bound, held
+  against outside gravity (`_self_held`) and igniting: its core's (innermost quarter) expected fusions from its
+  weight's pressure >= 1 a heat step (`_ignites`); found round the densest 7 x 7-block sums. Contact fusion counts
+  a star's weight as heat (`kernels.star_pressure`, `World.press`), at FUSION_RATE (0.05) of the attempts, barrier
+  FUSION_BARRIER 2.4 (9 never lit anything). Per star `burn` (smoothed) and `burned`, and `fuel` (core lighter than
+  FUSION_PEAK when it formed). Death: a star no longer bound comes apart quietly (`stars_torn`); one that had fuel,
+  burned, and whose core is now mostly at or past the peak explodes (`_explode_star`, at its escape speed, at most
+  VMAX). HEAT_PRESSURE stays 0 (1 fails 14 tests: placed stars puff up, piles never sleep).
+  Measured (fullscreen, defaults): a 7k pour-16 star burns dimly 6,000+ ticks; 28k pour-16 goes supernova at 2,420
+  ticks, 28k pour-64 at 1,090. Ignition (test strength): rung 256 at radius >= 14, 64-128 at >= 18, 16 at >= 26.
+  Supernova scene (11M well, 1,800 ticks): 312 stars formed, 162 supernovae, 39 collapses; the wells merge back
+  into one 10M well that goes supernova again (~tick 1,350); 36-75 ms a tick. Debris cooled to 64 instead of 400:
+  951 formed, 588 supernovae, 4 collapses, but 58-154k particles and 93-160 ms - SUPER_BLAST_COOL_TO stays 400.
+  Super well arms (user: "don't spin anymore"): not a bug - a well formed by collapse has spin ~0.01-0.02 (matter
+  brings in little net rotation, and VMAX caps what infall adds); the arms were drawn at the far point of no return,
+  where that turns space almost not at all. They are now drawn at twice the core (`whirl_omega`); placed wells
+  (spin 0.5) turn visibly.
+- Step 6 coded (2026-11-05, committed): spin = the angular momentum a super well holds (`Well.jz`; at most G M^2 / c,
   `max_spin_j`; spin = jz / that, -1..1): from collapse (`absorb_disk` lz), swallowed matter (`absorbed` column 5,
   every swallow site, turned about the well in `_collect_absorbed`), swallowed solid wells, and mergers (both spins +
   the pair's orbit). Frame dragging from it: space turns at 2 G J / c^2 / rho^3, faded, never carrying matter past
@@ -114,7 +147,7 @@ Progress:
   step 6 ones (pair orbits by gravity alone, waves spiral it in and it merges spinning, waves are energy taken in,
   faint circle = where space outruns matter, spinning well carries what falls in, collapse spins the way matter
   went round, swallowed orbiting matter spins a well up, arms turn with space at the point of no return).
-- Step 4 coded (2026-11-05, uncommitted): a super well's core is its horizon (`Well.edge`, kept by
+- Step 4 coded (2026-11-05, committed): a super well's core is its horizon (`Well.edge`, kept by
   `World._set_edges` -> `edge_for_mass`: where escape speed reaches VMAX), softening SUPER_SOFTENING 1 cell (a
   point; the old 0.25 x a quarter of the reach made it ~14 cells at 200k, so nothing under ~167k could have a
   horizon). Collapse (`check_collapse`): round each star at least `lightest_super_mass()` and the COLLAPSE_SPOTS (8)
@@ -147,7 +180,7 @@ Progress:
   menu "Radiation comes back"; off: gone, counted in `radiation_lost`). `ghost_count` / `ghost_mass` leave them out
   (`heat_count`). Checked: a hot crash in a round universe keeps kinetic + heat + radiation at 172,800 for 800 ticks
   (recycling); off, what is left + what left = 172,800; mass exact either way.
-- Step 3 coded (2026-11-04, uncommitted): masses are rungs 1, 2, 4 ... 4096. Mass stays a whole number (gravity
+- Step 3 coded (2026-11-04, committed): masses are rungs 1, 2, 4 ... 4096. Mass stays a whole number (gravity
   unchanged, mass exact); the mass defect is binding energy per rung, `kernels._binding`: m x FUSION_BINDING (0.05)
   x VMAX^2 x (1 - (1 - rung/peak rung)^2) up to FUSION_PEAK 256, then falling by FUSION_TAIL 0.15 by 4096. Only two of
   the same rung fuse (into the next); chance exp(-barrier / E) (`_tunnel`), barrier FUSION_BARRIER (9) x a b /
@@ -174,7 +207,7 @@ Progress:
   incompressible matter (one particle per cell) can't be heated by squeezing, so nothing ignites from heat alone.**
   Plan for step 5 (the user's "enough gravity, even with no motion"): count the weight pressing on a particle - the
   hydrostatic pressure of what lies above it in its own gravity - as energy for fusing, alongside heat and motion.
-- Step 2 coded (2026-11-04, uncommitted): heat is kin's 5th column (`kernels.KIN`); every kinetic energy loss in
+- Step 2 coded (2026-11-04, committed): heat is kin's 5th column (`kernels.KIN`); every kinetic energy loss in
   `_advance` becomes heat exactly (`_pair_ke` / `_heat_loss`, signed: contact rules that hand out energy take it from
   heat - a crash of two blocks keeps kinetic + heat at 172,800 to the unit; a few particles dip below 0 heat for
   ~25 ticks), except an outside force's kick that a contact takes straight back (`_unkicked`: resting under gravity
@@ -199,7 +232,7 @@ Progress:
   wherever gravity does work (rain: ~+0.04% / 100 ticks with pressure on, +4% with it off). Waiting on the user:
   should radiation land as matter (energy -> mass) or only carry energy?
   Timing note: never time while the test suite runs (numba threads oversubscribe: 25x slower, 32 s suite -> 450 s).
-- Step 1 coded (2026-11-04, uncommitted): `Well.fall` / `top_speed` removed, `Well.mobility` is 1 for super wells
+- Step 1 coded (2026-11-04, committed): `Well.fall` / `top_speed` removed, `Well.mobility` is 1 for super wells
   (only solid wells are sluggish in the global orbit / whirlpools), every well capped at VMAX; `orbit_velocity(wl,
   x, y, mass)` gives the two-body orbit and `put_in_orbit` the well's recoil -m u / M; `add_star` works out the
   star's mass before choosing its velocity.

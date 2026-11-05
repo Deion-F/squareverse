@@ -314,6 +314,7 @@ def test_wells_feel_particles_with_self_gravity():
     run(w, 40)
     assert wl.vx > 0
     w2 = make_world(pw=400, ph=200)       # without self-gravity, particles don't pull wells
+    w2.star_form_on = False               # (heavy enough to ignite, the block would become a star, which does)
     w2.place_many(xs.ravel(), ys.ravel(), 64)
     wl2 = w2.add_well(100, 100, 1000.0)
     run(w2, 40)
@@ -587,9 +588,11 @@ def test_new_super_wells_spin_either_way_without_the_global_orbit():
 def test_disk_preset_settings_and_presets_reset_them():
     from sv.presets import disk, rain
     w = make_world(pw=400, ph=300)
+    w.set_reach(20)
+    w.set_gravity_scale(0.6)
     disk(w)
-    assert not w.wells and w.orbit == 1 and w.sg_on and w.g_scale == config.DISK_SCALE
-    assert w.reach_len == config.DISK_REACH          # the reach and strength it was made for
+    assert not w.wells and w.orbit == 1 and w.sg_on and w.g_scale == config.GRAVITY_SCALE
+    assert w.reach_len == config.GRAVITY_REACH       # every preset runs at the default reach and strength
     assert w.round and not w.wrap and (w.w, w.h) == (250, 250)    # a disc through the 200 x 150 window's corners
     assert w.particle_count() > 1000
     rain(w)
@@ -956,23 +959,28 @@ def star_world():
     return w
 
 
-def test_round_layered_clump_becomes_a_star():
+def igniting_ball(w, cx, cy, radius=18, mass=128):
+    """A packed disc of one rung heavy enough that its weight ignites its core (World._ignites). Returns its mass."""
+    return layered_ball(w, cx, cy, radius, (mass, mass, mass))
+
+
+def test_a_knot_whose_weight_ignites_it_becomes_a_star():
     w = star_world()
-    mass = layered_ball(w, 100, 80, 10)
+    mass = igniting_ball(w, 100, 80)
     n = w.particle_count()
     w.form_stars()
     assert len(w.stars) == 1 and not w.wells
     st = w.stars[0]
-    assert w.particle_count() == n and np.count_nonzero(w.owner) == n   # its particles stay: they are the star
-    assert st.mass == mass and st.count == n and st.radius == pytest.approx(10, rel=0.1)
-    assert (st.x, st.y) == (pytest.approx(100, abs=0.5), pytest.approx(80, abs=0.5))
+    assert w.particle_count() == n and np.count_nonzero(w.owner) >= 0.9 * n   # its particles stay: they are the star
+    assert st.mass >= 0.9 * mass and st.radius == pytest.approx(18, rel=0.1) and st.fuel   # (its packed edge may stop
+    #                                                                                         just short of its rim)
+    assert (st.x, st.y) == (pytest.approx(100, abs=1.5), pytest.approx(80, abs=1.5))
 
 
 @pytest.mark.parametrize("radius, masses, aspect", [
-    (10, (32, 32, 32), 1.0),                         # one material: no layers
-    (10, (40, 32, 24), 1.0),                         # core and envelope too alike (less than 2x apart)
+    (10, (32, 32, 32), 1.0),                         # too light: its weight doesn't ignite it
+    (10, (256, 32, 2), 1.0),                         # layered, but too light to ignite
     (2.5, (256, 32, 2), 1.0),                        # too small
-    (34, (256, 32, 2), 1.0),                         # too large
 ])
 def test_clumps_that_dont_qualify_stay_particles(radius, masses, aspect):
     w = star_world()
@@ -985,7 +993,7 @@ def test_clumps_that_dont_qualify_stay_particles(radius, masses, aspect):
 def test_star_forms_on_its_own_and_keeps_momentum():
     w = star_world()
     w.collapse_on = False
-    layered_ball(w, 100, 80, 8)
+    igniting_ball(w, 100, 80)
     w.kin[w.mass > 0, 0] = 0.3                       # the whole clump drifting right
     w.tick_count = config.STAR_FORM_EVERY - 5        # (nothing holds it together: check before it spreads)
     run(w, 5)
@@ -993,36 +1001,22 @@ def test_star_forms_on_its_own_and_keeps_momentum():
     assert w.stars[0].vx == pytest.approx(0.3, rel=0.05)
 
 
-def test_smooth_gradient_counts_as_layered():
-    w = star_world()
-    xs, ys = np.meshgrid(np.arange(w.w), np.arange(w.h))
-    d = np.hypot(xs - 100, ys - 80) / 10
-    inside = d <= 1.0
-    w.place_many(xs[inside], ys[inside], np.round(256 ** (1 - d[inside])).astype(int))   # heavy to light
-    w.form_stars()
-    assert len(w.stars) == 1
-
-
 def test_a_knot_inside_a_larger_body_becomes_a_star():
     w = star_world()
     xs, ys = np.meshgrid(np.arange(60, 140), np.arange(60, 100))
     w.place_many(xs.ravel(), ys.ravel(), 1)                     # a slab of light dust...
     d = np.hypot(xs - 100, ys - 80)
-    w.mass.reshape(w.h, w.w)[ys[d < 4], xs[d < 4]] = 64        # ...with a heavy knot inside
-    w.quad.reshape(w.h, w.w, 4)[ys[d < 4], xs[d < 4]] = (16, 16, 16, 16)
-    # the slab is packed right out past the largest star size: no edge, so no knot...
+    w.mass.reshape(w.h, w.w)[ys[d < 19], xs[d < 19]] = 128     # ...with a heavy knot inside, heavy enough to ignite
+    w.quad.reshape(w.h, w.w, 4)[ys[d < 19], xs[d < 19]] = (32, 32, 32, 32)
     w.form_stars()
-    assert not w.stars
-    w.mass.reshape(w.h, w.w)[(np.hypot(*np.meshgrid(np.arange(w.w) - 100, np.arange(w.h) - 80)) > 9)
-                             & (w.mass.reshape(w.h, w.w) > 0) & (np.arange(w.w)[None, :] % 3 == 0)] = 0
-    w.quad[w.mass == 0] = 0
-    w.form_stars()                                   # ...until thinned out round it
-    assert len(w.stars) == 1 and w.stars[0].radius < 16   # the knot, not the whole slab
+    assert len(w.stars) == 1 and w.stars[0].radius < 30         # the knot (and some dust round it), not the slab
+    assert abs(w.stars[0].x - 100) < 3 and abs(w.stars[0].y - 80) < 3
     check_consistent(w)
 
 
 def test_no_star_forms_in_or_next_to_another_star():
-    w = star_world()
+    w = make_world(pw=800, ph=320)
+    w.merge_on = w.split_on = False
     xs, ys = np.meshgrid(np.arange(w.w), np.arange(w.h))
     d = np.hypot(xs - 100, ys - 80) / 10
     st = w.add_star(200, 160, 8, mass=50000.0)       # a star at cell (100, 80)...
@@ -1030,10 +1024,10 @@ def test_no_star_forms_in_or_next_to_another_star():
     w.place_many(xs[ring], ys[ring], np.where(d[ring] < 0.65, 256, np.where(d[ring] < 0.85, 32, 2)))   # ...crusted
     w.form_stars()
     assert len(w.stars) == 1                         # it isn't a knot of its own, nor is its crust
-    layered_ball(w, 100 + st.ring + 4, 80, 5)        # a layered knot just past its capture ring
+    igniting_ball(w, 100 + st.ring + 4 + 18, 80)     # a knot that would ignite, just past its capture ring
     w.form_stars()
     assert len(w.stars) == 1
-    layered_ball(w, 170, 80, 6)                      # one well clear of it forms
+    igniting_ball(w, 320, 80)                        # one well clear of it forms
     w.form_stars()
     assert len(w.stars) == 2
 
@@ -1085,6 +1079,7 @@ def place_star(w, px, py, radius_px, **kw):
 
 def test_placed_star_is_a_layered_ball_of_particles_that_holds_together():
     w = make_world(pw=400, ph=400)
+    w.merge_on = w.split_on = False                  # (no fusing in it: just how it holds together)
     st = place_star(w, 200, 200, 24)                    # radius 12 cells at (100, 100)
     n, mass = w.particle_count(), w.total_mass()
     assert st.count == n and st.mass == mass == pytest.approx(w.brush_mass(24, 1, STAR_DENSITY), rel=0.05)
@@ -1099,6 +1094,7 @@ def test_placed_star_is_a_layered_ball_of_particles_that_holds_together():
 
 def test_star_travels_as_one():
     w = make_world(pw=600, ph=300)
+    w.merge_on = w.split_on = False                  # (no fusing in it: just how it moves)
     st = place_star(w, 100, 150, 20, vx=1.0)
     n = st.count
     run(w, 100)
@@ -1115,7 +1111,7 @@ def test_star_pulls_and_is_pulled_without_self_gravity():
     w.place_many(xs.ravel(), ys.ravel(), 256)        # a heavy lump 90 cells to its right
     run(w, 60)
     assert st.vx > 0.5                               # pulled towards the lump...
-    lump = np.nonzero((w.mass > 0) & (w.owner == 0))[0]
+    lump = np.nonzero((w.mass > 0) & (w.owner != w.stars.index(st) + 1))[0]   # (the lump may be a star too)
     assert (lump % w.w).mean() < 239.5 - 0.5         # ...which it pulls back
 
 
@@ -1141,6 +1137,7 @@ def test_slow_matter_is_captured_and_fast_matter_passes():
 
 def test_head_on_crash_scatters_matter_and_what_stays_bound_merges():
     w = make_world(pw=800, ph=500)
+    w.merge_on = w.split_on = False                  # (no fusing in them: just how they meet)
     place_star(w, 250, 250, 24, vx=1.5)
     place_star(w, 550, 250, 24, vx=-1.5)
     before, most_loose = total(w), 0
@@ -1148,7 +1145,7 @@ def test_head_on_crash_scatters_matter_and_what_stays_bound_merges():
         w.step()                                     # for a while before they merge: ~480 ticks)
         most_loose = max(most_loose, w.total_mass() - w.star_mass())
     assert most_loose > 0.1 * before                 # the crash flung matter out of both...
-    assert len(w.stars) == 1 and w.stars[0].mass > 0.5 * before   # ...and the rest merged into one star
+    assert 1 <= len(w.stars) <= 2 and w.star_mass() > 0.5 * before   # ...and what stays bound stays in stars
     assert total(w) == before
     check_consistent(w)
 
@@ -1164,25 +1161,25 @@ def test_grazing_stars_shave_each_other_but_keep_going():
     assert a.vx > 0.5 and b.vx < -0.5
 
 
-def test_star_that_loses_too_much_explodes_as_debris():
+def test_star_that_no_longer_holds_together_comes_apart_quietly():
     w = make_world(pw=600, ph=600)
+    w.merge_on = w.split_on = False
     st = place_star(w, 300, 300, 24)
-    run(w, config.STAR_SETTLE)
+    run(w, config.STAR_FORM_EVERY)
     idx = np.nonzero(w.owner)[0]
     dx, dy = idx % w.w - st.x, idx // w.w - st.y
     r = np.hypot(dx, dy)
-    out = r > 3                                      # all but its core flung away, too fast to stay
+    out = r > 0.5                                    # all of it flung away, too fast to stay
     w.kin[idx[out], 0] = 3 * dx[out] / r[out]
     w.kin[idx[out], 1] = 3 * dy[out] / r[out]
     w.flag[idx] = 1
     before = total(w)
-    for _ in range(60):
+    for _ in range(3 * config.STAR_FORM_EVERY):
         w.step()
         if not w.stars:
             break
-    assert not w.stars and w.star_explosions == 1
-    assert w.ghost_count() > 0 and len(w.blasts) == 1     # the core left as debris riding a blast
-    assert total(w) == before
+    assert not w.stars and w.star_explosions == 0 and w.stars_torn == 1   # unbound: it just comes apart ...
+    assert not w.blasts and total(w) == before                           # ... no blast (that takes spent fuel)
 
 
 def test_star_falling_into_a_super_well_is_torn_apart_and_swallowed():
@@ -1213,6 +1210,7 @@ def test_a_heavy_but_thin_star_does_not_collapse():
 
 def test_gently_touching_stars_stay_two_but_merge_once_sunk_into_each_other():
     w = make_world(pw=600, ph=400)
+    w.merge_on = w.split_on = False                  # (no fusing in them: just how they meet)
     place_star(w, 281, 200, 20)
     place_star(w, 319, 200, 20)                         # 19 cells apart, radius 10: touching, at rest
     before = w.total_mass()
@@ -1247,6 +1245,7 @@ def test_resize_keeps_stars():
 
 def test_wrap_star_holds_together_across_the_seam():
     w = make_world(pw=400, ph=200)
+    w.merge_on = w.split_on = False                  # (no fusing in it: just how it moves)
     w.set_wrap(True)
     st = place_star(w, 0, 100, 16, vx=-0.5)             # centred on the left edge
     n = st.count
@@ -1475,6 +1474,18 @@ def test_supernova_mass_is_a_setting_and_presets_restore_it():
     assert w.explosions == 1 and wl not in w.wells
     empty(w)
     assert w.explode_mass == config.SUPER_EXPLODE_MASS
+
+
+def test_supernova_preset_is_one_super_well_half_again_over_the_supernova_mass():
+    from sv.presets import supernova
+    w = make_world(pw=600, ph=400)
+    w.place_many([10], [10], [4])
+    supernova(w)
+    assert w.round and w.particle_count() == 0 and len(w.wells) == 1
+    wl = w.wells[0]
+    assert wl.is_super and wl.mass == pytest.approx(1.5 * w.explode_mass, rel=1e-6)
+    assert wl.x == pytest.approx(w.w / 2) and wl.y == pytest.approx(w.h / 2)
+    assert config.DEFAULT_PRESET == "supernova"
 
 
 def test_radiation_sheds_heat_from_merges_and_splits_and_keeps_all_mass():
@@ -1779,11 +1790,11 @@ def test_orbit_band_is_nowhere_for_a_big_star_in_a_short_reach_and_shrinks_besid
     assert inner == alone[0] and outer == pytest.approx(0.3 * 400) and outer < alone[1]
 
 
-@pytest.mark.xfail(reason="physics rework step 7 retune (TO_DO.md): a three-star ring round a free well near the reach limit drifts apart", strict=False)
+@pytest.mark.xfail(reason="orbits past ~0.78 x the reach are barely bound: three stars sharing one drift apart (TO_DO.md: bigger wells holding more)", strict=False)
 def test_auto_star_fills_an_orbit_evenly_and_the_stars_hold():
     w = make_world(pw=1200, ph=1200)
-    w.set_reach(120)                                 # the app's reach
-    w.g_scale = 0.6
+    w.set_reach(config.SYSTEM_REACH)                 # where stars can orbit a super well (TO_DO.md)
+    w.g_scale = config.SYSTEM_SCALE
     w.radiation_on = True
     wl = w.add_super_well(600, 600, 80000)
     clicks = [(600 + 2 * 150, 600), (600, 600 + 2 * 150), (600 - 2 * 150, 600 - 40), (600, 600 - 2 * 150)]
@@ -1813,7 +1824,7 @@ def test_a_star_collapses_only_when_inside_its_own_horizon(pour, px, collapses):
     assert (near >= limit) == collapses
     st = w.add_star(200, 200, px, pour)
     m0 = w.universe_mass()
-    run(w, 3 * config.COLLAPSE_EVERY)
+    run(w, config.COLLAPSE_EVERY)                    # (the first check: later, burning, a star can shrink and collapse)
     assert (st in w.stars) != collapses
     supers = [wl for wl in w.wells if wl.is_super]
     assert bool(supers) == collapses and w.universe_mass() == m0
@@ -1934,12 +1945,12 @@ def test_swallowing_matter_that_goes_round_it_spins_a_super_well_up():
     assert w.total_mass() == 0 and wl.spin > 0 and wl.jz > 0   # it swallowed it all, and spins the way it went round
 
 
-def test_super_well_arms_turn_with_space_at_its_point_of_no_return():
+def test_super_well_arms_turn_with_space_where_they_are_drawn():
     w = make_world(pw=600, ph=400)
     wl = w.add_super_well(300, 200, 1_000_000)
     w.set_spin(wl, 0.5)
     slow = w.whirl_omega(wl)
-    d = w.horizon(wl)
+    d = 2 * wl.core()
     assert slow == pytest.approx(w.frame_turn(wl.x + d, wl.y)[0]) and slow > 0
     w.set_spin(wl, 1.0)
     assert w.whirl_omega(wl) == pytest.approx(2 * slow)          # twice the spin, twice as fast

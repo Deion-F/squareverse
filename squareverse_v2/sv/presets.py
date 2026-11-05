@@ -1,4 +1,4 @@
-"""Starting scenes (F1-F4, or --preset). Each takes a World and an optional particle count. Rain fills the window's
+"""Starting scenes (F1-F6, or --preset). Each takes a World and an optional particle count. Rain fills the window's
 rectangle; the space scenes are round universes reaching past the window (World.set_round), sized to the window."""
 
 import numpy as np
@@ -49,11 +49,9 @@ def _spread_masses(rng, count, total):
 
 def disk(world, count=None):
     """A heavy dust disk of every mass from 1 to thousands (DISK_MASS in all) turning with the clockwise global
-    orbit in a round universe, held together by its own gravity (no central well), gravity reaching DISK_REACH."""
+    orbit in a round universe, held together by its own gravity (no central well)."""
     world.set_round(True)
     world.reset()
-    world.set_reach(config.DISK_REACH)               # tuned for it: reaching everywhere it runs twice as slowly
-    world.set_gravity_scale(config.DISK_SCALE)
     world.set_orbit(1)
     world.set_self_gravity(True)
     w, h = world.w, world.h
@@ -92,7 +90,7 @@ def binary(world, count=None):
     world.set_round(True)
     world.reset()
     w, h = world.w, world.h
-    world.set_reach(config.SYSTEM_REACH)              # the gravity its orbits were tuned for
+    world.set_reach(config.SYSTEM_REACH)              # the gravity its orbits were tuned for (as the systems preset)
     world.set_gravity_scale(config.SYSTEM_SCALE)
     a = world.vh * 0.09                               # each star's distance from the centre (cells)
     r = 0.03 * min(world.vw, world.vh)                # each star's radius (cells)
@@ -104,8 +102,14 @@ def binary(world, count=None):
     rho = np.sqrt(d * d + soft * soft)
     v = np.sqrt(strength * d / rho ** 3 * fade(rho, world.kinv)[0] * a)
     # clockwise on screen, the same way as the ring
-    world.add_star(world.pw / 2 - a * world.cell, world.ph / 2, r * world.cell, mass=mass, vy=-v)
-    world.add_star(world.pw / 2 + a * world.cell, world.ph / 2, r * world.cell, mass=mass, vy=v)
+    pair = [world.add_star(world.pw / 2 - a * world.cell, world.ph / 2, r * world.cell, mass=mass, vy=-v),
+            world.add_star(world.pw / 2 + a * world.cell, world.ph / 2, r * world.cell, mass=mass, vy=v)]
+    pair = [st for st in pair if st is not None]
+    if pair:                                          # (made of particles, they come out a little unequal: their
+        m = sum(st.mass for st in pair)               #   common centre is set still)
+        cvx, cvy = sum(st.mass * st.vx for st in pair) / m, sum(st.mass * st.vy for st in pair) / m
+        for st in pair:
+            world.shift_star(st, -cvx, -cvy)
     s = min(world.vw, world.vh)
     count = count or int(np.pi * ((0.47 * s) ** 2 - (0.36 * s) ** 2) * 0.12)
     # light enough that the stars, which feel it, keep orbiting each other
@@ -160,8 +164,18 @@ def systems(world, count=None):
         system(cx + x, cy + y, rng.integers(config.SYSTEM_OTHER_STARS[0], config.SYSTEM_OTHER_STARS[1] + 1))
 
 
+def supernova(world, count=None):
+    """Nothing but a super well in the middle of a round universe, SUPERNOVA_SHARE x as heavy as one that goes
+    supernova (the world's explode_mass: the menu's Supernova at), so it explodes once its grace is over and its
+    debris makes the stars, wells and later supernovae from there on."""
+    world.set_round(True)
+    world.reset()
+    world.add_super_well(world.pw / 2, world.ph / 2, config.SUPERNOVA_SHARE * world.explode_mass)
+
+
 def empty(world, count=None):
     world.reset()
 
 
-PRESETS = {"rain": rain, "disk": disk, "cloud": cloud, "binary": binary, "systems": systems, "empty": empty}
+PRESETS = {"rain": rain, "disk": disk, "cloud": cloud, "binary": binary, "systems": systems, "supernova": supernova,
+           "empty": empty}

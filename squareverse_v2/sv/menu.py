@@ -28,8 +28,8 @@ INFO = {
     "presets": "Starting scenes. Rain: mixed masses falling under gravity. Disk: a self-gravitating dust disk turning "
                "with the global rotation in a round universe, which forms stars. Cloud: a turning cloud that "
                "clumps. Binary: two stars orbiting each other inside a ring. Systems: a black hole in the middle "
-               "orbited by three stars, and a few more round it with a star or two each. Empty: nothing. "
-               "Keys: F1-F5.",
+               "orbited by three stars, and a few more round it with a star or two each. Supernova: one black hole "
+               "half again as heavy as goes supernova, alone in the middle. Empty: nothing. Keys: F1-F6.",
     "tool": "What a left click on the universe does. Pour / Ghosts / Erase work while you hold the button down; the "
             "others act once per click. Under the tool are only its own settings, and the cursor shows what a click "
             "places - its size, with a label saying what it is and how heavy - turning red when it would collapse "
@@ -98,11 +98,11 @@ INFO = {
     "zoom": "Zoom the camera out to see the whole universe (what has left the window, in a round one) or in for a "
             "closer look; the squares keep their size in the simulation. Ctrl+wheel or Z / shift+Z zoom at the "
             "mouse, middle drag or alt+drag pans, R goes back to 1x, shift+R fits the whole universe.",
-    "stars": "Stars are balls of particles: a heavy core in a light envelope, held together by their own gravity. "
-             "Touching gently they merge; crashing they splash matter out of the contact; one that loses too much "
-             "explodes, or is torn apart by a heavier neighbour's tide.",
-    "formation": "Every second, dense round knots of matter with a heavy core inside a lighter envelope that hold "
-                 "themselves together become stars. Off: only stars you place appear.",
+    "stars": "Stars are balls of particles held together by their own gravity, whose weight fuses their core. "
+             "Touching gently they merge; crashing they splash matter out of the contact; one no longer bound "
+             "comes apart, and one whose core has burned up to the heaviest fuel explodes.",
+    "formation": "Several times a second, dense round knots of matter that hold themselves together and whose own "
+                 "weight lights fusion in their core become stars. Off: only stars you place appear.",
     "collapse": "Matter so dense that even moving at the speed limit nothing could get away from it - the mass within "
                 "some distance is enough that the speed it takes to escape reaches the limit there - collapses into a "
                 "super well, a black hole holding all of it, with its momentum and spin. Stars and loose matter alike: "
@@ -288,7 +288,7 @@ def draw_menu(ui, app, fps):
                                         INFO["speed"], "{} per frame", integer=True, step=1,
                                         note=f"step {w.step_ms:.1f} ms")
         hit = ui.choice("presets", "Presets", [(p, p.capitalize()) for p in ("rain", "disk", "cloud", "binary",
-                                                                              "systems", "empty")], None,
+                                                                              "systems", "supernova", "empty")], None,
                         INFO["presets"], columns=3)
         if hit:
             PRESETS[hit](w)

@@ -1488,13 +1488,58 @@ def heat_push(gx, gy, gvx, gvy, gm, gtag, tag, coupling, min_speed, vmax, w, h, 
 
 
 @njit(cache=True)
-def heat_step(w, h, mass, kin, quad, owner, flag, solid, conduct, radiate, cost, speed, rows, pool, block, fuse_on,
-              max_mass, f_bind, f_peak, f_top, f_tail, f_barrier, wrap):
+def star_pressure(stars, gs, w, h, mass, owner, press, wrap, kinv):
+    """The pressure in each star (rows of x, y, how far its particles reach, k) from its own weight: ring by ring out
+    from its centre, everything further out presses in, pulled by the mass within (gs = G x strength): P(r) = the sum
+    over the rings from r out of their mass per cell x that pull. Its particles' press[i] is it (energy per cell, as
+    heat: heat_step counts it towards fusing - a heavy star's core is pressed hard enough to fuse with nothing moving,
+    a light one's isn't). Other cells are left as they are."""
+    for s in range(stars.shape[0]):
+        cx, cy, r, own = stars[s, 0], stars[s, 1], stars[s, 2], np.int64(stars[s, 3]) + 1
+        n = int(r) + 2
+        ring_m = np.zeros(n)
+        ring_c = np.zeros(n)
+        x0, x1, xmin = _span(cx, r, w, wrap)
+        y0, y1, ymin = _span(cy, r, h, wrap)
+        for yy in range(y0, y1):
+            dy = _axis(yy, cy, h, ymin)
+            for xx in range(x0, x1):
+                i = (yy % h) * w + xx % w
+                if owner[i] != own:
+                    continue
+                dx = _axis(xx, cx, w, xmin)
+                k = min(int(np.sqrt(dx * dx + dy * dy)), n - 1)
+                ring_m[k] += mass[i]
+                ring_c[k] += 1.0
+        p = np.zeros(n)
+        inside = np.cumsum(ring_m)                       # the mass within the outer edge of each ring
+        acc = 0.0
+        for k in range(n - 1, -1, -1):                   # from the outside in
+            if ring_c[k] > 0:
+                rk = k + 0.5
+                acc += ring_m[k] / ring_c[k] * gs * (inside[k] - 0.5 * ring_m[k]) / (rk * rk) * fade(rk, kinv)[0]
+            p[k] = acc
+        for yy in range(y0, y1):
+            dy = _axis(yy, cy, h, ymin)
+            for xx in range(x0, x1):
+                i = (yy % h) * w + xx % w
+                if owner[i] == own:
+                    dx = _axis(xx, cx, w, xmin)
+                    press[i] = p[min(int(np.sqrt(dx * dx + dy * dy)), n - 1)]
+
+
+@njit(cache=True)
+def heat_step(w, h, mass, kin, press, quad, owner, flag, solid, conduct, radiate, cost, speed, rows, pool, block,
+              fuse_on, max_mass, f_bind, f_peak, f_top, f_tail, f_barrier, wrap, released, attempts):
     """Heat moves (kin[:, 4]: see KIN), and touching particles fuse. Fusion: two touching particles of the same rung
     may fuse into the next one up, by the same rule as in a collision (_advance): the energy they bring - their heat
     and their motion against each other - against the barrier (_tunnel), and enough of it if the fusion takes energy
     (past the peak: _binding); the binding energy it gives off is the product's heat, and so is the energy of their
-    motion against each other. So matter hot enough fuses where it lies - in a hot core, with nothing colliding.
+    motion against each other. So matter hot enough fuses where it lies - in a hot core, with nothing colliding. Its
+    pressure counts as heat does (press: star_pressure, a star's own weight), so a heavy star's core fuses with
+    nothing moving at all. Touching at rest, they try `attempts` times a heat step (FUSION_RATE: a collision is one
+    try in itself). released[k] adds up the binding energy fusing gives off (column 0) and takes (1) in star k
+    (row 0: loose matter).
     Conduction: touching particles even out their temperatures (heat per unit
     mass) by `conduct` of the difference, weighted so a light particle warms fast and a heavy one slowly - heat
     flows, never appears. Radiation: a particle with open sides (empty cells next to it, not solid ground) loses
@@ -1525,13 +1570,17 @@ def heat_step(w, h, mass, kin, quad, owner, flag, solid, conduct, radiate, cost,
             if fuse_on and mass[j] == mass[i] and 2 * mass[i] <= max_mass and _rung(mass[i]) >= 0:
                 dvx, dvy = np.float64(kin[i, 0] - kin[j, 0]), np.float64(kin[i, 1] - kin[j, 1])
                 u2 = dvx * dvx + dvy * dvy
-                ef = _fuse_energy(m, m, u2, kin[i, 4], kin[j, 4])
+                ef = _fuse_energy(m, m, u2, kin[i, 4] + press[i], kin[j, 4] + press[j])
                 q = _binding(2 * mass[i], f_bind, f_peak, f_top, f_tail) - 2.0 * _binding(mass[i], f_bind, f_peak,
                                                                                          f_top, f_tail)
-                if ef + q >= 0.0 and _tunnel(_barrier(m, m, f_barrier), ef):
+                if ef + q >= 0.0 and ef > 0.0 and np.random.random() < attempts * np.exp(-_barrier(m, m, f_barrier) / ef):
                     kin[i, 0] = 0.5 * (kin[i, 0] + kin[j, 0])
                     kin[i, 1] = 0.5 * (kin[i, 1] + kin[j, 1])
                     kin[i, 4] += kin[j, 4] + 0.25 * m * u2 + q   # (their motion against each other: m/2 x u2/2)
+                    if q >= 0.0:                         # (per star: row owner, 0 for loose matter)
+                        released[owner[i], 0] += q
+                    else:
+                        released[owner[i], 1] -= q
                     for c in range(4):
                         quad[i, c] += quad[j, c]
                     mass[i] = 2 * mass[i]
@@ -2322,40 +2371,6 @@ def _median(a):
     s = np.sort(a)
     n = s.size
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
-
-
-@njit(cache=True)
-def layered(lm, r, cuts, gap, k, pure):
-    """World.layered on log masses lm at shares r of the knot's radius, divided at each of cuts in turn (the same
-    medians, means and comparisons, without numpy's ~40 calls a cut)."""
-    for f in cuts:
-        na = 0
-        for q in range(r.size):
-            na += r[q] <= f
-        nb = r.size - na
-        if na < k or nb < k:
-            continue
-        a, b = np.empty(na), np.empty(nb)
-        ia = ib = 0
-        for q in range(r.size):
-            if r[q] <= f:
-                a[ia] = lm[q]
-                ia += 1
-            else:
-                b[ib] = lm[q]
-                ib += 1
-        ma, mb = _median(a), _median(b)
-        if ma - mb < gap:
-            continue
-        t = (ma + mb) / 2
-        above = below = 0
-        for v in a:
-            above += v > t
-        for v in b:
-            below += v <= t
-        if above / na >= pure and below / nb >= pure:
-            return True
-    return False
 
 
 @njit(cache=True)
