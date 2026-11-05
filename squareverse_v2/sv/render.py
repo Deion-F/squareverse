@@ -640,7 +640,8 @@ class Renderer:
         kind = "super well" if wl.is_super else ("repulsor" if wl.sign < 0 else "well")
         lines = [
             (f"{kind}   mass {wl.mass:,.0f}   cell ({wl.x:.0f}, {wl.y:.0f})", config.FG),
-            (f"v ({wl.vx:+.3f}, {wl.vy:+.3f})   mobility {wl.mobility():.3f}", config.FG),
+            (f"v ({wl.vx:+.3f}, {wl.vy:+.3f})" + ("" if wl.is_super else f"   mobility {wl.mobility():.3f}"),
+             config.FG),
             (f"no return {world.horizon(wl):.0f} cells   whirlpool {world.well_range(wl):.0f}   drags space "
              f"{world.reach(wl):.0f}   spin {abs(wl.spin):.2f} (; / ') "
              f"{'clockwise' if wl.spin > 0 else 'counterclockwise'}" if wl.is_super else

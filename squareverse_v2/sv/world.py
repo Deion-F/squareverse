@@ -15,7 +15,7 @@ from .gravity import SelfGravity, external_field, fade, horizon_for, order_bucke
 # Global gravity directions, clockwise on screen starting from "down" (sand.py).
 DIRS = [(0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0), (1, 1)]
 DIR_NAMES = ["down", "down-left", "left", "up-left", "up", "up-right", "right", "down-right"]
-VIEW_MODES = ["mass", "speed", "children", "awake"]
+VIEW_MODES = ["mass", "speed", "children", "awake", "heat"]
 
 
 def merge_losses(m1, m2, loss, bias=None):
@@ -26,6 +26,39 @@ def merge_losses(m1, m2, loss, bias=None):
     l1 = loss * w1 / (w1 + w2)
     l1 = min(max(l1, loss - m2), m1)                # if one can't cover its share the other makes up the rest
     return l1, loss - l1
+
+
+def snap_rung(m):
+    """The rung - a power of 2 from 1 to MAX_MASS - nearest each mass (on a log scale): particle masses come in rungs
+    (kernels._binding). For new matter, where no mass has to be kept exactly."""
+    m = np.maximum(np.asarray(m, np.float64), 1.0)
+    return np.clip(2.0 ** np.round(np.log2(m)), 1, config.MAX_MASS).astype(np.int64)
+
+
+def round_rungs(rng, m):
+    """Each mass rounded at random to one of the two rungs either side of it, the heavier with the chance that keeps
+    the expected mass what it was (m between 2^a and 2^(a + 1): 2^(a + 1) with chance m / 2^a - 1)."""
+    m = np.clip(np.asarray(m, np.float64), 1.0, config.MAX_MASS)
+    lo = 2.0 ** np.floor(np.log2(m))
+    return (lo * (1 + (rng.random(m.shape) < m / lo - 1.0))).astype(np.int64)
+
+
+def random_rungs(rng, lo, hi, n):
+    """n random rungs from lo to hi (each rung in between equally likely)."""
+    k_lo, k_hi = int(math.ceil(math.log2(max(lo, 1)))), int(math.floor(math.log2(max(hi, 1))))
+    return (1 << rng.integers(k_lo, max(k_lo, k_hi) + 1, n)).astype(np.int64)
+
+
+def rung_pieces(amount, k=None):
+    """Rung masses adding up to exactly amount: about k pieces of the heaviest rung up to amount / k (as heavy as
+    they come, MAX_MASS, when k is None), and what is left over as its binary digits - so mass is kept exactly."""
+    amount = int(amount)
+    if amount <= 0:
+        return np.zeros(0, np.int64)
+    base = config.MAX_MASS if k is None else min(config.MAX_MASS, 1 << int(math.log2(max(1, amount // max(1, k)))))
+    q, rest = divmod(amount, base)
+    bits = [1 << b for b in range(rest.bit_length()) if rest >> b & 1]
+    return np.array([base] * q + bits, np.int64)
 
 
 def super_core(mass):
@@ -137,7 +170,7 @@ class Well:
     phase: float = 0.0          # angle it has turned through (for drawing)
     vx: float = 0.0
     vy: float = 0.0
-    merging: bool = False       # super well being drawn into another (its speed isn't capped by its mobility)
+    merging: bool = False       # super well being drawn into another (_inspiral)
     calm_until: int = 0         # super well: it can't go supernova before this tick (just merged or got too heavy)
     heavy: bool = False         # super well: over the supernova mass (World.explode_mass) when last checked
     auto_spin: bool = False     # super well: its spin follows its mass (World.mass_spin) while spin_follows_mass
@@ -146,6 +179,8 @@ class Well:
     ring_omega: float = 0.0     #   ... this a tick (> 0 clockwise) ...
     ring_gw: float = 0.0        #   ... with this much mass still to radiate as gravitational waves
     built: tuple = (0.0, 0.0, 0.0)   # (x, y, mass) when the field was last built
+    react: tuple = (0.0, 0.0)   # super well: the free particles' and ghosts' pull on it this tick (the kernels add up
+                                #   its pull on them, reversed: Newton's third law, exactly and with no lag)
 
     def pull(self):
         return self.sign * config.G * self.mass
@@ -158,16 +193,12 @@ class Well:
         return self.core() if self.is_super else self.radius
 
     def mobility(self):
-        """How freely it accelerates: 1 for a weightless well, falling towards 0 as it gets heavier."""
+        """How freely the global orbit and the whirlpools (which drag things round rather than pull them) move it: 1
+        for a weightless solid well, falling towards 0 as it gets heavier. A super well's is 1: it moves with
+        everything round it, so what orbits it stays on its orbit. Gravity accelerates every well in full."""
+        if self.is_super:
+            return 1.0
         return config.WELL_INERTIA_MASS / (config.WELL_INERTIA_MASS + self.mass)
-
-    def fall(self):
-        """How freely gravity accelerates it: a solid well falls like a particle does, whatever its mass, so it can
-        swing into orbit; a super well is as sluggish as its mobility."""
-        return self.mobility() if self.is_super else 1.0
-
-    def top_speed(self):
-        return config.VMAX * (self.mobility() if self.is_super else 1.0)
 
 
 @dataclass(eq=False, slots=True)
@@ -290,6 +321,11 @@ class World:
         self.star_damping = config.STAR_DAMPING   # share of a star's particles' jostling that fades a tick
         self.lean_on = config.LEAN_ON
         self.radiation_on = config.RADIATION_ON   # merging, splitting and fusion give off heat
+        self.rad_rows = np.zeros((HEAT_ROWS, 5))   # heat radiated by a heat step (kernels.heat_step) ...
+        self.rad_pool = np.zeros(0)                #   ... and what is gathering to be, per self-gravity block
+        self.radiation_recycle = config.RADIATION_RECYCLE   # radiation reaching the edge comes back in
+        self.radiation_lost = 0                    # quanta of radiation that have left the universe (recycle off)
+        self.radiation_swallowed = 0               # ... and that super wells have swallowed (each became 1 mass)
         self.heat_rows = np.zeros((HEAT_ROWS, 5))  # heat shed this tick, for one core (see kernels._shed)...
         self.fuse_rows = np.zeros((HEAT_ROWS, 5))  # ...and by fusion in stars
         self.heat_made = 0                         # heat particles sent out in the last tick
@@ -328,7 +364,7 @@ class World:
             outside = rx * rx + ry * ry > (min(self.w, self.h) / 2) ** 2
             self.rim, self.rim_mask = np.flatnonzero(outside), outside.astype(np.uint8)
         self.mass = np.zeros(n, np.uint16)
-        self.kin = np.zeros((n, 4), np.float32)
+        self.kin = np.zeros((n, kernels.KIN), np.float32)   # vx, vy, ox, oy, heat
         self.quad = np.zeros((n, 4), np.uint16)
         self.shade = np.zeros(n, np.uint8)
         self.stamp = np.zeros(n, np.uint32)
@@ -344,7 +380,8 @@ class World:
         self.solid = np.zeros(n, np.uint8)      # 1 inside a normal well's body (star ground)
         self.gvx = np.zeros(n, np.float32)      # velocity of that ground (star motion + spin)
         self.gvy = np.zeros(n, np.float32)
-        self.absorbed = np.zeros(1, np.int64)   # mass swallowed per well, collected after each tick
+        self.absorbed = np.zeros((1, 5))   # per well: mass and momentum swallowed, and the free matter's pull on
+                                           #   it (Newton's third law), collected each tick (_collect_absorbed)
         self.owner = np.zeros(n, np.int16)      # star k's particles hold k + 1 (see Star)
         self.blob = np.zeros(n, np.int32)       # the blob the particle in each cell belongs to (see _carry_blobs)
         self.blob_v = np.zeros((1, 3))          # each blob's velocity, and 1 if the orbit carries it
@@ -385,13 +422,8 @@ class World:
         p[kernels.P_SLOSH] = config.SLOSH
         p[kernels.P_LEAN] = config.LEAN if self.lean_on else 0.0
         p[kernels.P_MERGE_ON] = self.merge_on
-        p[kernels.P_MERGE_SPEED] = config.MERGE_SPEED
-        p[kernels.P_MERGE_CHANCE] = config.MERGE_CHANCE
         p[kernels.P_MAX_MASS] = config.MAX_MASS
         p[kernels.P_SPLIT_ON] = self.split_on
-        p[kernels.P_BIND] = config.BIND
-        p[kernels.P_SPLIT_SPEED] = config.SPLIT_SPEED
-        p[kernels.P_KICK] = config.SPLIT_KICK
         p[kernels.P_SCATTER] = self.scatter
         p[kernels.P_REACH] = self.kinv
         p[kernels.P_SG_ON] = self.sg_on
@@ -406,7 +438,9 @@ class World:
         p[kernels.P_DRAG_TURN] = config.SUPER_DRAG_TURN_MAX
         p[kernels.P_ORBIT_CX], p[kernels.P_ORBIT_CY] = self.w / 2, self.h / 2
         p[kernels.P_SG_COS], p[kernels.P_SG_SIN] = self.sg_turn()
-        p[kernels.P_HEAT] = config.HEAT_SHARE if self.radiation_on else 0.0
+        p[kernels.P_PRESSURE] = config.HEAT_PRESSURE
+        p[kernels.P_FUSE_BIND], p[kernels.P_FUSE_PEAK], p[kernels.P_FUSE_TOP], p[kernels.P_FUSE_TAIL] = self.fusion()
+        p[kernels.P_BARRIER] = config.FUSION_BARRIER
         return p
 
     def sg_turn(self):
@@ -514,7 +548,7 @@ class World:
         pour = round(sum(pour_mass) / 2) if isinstance(pour_mass, tuple) else pour_mass
         grid = np.zeros(d.shape)
         inside = d <= r
-        grid[inside] = self._layer_masses(d[inside] / r, pour)
+        grid[inside] = self._layer_masses(d[inside] / r, pour, expect=True)
         k = config.COLLAPSE_BLOCKS * config.SG_BLOCK
         if grid.shape[0] <= k:
             return float(grid.sum()), self.star_collapse_limit()
@@ -544,7 +578,7 @@ class World:
         inside = d <= 1.0
         empty = inside & (grid == 0)
         pour = round(sum(pour_mass) / 2) if isinstance(pour_mass, tuple) else pour_mass
-        grid[empty] = self._layer_masses(d[empty], pour) if star else min(pour, config.MAX_MASS)
+        grid[empty] = self._layer_masses(d[empty], pour, expect=True) if star else min(pour, config.MAX_MASS)
         grid[inside | owned if star else owned] /= self.star_collapse
         kh, kw = min(k, grid.shape[0]), min(k, grid.shape[1])
         s = np.zeros((grid.shape[0] + 1, grid.shape[1] + 1))
@@ -590,18 +624,25 @@ class World:
     def _mark_holes(self):
         cores = np.array([(k, wl.x, wl.y, wl.core()) for k, wl in enumerate(self.wells) if wl.is_super],
                          np.float64).reshape(-1, 4)
-        self.absorbed = np.zeros(max(1, len(self.wells)), np.int64)
+        self.absorbed = np.zeros((max(1, len(self.wells)), 5))
         self.hole_serial += 1
         kernels.mark_holes(cores, self.w, self.h, self.hole, self.mass, self.kin, self.quad, self.flag,
                            self.absorbed, self.wrap)
         self._collect_absorbed()
 
     def _collect_absorbed(self):
-        for k in np.nonzero(self.absorbed)[0]:
+        for k in np.nonzero(self.absorbed[:, 0])[0]:
             wl = self.wells[k]
-            wl.mass += int(self.absorbed[k])
+            m, px, py = self.absorbed[k, :3]
+            if wl is not self.held:                   # it takes on what it swallows' momentum too
+                wl.vx = (wl.vx * wl.mass + px) / (wl.mass + m)
+                wl.vy = (wl.vy * wl.mass + py) / (wl.mass + m)
+            wl.mass += int(round(m))
             if wl.mass > 1.25 * wl.built[2]:          # grown noticeably: stronger pull, wider range, bigger core
                 self.changed_wells.append(wl)
+        for k in np.flatnonzero(self.absorbed[:, 3] != 0.0) if len(self.wells) else ():
+            wl = self.wells[k]                        # the free matter's pull on it, for step_wells
+            wl.react = (wl.react[0] + self.absorbed[k, 3], wl.react[1] + self.absorbed[k, 4])
         self.absorbed[:] = 0
 
     def check_collapse(self):
@@ -642,9 +683,32 @@ class World:
             wl = Well(cx, cy, int(mass), is_super=True, spin=spin, vx=px / mass, vy=py / mass,
                       built=(cx, cy, int(mass)), auto_spin=True)
             self.wells.append(wl)
-            self.eject(wl, mass * self.rng.uniform(*config.COLLAPSE_EJECT))
+            # never so much that it ends up lighter than a super well can be (the heaviest a star can be)
+            self.eject(wl, min(mass * self.rng.uniform(*config.COLLAPSE_EJECT),
+                               max(0.0, mass - self.collapse_threshold())))
         self.collapses += 1
         self.changed_wells.append(near[0] if near else self.wells[-1])
+
+    def _collapse_heavy_stars(self):
+        """A star as heavy as the collapse threshold - the lightest a super well can be - collapses into a super well
+        holding all of its mass, where it is and moving as it moved. So no star outweighs the lightest super well,
+        however spread out it is (a compact one collapses sooner, by density: check_collapse)."""
+        limit = self.collapse_threshold()
+        for st in [st for st in self.stars if st.mass >= limit]:
+            idx = self._star_cells(self.stars.index(st), st)
+            m = self.mass[idx].astype(np.float64)
+            total = m.sum()
+            if total < limit:
+                continue
+            px, py = (m * self.kin[idx, 0]).sum(), (m * self.kin[idx, 1]).sum()
+            x, y = st.x, st.y
+            self.remove_star(st)
+            spin = self.spawn_spin() * config.SUPER_SPIN_NATURAL
+            wl = Well(x, y, int(total), is_super=True, spin=spin, vx=px / total, vy=py / total,
+                      built=(x, y, int(total)), auto_spin=True)
+            self.wells.append(wl)
+            self.changed_wells.append(wl)
+            self.collapses += 1
 
     def form_stars(self):
         """Turn knots of matter that look like young stars into stars: their particles become a star's. A knot is
@@ -788,19 +852,19 @@ class World:
         instead, it holds that much, shared out heavy in the middle and light outside (_fill_star). Its free cells are
         filled; particles already there become part of it. ghost: it arrives as a GhostStar instead, landing
         GHOST_TICKS later (pour mass only). orbit: instead of (vx, vy) it sets off on a circular orbit round the
-        super well pulling hardest there (orbit_velocity), and that well takes the opposite momentum so the two
-        don't drift off together (put_in_orbit). Returns it (None if there was no room)."""
+        super well pulling hardest there, the two circling their common centre (orbit_velocity, put_in_orbit). Returns it (None if there was no room)."""
         c = self.cell
         cx, cy, r = px / c, py / c, max(1.0, radius_px / c)
         well = self.orbit_well(cx, cy) if orbit else None
+        if mass is None:
+            xs, ys, dx, dy = self._disk_cells(cx, cy, r)
+            masses = self._layer_masses(np.hypot(dx, dy) / r, pour_mass)
         if well is not None:
-            vx, vy = self.orbit_velocity(well, cx, cy)
+            vx, vy = self.orbit_velocity(well, cx, cy, mass if mass is not None else masses.sum())
         if mass is not None:
             idx = self._fill_star(cx, cy, r, mass, vx, vy)
             star = self._new_star(idx) if idx.size else None
         else:
-            xs, ys, dx, dy = self._disk_cells(cx, cy, r)
-            masses = self._layer_masses(np.hypot(dx, dy) / r, pour_mass)
             if ghost:
                 star = GhostStar(cx, cy, float(vx), float(vy), r, dx, dy, masses)
                 self.ghost_stars.append(star)
@@ -822,7 +886,7 @@ class World:
         dy, dx = np.mgrid[-n:n + 1, -n:n + 1]
         d = np.hypot(dx, dy)
         pour = round(sum(pour_mass) / 2) if isinstance(pour_mass, tuple) else pour_mass
-        return r, float(self._layer_masses(d[d <= r] / r, pour).sum())
+        return r, float(self._layer_masses(d[d <= r] / r, pour, expect=True).sum())
 
     def orbit_band(self, wl, radius, mass):
         """Where (distance from super well wl, cells) a star of this radius and mass can orbit it: (inner, outer), or
@@ -938,38 +1002,46 @@ class World:
                     best, best_a = wl, a
         return best
 
-    def orbit_velocity(self, wl, x, y):
-        """The velocity (cells/tick) of a circular orbit round super well wl through (x, y): as fast as its pull there
-        (softened and faded) holds a body in a circle, the way it spins, on top of its own motion."""
+    def orbit_velocity(self, wl, x, y, mass=0.0):
+        """The velocity (cells/tick) of a body of `mass` at (x, y) on a circular orbit round super well wl, the way
+        it spins, on top of the well's own motion. The two orbit their common centre: their relative speed is what
+        their combined pull there (softened and faded) holds in a circle, and the body takes M / (M + m) of it
+        (put_in_orbit gives the well the rest). A well being dragged doesn't recoil, so then the body takes it all."""
         dx, dy = self.delta(wl.x, wl.y, x, y)
         d = math.hypot(dx, dy)
         if d < 1e-6:
             return wl.vx, wl.vy
+        m = 0.0 if wl is self.held else max(float(mass), 0.0)
         rho = math.sqrt(d * d + self.softening(wl) ** 2)
-        v = math.sqrt(self.g_scale * wl.pull() * d * d / rho ** 3 * fade(rho, self.kinv)[0])
+        v = math.sqrt(self.g_scale * config.G * (wl.mass + m) * d * d / rho ** 3 * fade(rho, self.kinv)[0])
+        v *= wl.mass / (wl.mass + m)
         way = 1.0 if wl.spin >= 0 else -1.0             # > 0: clockwise on screen, as kernels.whirl
         return wl.vx - way * v * dy / d, wl.vy + way * v * dx / d
 
     def put_in_orbit(self, wl, mass, rvx, rvy):
-        """A body of `mass` has been set moving at (rvx, rvy) against super well wl to orbit it: the well takes the
-        opposite momentum - as much as it responds to that body's pull (Well.fall), so their common centre stays
-        put - unless it is being dragged."""
+        """A body of `mass` has been set moving at (rvx, rvy) against super well wl to orbit it (orbit_velocity):
+        the well takes the opposite momentum, so their common centre stays put - unless it is being dragged."""
         if wl is not self.held:
-            k = mass * wl.fall() / wl.mass
+            k = mass / wl.mass
             wl.vx -= k * rvx
             wl.vy -= k * rvy
 
-    def _layer_masses(self, d, pour_mass):
+    def _layer_masses(self, d, pour_mass, expect=False):
         """Particle masses for a placed star's cells at d x its radius out: pour_mass in its core, and the lighter
-        layers further out the same share of it STAR_PLACE_LAYERS gives them against the core (at least 1)."""
+        layers further out the same share of it STAR_PLACE_LAYERS gives them against the core (at least 1), each
+        rounded at random to a rung either side (round_rungs: so it weighs what it would on average). expect: those
+        averages instead (for estimates)."""
         layers = config.STAR_PLACE_LAYERS
         core = layers[0][1]
         share = np.select([d <= edge for edge, _ in layers], [f / core for _, f in layers], layers[-1][1] / core)
+        if expect:                                       # what it comes to on average (estimates: no dice)
+            pour = sum(pour_mass) / 2 if isinstance(pour_mass, tuple) else pour_mass
+            return np.maximum(pour * share, 1.0)
         if isinstance(pour_mass, tuple):
-            pour = self.rng.integers(pour_mass[0], pour_mass[1] + 1, d.size)
+            pour = random_rungs(self.rng, pour_mass[0], pour_mass[1], d.size)
         else:
             pour = np.full(d.size, pour_mass)
-        return np.clip(np.round(pour * share), 1, config.MAX_MASS).astype(np.int64)
+        return round_rungs(self.rng, pour * share)
 
     def _step_ghost_stars(self):
         """Move the ghost stars as particles move (passing through everything), let a super well's core swallow one
@@ -994,7 +1066,10 @@ class World:
                     self._keep_inside(gs)
             core = next((wl for wl in self.wells if wl.is_super
                          and self.distance(wl.x, wl.y, gs.x, gs.y) <= wl.core()), None)
-            if core is not None:
+            if core is not None:                        # swallowed, momentum and all
+                if core is not self.held:
+                    core.vx = (core.vx * core.mass + gs.vx * gs.mass) / (core.mass + gs.mass)
+                    core.vy = (core.vy * core.mass + gs.vy * gs.mass) / (core.mass + gs.mass)
                 core.mass += gs.mass
                 self.changed_wells.append(core)
                 self.ghost_stars.remove(gs)
@@ -1033,7 +1108,7 @@ class World:
             ax += gx
             ay += gy
         if self.orbit:
-            ox, oy = self._orbit_accel(b.x, b.y, b.vx, b.vy)
+            ox, oy = self._orbit_push(b, b.x, b.y, b.vx, b.vy)
             ax += ox
             ay += oy
         ox, oy = self._whirl_accel(b, b.x, b.y, b.vx, b.vy)
@@ -1067,8 +1142,7 @@ class World:
         d = np.hypot(dx, dy) / r
         layers = config.STAR_PLACE_LAYERS
         rel = np.select([d <= edge for edge, _ in layers], [f for _, f in layers], layers[-1][1])
-        masses = np.clip(np.round(mass / rel.sum() * rel * self.rng.uniform(0.75, 1.25, rel.size)), 1,
-                         config.MAX_MASS).astype(np.int64)
+        masses = round_rungs(self.rng, mass / rel.sum() * rel * self.rng.uniform(0.75, 1.25, rel.size))
         self.place_many(xs, ys, masses, vx, vy)
         idx = ys * self.w + xs
         return idx[(self.mass[idx] > 0) & ((self.owner[idx] == 0) | (self.owner[idx] == k + 1))]
@@ -1233,7 +1307,7 @@ class World:
             level = kernels.carry_levels(plan, nsteps, steps, self.w, self.h, self.wrap)
             order = np.argsort(level, kind="stable")
             starts = np.searchsorted(level[order], np.arange(level.max() + 2))
-            absorbed = np.zeros((n, self.absorbed.size), np.int64)
+            absorbed = np.zeros((n,) + self.absorbed.shape)
             kernels.carry_stars_par(order, starts, plan, nsteps, steps, *grid, absorbed, push, self.wrap)
             self.absorbed += absorbed.sum(axis=0)
         else:
@@ -1448,7 +1522,7 @@ class World:
     def scale_star(self, st, factor):
         """Make a star heavier or lighter by factor: it is rebuilt where it is, moving as it moves, its radius x
         sqrt(factor), made as it is now - each ring of it holding particles as heavy as that share of its radius
-        holds now on average (rounded at random, so its mass comes out factor x as heavy) - so a star of
+        holds now on average (rounded at random to a rung, so its mass comes out factor x as heavy) - so a star of
         pour-mass particles stays one. Its pull, softening and capture ring are a fresh one's. It holds all of its new
         mass from now (it isn't unstable for having been made lighter)."""
         k = self.stars.index(st)
@@ -1474,7 +1548,7 @@ class World:
         r = max(1.0, st.radius * math.sqrt(factor))
         xs, ys, dx, dy = self._disk_cells(st.x, st.y, r)
         p = profile[np.minimum((np.hypot(dx, dy) / r * rings).astype(np.int64), rings - 1)]
-        masses = np.clip(np.floor(p + self.rng.random(p.size)), 1, config.MAX_MASS).astype(np.int64)
+        masses = round_rungs(self.rng, p)
         self.place_many(xs, ys, masses, st.vx, st.vy)
         idx = ys * self.w + xs
         idx = idx[(self.mass[idx] > 0) & ((self.owner[idx] == 0) | (self.owner[idx] == k + 1))]
@@ -1490,13 +1564,28 @@ class World:
         self._set_ring(st, grow=False)
         kernels.wake_disk(st.x, st.y, self.reach(st) + 1.0, self.w, self.h, self.mass, self.flag, self.wrap)
 
-    def _stars_accel(self, x, y):
-        """The stars' pull on a body at (x, y)."""
+    def _stars_accel(self, x, y, soft=None):
+        """The stars' pull on a body at (x, y), each softened over its own size, or over `soft` (a well's: see
+        step_wells)."""
         ax = ay = 0.0
         for st in self.stars:
             dx, dy = self.delta(x, y, st.x, st.y)
-            rho = math.sqrt(dx * dx + dy * dy + st.softening() ** 2)
+            rho = math.sqrt(dx * dx + dy * dy + (st.softening() if soft is None else soft) ** 2)
             f = self.g_scale * st.pull() / rho ** 3 * fade(rho, self.kinv)[0]
+            ax += dx * f
+            ay += dy * f
+        return ax, ay
+
+    def _stars_accel_then(self, x, y, soft):
+        """The stars' pull on a well at (x, y) from where they were at the start of the tick (star_pulls, as the
+        kernels saw them), softened over the well's own size `soft`. Both halves of a star-well pair then feel each
+        other at the same moment and over the same softening, so their pulls are equal and opposite: pulling the
+        well towards where the star has since moved to dragged every orbit round a free well inwards."""
+        ax = ay = 0.0
+        for sx, sy, strength, _, _ in self.star_pulls:
+            dx, dy = self.delta(x, y, sx, sy)
+            rho = math.sqrt(dx * dx + dy * dy + soft * soft)
+            f = strength / rho ** 3 * fade(rho, self.kinv)[0]
             ax += dx * f
             ay += dy * f
         return ax, ay
@@ -1530,8 +1619,8 @@ class World:
 
     def step_wells(self):
         """Move the wells: they attract each other and feel the stars (and the particles when self-gravity is on).
-        Solid wells fall freely, like particles; super wells, and every well's response to the global orbit and the
-        whirlpools, are slower the heavier they are. A super well swallows any well that reaches its core."""
+        Gravity accelerates every well in full, as it does a particle; a solid well's response to the global orbit
+        and the whirlpools is slower the heavier it is (Well.mobility). A super well swallows any well that reaches its core."""
         wells = self.wells
         if not wells:
             return
@@ -1555,8 +1644,11 @@ class World:
         if self.wrap:
             dxs -= self.w * np.floor(dxs / self.w + 0.5)
             dys -= self.h * np.floor(dys / self.h + 0.5)
-        rhos = np.sqrt(dxs * dxs + dys * dys + soft * soft)
+        # each pair softened alike (the larger of the two), so their pulls on each other are equal and opposite
+        pair_soft = np.maximum(soft[:, None], soft[None, :])
+        rhos = np.sqrt(dxs * dxs + dys * dys + pair_soft * pair_soft)
         fs = pulls / rhos ** 3 * fade(rhos, self.kinv)[0]
+        pushes = {wl: self._own_orbit_push(wl) for wl in wells if wl.is_super} if self.orbit else {}
         for k, wl in enumerate(wells):
             if wl is self.held or wl.sign < 0:
                 continue
@@ -1565,33 +1657,40 @@ class World:
             if partner.get(wl) in index:
                 f[index[partner[wl]]] = 0.0
             ax, ay = float((dx * f).sum()), float((dy * f).sum())
-            if self.stars:
-                sx, sy = self._stars_accel(wl.x, wl.y)
+            if self.star_pulls.shape[0]:
+                sx, sy = self._stars_accel_then(wl.x, wl.y, soft[k])
                 ax += sx
                 ay += sy
-            if self.sg_on:
+            if self.sg_on and wl.is_super:              # the free matter: its pull on it is what it pulls back
+                ax += wl.react[0] / wl.mass
+                ay += wl.react[1] / wl.mass
+            elif self.sg_on:
                 gx, gy = self.sg_accel(wl.x, wl.y)
                 ax += gx
                 ay += gy
-            fall = wl.fall()
-            wl.vx += ax * fall
-            wl.vy += ay * fall
-            # the global orbit and the whirlpools drag things round rather than pull them: heavy ones respond slowly
+            wl.vx += ax                                 # gravity accelerates everything alike, whatever its mass
+            wl.vy += ay
+            # the global orbit and the whirlpools drag things round rather than pull them: heavy solid wells respond
+            # slowly - unless bound to a super well: then it gets just the push that well gets, so it keeps its orbit
+            mob = wl.mobility()
             ox, oy = self._whirl_accel(wl, wl.x, wl.y, wl.vx, wl.vy)
+            ox, oy = ox * mob, oy * mob
             if self.orbit:
-                o2x, o2y = self._orbit_accel(wl.x, wl.y, wl.vx, wl.vy)
+                if wl.is_super and self._orbit_host(wl, wl.x, wl.y, wl.vx, wl.vy)[0] is None:
+                    o2x, o2y = pushes[wl]                   # its own, as worked out for what it holds
+                else:
+                    o2x, o2y = self._orbit_push(wl, wl.x, wl.y, wl.vx, wl.vy, pushes, mob)
                 ox += o2x
                 oy += o2y
-            mob = wl.mobility()
-            wl.vx += ox * mob
-            wl.vy += oy * mob
-            vmax = config.VMAX if wl.merging else wl.top_speed()
+            wl.vx += ox
+            wl.vy += oy
             speed = math.hypot(wl.vx, wl.vy)
-            if speed > vmax:
-                wl.vx *= vmax / speed
-                wl.vy *= vmax / speed
+            if speed > config.VMAX:
+                wl.vx *= config.VMAX / speed
+                wl.vy *= config.VMAX / speed
         self._inspiral()
         for wl in wells:
+            wl.react = (0.0, 0.0)                       # (used: the next tick's kernels add it up afresh)
             if wl is self.held:
                 continue
             cx, cy = self._carry(wl) if wl.sign > 0 else (0.0, 0.0)   # a repulsor stays put
@@ -1636,28 +1735,8 @@ class World:
         return gx, gy, dx, dy
 
     def _split_mass(self, amount, k):
-        """At most k random particle masses (each 1..MAX_MASS, spread round their mean) adding up to amount, or to
-        as much of it as k particles can hold."""
-        amount = int(amount)
-        k = min(int(k), amount)
-        if k <= 0:
-            return np.zeros(0, np.int64)
-        wts = self.rng.uniform(0.25, 1.75, k)
-        m = np.minimum(np.floor(wts / wts.sum() * (amount - k)).astype(np.int64) + 1, config.MAX_MASS)
-        short = amount - int(m.sum())
-        while short > 0:                                 # rounding (or the cap) left some over: hand it round
-            open_ = self.rng.permutation(np.nonzero(m < config.MAX_MASS)[0])
-            if not open_.size:
-                break
-            add = np.minimum(config.MAX_MASS - m[open_], -(-short // open_.size))
-            cum = np.cumsum(add)
-            cut = int(np.searchsorted(cum, short))
-            if cut < add.size:
-                add[cut] -= cum[cut] - short
-                add[cut + 1:] = 0
-            m[open_] += add
-            short -= int(add.sum())
-        return m
+        """About k rung masses adding up to exactly amount (rung_pieces), in random order."""
+        return self.rng.permutation(rung_pieces(amount, k))
 
     def explode(self, wl):
         """A super well that grew too heavy goes supernova: it vanishes and all its mass comes back out from where it
@@ -1778,7 +1857,7 @@ class World:
                   & (self.ghost_m[hot] > config.SUPER_BLAST_COOL_TO)]
         if due.size:
             m = self.ghost_m[due]
-            new = np.clip(np.round(m * self.rng.uniform(0.3, 0.7, due.size)), 1, m - 1).astype(np.int64)
+            new = m // 2                                 # in halves: a rung breaks into two of the rung below
             self.ghost_m[due] = m - new
             jx, jy = self.rng.normal(0.0, config.SUPER_BLAST_SCATTER, (2, due.size))
             for tag in np.unique(self.ghost_tag[due]):
@@ -1898,7 +1977,7 @@ class World:
         a = rng.uniform(0.0, 2 * math.pi, n)
         xs, ys = sp.x + r * np.cos(a), sp.y + r * np.sin(a)
         if isinstance(sp.masses, tuple):
-            masses = rng.integers(sp.masses[0], sp.masses[1] + 1, n)
+            masses = random_rungs(rng, sp.masses[0], sp.masses[1], n)
         else:
             masses = sp.masses
         if sp.ghosts:                                    # ghosts: they can't pile up at the spawner and collapse
@@ -2021,9 +2100,8 @@ class World:
         sent = min(int(amount + self.rng.uniform()), int(held) - len(wells))   # never all of it
         if sent <= 0:
             return 0
-        n = min(sent, max(most, -(-sent // config.MAX_MASS)))
-        masses = np.full(n, sent // n, np.int64)
-        masses[:sent % n] += 1
+        masses = rung_pieces(sent, most)
+        n = masses.size
         a = angle + math.pi * self.rng.integers(0, 2, n) + self.rng.normal(0.0, spread, n)
         cos, sin = np.cos(a), np.sin(a)
         self.add_ghosts(x + r0 * cos, y + r0 * sin, masses, config.SUPER_GW_SPEED * cos,
@@ -2094,16 +2172,17 @@ class World:
         return out
 
     def _random_masses(self, amount):
-        """Particle masses drawn uniformly from EJECT_MASS, the last one trimmed so they add up to exactly amount."""
+        """Masses drawn uniformly from EJECT_MASS, each rounded at random to a rung (round_rungs), adding up to exactly
+        amount (what is left at the end as rung_pieces)."""
         lo, hi = config.EJECT_MASS
-        masses = self.rng.integers(lo, hi + 1, 2 * amount // (lo + hi) + 16)
+        amount = int(amount)
+        draw = lambda n: round_rungs(self.rng, self.rng.integers(lo, hi + 1, n))
+        masses = draw(2 * amount // (lo + hi) + 16)
         while masses.sum() < amount:
-            masses = np.concatenate([masses, self.rng.integers(lo, hi + 1, masses.size)])
+            masses = np.concatenate([masses, draw(masses.size)])
         cum = np.cumsum(masses)
-        last = int(np.searchsorted(cum, amount))
-        masses = masses[:last + 1]
-        masses[-1] -= cum[last] - amount
-        return masses
+        last = int(np.searchsorted(cum, amount))           # the first that would overshoot ...
+        return np.concatenate([masses[:last], rung_pieces(amount - (int(cum[last - 1]) if last else 0))])
 
     def eject(self, wl, amount):
         """Spit `amount` of a super well's mass out as particles of random masses, each fast enough to climb out of
@@ -2254,10 +2333,71 @@ class World:
     def whirls(self):
         """Each super well's whirlpool and the space it turns, for the step kernel: rows of x, y, range, spin, pull
         strength, softening, the share of circling speed space turns at there (signed by its spin: drag_share), how
-        far that reaches, and its point of no return (horizon)."""
+        far that reaches, its point of no return (horizon), its velocity, the global orbit's push on it (which
+        everything bound to it gets too: kernels.orbit_push), its index in wells and the global orbit's flow where it
+        is (kernels.orbit_shear)."""
         return np.array([(wl.x, wl.y, self.well_range(wl), wl.spin, self.g_scale * wl.pull(), self.softening(wl),
-                          self.drag_share(wl), self.reach(wl), self.horizon(wl))
-                         for wl in self.wells if wl.is_super], np.float64).reshape(-1, 9)
+                          self.drag_share(wl), self.reach(wl), self.horizon(wl), wl.vx, wl.vy,
+                          *self._own_orbit_push(wl), k, *self._flow_at(wl.x, wl.y))
+                         for k, wl in enumerate(self.wells) if wl.is_super], np.float64).reshape(-1, 16)
+
+    def _flow_at(self, x, y):
+        """The global orbit's flow velocity at (x, y) (none with the orbit off)."""
+        if not self.orbit:
+            return 0.0, 0.0
+        return kernels.orbit_flow(x - self.w / 2, y - self.h / 2, self.orbit * self.orbit_speed,
+                                  config.ORBIT_MIN_SPEED)
+
+    def _own_orbit_push(self, wl):
+        """The global orbit's push on super well wl and everything bound to it (none with the orbit off): what it
+        gives their common centre of mass - the well with the stars and the lighter wells bound to it - moving with
+        their momentum. (The well's own motion wobbles with what orbits it; pushed by that, the system drifted out
+        across the universe.)"""
+        if not self.orbit:
+            return 0.0, 0.0
+        m, mx, my, px, py = wl.mass, 0.0, 0.0, wl.mass * wl.vx, wl.mass * wl.vy
+        for b in [*self.stars, *self.wells]:
+            if b is wl or b.mass >= wl.mass or (isinstance(b, Well) and b.sign < 0):
+                continue
+            if self._orbit_host(b, b.x, b.y, b.vx, b.vy)[0] is not wl:
+                continue
+            dx, dy = self.delta(wl.x, wl.y, b.x, b.y)
+            m, mx, my = m + b.mass, mx + b.mass * dx, my + b.mass * dy
+            px, py = px + b.mass * b.vx, py + b.mass * b.vy
+        return self._orbit_accel(wl.x + mx / m, wl.y + my / m, px / m, py / m)
+
+    def _orbit_host(self, body, x, y, vx, vy):
+        """The super well a body at (x, y) moving at (vx, vy) is most tightly bound to - heavier than it, and slower
+        against it than its escape speed there, the orbit's shear counting against it (kernels.orbit_shear) - and how
+        bound (kernels.bound_share), or (None, 0)."""
+        best, best_e, best_phi = None, 0.0, 0.0
+        m = getattr(body, "mass", 0.0)
+        fx, fy = self._flow_at(x, y)
+        for wl in self.wells:
+            if wl is body or not wl.is_super or wl.mass <= m:
+                continue
+            dx, dy = self.delta(wl.x, wl.y, x, y)
+            phi = kernels._pull(-dx, -dy, self.g_scale * wl.pull(), self.softening(wl), self.kinv)[2]
+            e = 0.5 * ((vx - wl.vx) ** 2 + (vy - wl.vy) ** 2) + phi
+            if self.orbit:
+                wfx, wfy = self._flow_at(wl.x, wl.y)
+                e += 0.5 * ((fx - wfx) ** 2 + (fy - wfy) ** 2)
+            if e < best_e:
+                best, best_e, best_phi = wl, e, phi
+        return best, kernels.bound_share(best_e, best_phi)
+
+    def _orbit_push(self, body, x, y, vx, vy, pushes=None, own_share=1.0):
+        """The global orbit's push on a body: as much of that of the super well it is bound to as it is bound to it,
+        the rest its own x own_share (a solid well's mobility) - see kernels.orbit_push. pushes: the super wells' own
+        pushes, when worked out already this tick."""
+        host, share = self._orbit_host(body, x, y, vx, vy)
+        ox, oy = self._orbit_accel(x, y, vx, vy)
+        ox, oy = ox * own_share, oy * own_share
+        if host is not None:
+            hx, hy = pushes[host] if pushes is not None else self._own_orbit_push(host)
+            ox += share * (hx - ox)
+            oy += share * (hy - oy)
+        return ox, oy
 
     def drag_share(self, wl):
         """The share of the angular speed of something circling it that a super well turns space round at (signed: >
@@ -2435,25 +2575,33 @@ class World:
             heat = [tl["heat"][t, :c] for t, c in enumerate(tl["stats"][:, kernels.S_HEAT]) if c]
         self.n_awake = ran
         self.heat_made = self.fused = self.waves_made = 0
+        if self.tick_count % config.HEAT_EVERY == 0:    # heat spreads, and with radiation on leaves the surfaces
+            k = config.HEAT_EVERY
+            if self.rad_pool.size != self.sg.cw * self.sg.ch:
+                self.rad_pool = np.zeros(self.sg.cw * self.sg.ch)
+            n, self.fused = kernels.heat_step(
+                self.w, self.h, self.mass, self.kin, self.quad, self.owner, self.flag, self.solid,
+                min(0.5, config.HEAT_CONDUCT * k), min(0.5, config.HEAT_RADIATE * k) if self.radiation_on else 0.0,
+                self.radiation_cost(), config.VMAX, self.rad_rows, self.rad_pool, self.sg.block, self.merge_on,
+                config.MAX_MASS, *self.fusion(), config.FUSION_BARRIER, self.wrap)
+            self.stats[kernels.S_MERGES] += self.fused     # (fusions where particles touch, counted with the rest)
+            self._radiate(self.rad_rows[:n])
         if self.radiation_on:
-            if self.stars:
-                heat.append(self._fuse())
             self._emit_heat(heat)
         if self.ghost_m.size:
             self._step_ghosts(params, whirls)
             self._cool_blasts()
             if self.radiation_on:
-                for tag, coupling in ((kernels.HEAT_TAG, config.HEAT_COUPLING),
-                                      (kernels.WAVE_TAG, config.SUPER_GW_COUPLING)):
-                    kernels.heat_push(self.ghost_x, self.ghost_y, self.ghost_vx, self.ghost_vy, self.ghost_m,
-                                      self.ghost_tag, tag, coupling, config.HEAT_MIN_SPEED, config.VMAX, self.w,
-                                      self.h, self.mass, self.kin, self.owner, self.flag)
+                kernels.heat_push(self.ghost_x, self.ghost_y, self.ghost_vx, self.ghost_vy, self.ghost_m,
+                                  self.ghost_tag, kernels.WAVE_TAG, config.SUPER_GW_COUPLING, config.HEAT_MIN_SPEED,
+                                  config.VMAX, self.w, self.h, self.mass, self.kin, self.owner, self.flag)
         # what a star's pull on its own particles adds up to is taken back from them next tick
         for st, (fx, fy, m) in zip(self.stars, self.star_f):
             st.fix = (-fx / m, -fy / m) if m > 0 else (0.0, 0.0)
         self._collect_absorbed()
         if self.collapse_on and self.tick_count % config.COLLAPSE_EVERY == 0 and self.tick_count >= self.calm_until:
             self.check_collapse()
+            self._collapse_heavy_stars()
         self.step_stars()
         if self.star_form_on and self.tick_count % config.STAR_FORM_EVERY == 0:
             self.form_stars()
@@ -2522,7 +2670,7 @@ class World:
             tl = self.strips = {"shape": (nx, ny), "counts": np.zeros(nt, np.int64),
                                "stats": np.zeros((nt, 16), np.int64),   # rows a cache line apart (or more)
                                "heat": np.zeros((nt, HEAT_ROWS, 5))}
-        absorbed = np.zeros((nt, self.absorbed.size), np.int64)
+        absorbed = np.zeros((nt,) + self.absorbed.shape)
         star_f = np.zeros((nt,) + self.star_f.shape)
         cut_x, cut_y = int(self.rng.integers(self.w)), int(self.rng.integers(self.h))
         chunk = numba.set_parallel_chunksize(1)
@@ -2630,6 +2778,7 @@ class World:
         wave_m = self.ghost_m[waves]
         self.ghost_m[waves] = 0                          # massless, the step passes them by: they fly straight
         step = self.ghost_way or kernels.step_ghosts
+        light_before = np.where(self.ghost_tag == kernels.HEAT_TAG, self.ghost_m, 0)
         self.stats[kernels.S_ABSORBED] += step(*g, self.w, self.h, params, self.fx, self.fy, self.sg.gx, self.sg.gy,
                                                self.sg.block, self.sg.cw, self.hole, self.absorbed, whirls,
                                                self.star_pulls, self.sfx, self.sfy, config.STAR_FIELD_BLOCK, self.scw,
@@ -2637,9 +2786,23 @@ class World:
         if waves.size:
             self.ghost_m[waves] = wave_m
             self._fly_waves(waves)
-        kernels.land_ghosts(*g, config.GHOST_TICKS, config.GHOST_LAND_NEAR, config.GHOST_LAND_PATIENCE,
+        light = np.flatnonzero(self.ghost_tag == kernels.HEAT_TAG)
+        if light.size:
+            gone = light[(self.ghost_m[light] == 0) & (light_before[light] > 0)] if light_before.size else light[:0]
+            self.radiation_swallowed += int(light_before[gone].sum())   # (by super wells, in the step above)
+        if light.size:                                   # radiation: taken in by the matter it meets, or at the edge
+            radius = min(self.w, self.h) / 2 if self.round else 0.0       # gone or back in (_radiate)
+            taken, lost = kernels.radiation_step(*g[:5], self.ghost_tag, kernels.HEAT_TAG, self.radiation_cost(),
+                                                 self.w, self.h, self.mass, self.kin, self.flag, self.w / 2,
+                                                 self.h / 2, radius, self.wrap, self.radiation_recycle)
+            self.radiation_lost += lost
+            light_m = self.ghost_m[light]
+            self.ghost_m[light] = 0                      # (never lands as matter)
+        kernels.land_ghosts(*g, config.GHOST_TICKS, config.GHOST_LAND_NEAR, config.GHOST_LAND_SPREAD,
                             max(self.w, self.h), config.MAX_MASS, self.w, self.h, self.mass, self.kin, self.quad,
                             self.shade, self.stamp, self.flag, self.solid, self.hole, self.wrap)
+        if light.size:
+            self.ghost_m[light] = light_m
         keep = self.ghost_m > 0
         if not keep.all():
             for name in ("ghost_x", "ghost_y", "ghost_vx", "ghost_vy", "ghost_m", "ghost_age", "ghost_tag"):
@@ -2656,15 +2819,6 @@ class World:
                                                             self.h, self.hole, rim, self.absorbed, config.GHOST_TICKS,
                                                             self.wrap)
 
-    def _fuse(self):
-        """Fusion in every star (kernels.star_fuse). Returns the heat it shed, as rows like kernels._shed's."""
-        rows = np.array([(st.x, st.y, st.radius + 1.0, k) for k, st in enumerate(self.stars)], np.float64)
-        count = np.zeros(kernels.N_STATS, np.int64)
-        self.fused = kernels.star_fuse(rows, config.FUSION_CHANCE, config.FUSION_LIGHT, config.FUSION_HEAT_SHARE,
-                                       config.MAX_MASS, self.w, self.h, self.mass, self.kin, self.quad, self.owner,
-                                       self.flag, self.fuse_rows, count, self.wrap)
-        return self.fuse_rows[:count[kernels.S_HEAT]]
-
     def _emit_heat(self, parts):
         """Send out the heat shed this tick (rows of x, y, vx, vy, mass; see kernels._shed): each as up to HEAT_PIECES
         light heat particles - ghosts tagged kernels.HEAT_TAG, sharing its mass - flying off HEAT_SPEED faster than
@@ -2680,9 +2834,8 @@ class World:
         masses = loss[src] // n[src] + (nth < loss[src] % n[src])
         a = self.rng.uniform(0.0, 2 * math.pi, src.size)
         r = rows[src]
-        self.add_ghosts(r[:, 0], r[:, 1], masses, r[:, 2] + config.HEAT_SPEED * np.cos(a),
-                        r[:, 3] + config.HEAT_SPEED * np.sin(a), tag=kernels.HEAT_TAG,
-                        age=config.GHOST_TICKS - config.HEAT_TICKS)
+        self.add_ghosts(r[:, 0], r[:, 1], masses, config.VMAX * np.cos(a), config.VMAX * np.sin(a),
+                        tag=kernels.HEAT_TAG)
         self.heat_made = int(src.size)
 
     def heat_count(self):
@@ -2694,10 +2847,12 @@ class World:
         return int(np.count_nonzero(self.ghost_tag == kernels.WAVE_TAG))
 
     def ghost_count(self):
-        return int(self.ghost_m.size)
+        """Ghosts of matter in flight - not radiation (heat particles: heat_count), which is energy and never lands."""
+        return int(np.count_nonzero(self.ghost_tag != kernels.HEAT_TAG))
 
     def ghost_mass(self):
-        return int(self.ghost_m.sum())
+        """The ghosts' mass: not radiation's (heat particles), which is energy only (energy())."""
+        return int(self.ghost_m[self.ghost_tag != kernels.HEAT_TAG].sum())
 
     # --- editing ----------------------------------------------------------------------------------
 
@@ -2727,6 +2882,7 @@ class World:
 
     def clear(self):
         self.blasts.clear()
+        self.rad_pool = np.zeros(0)                     # (radiation gathering where there is nothing now)
         self.stars.clear()                               # they are made of particles
         if self.held is not None and not isinstance(self.held, (Well, Spawner)):
             self.held = None
@@ -2814,7 +2970,7 @@ class World:
         self.mass[:] = np.where(inside, old[0][src], 0)
         self.kin[:] = old[1][src]
         self.kin[:, :2] *= old_cell / cell
-        self.kin[:, 2:] = 0.0
+        self.kin[:, 2:4] = 0.0
         self.quad[:] = old[2][src]
         self.shade[:] = old[3][src]
         for st in self.stars:
@@ -3135,6 +3291,57 @@ class World:
         """Mass of the particles (not counting what super wells have swallowed)."""
         return int(self.mass.sum(dtype=np.int64))
 
+    @staticmethod
+    def fusion():
+        """The binding curve, as the kernels take it (kernels._binding): the binding energy per unit of mass at the
+        peak (FUSION_BINDING x VMAX^2), the peak's rung, the top rung (MAX_MASS's) and the fall past the peak."""
+        return (config.FUSION_BINDING * config.VMAX ** 2, math.log2(config.FUSION_PEAK), math.log2(config.MAX_MASS),
+                config.FUSION_TAIL)
+
+    @staticmethod
+    def radiation_cost():
+        """The energy of one quantum of radiation (a heat particle): one unit of mass's worth, VMAX^2 - VMAX is the
+        speed of light. Radiation is energy only: it never lands as matter (kernels.radiation_step); a super well
+        that swallows a quantum gains 1 mass."""
+        return config.VMAX ** 2
+
+    def _radiate(self, rows):
+        """Send out the radiation a heat step made (rows of x, y, direction x, y, quanta: kernels.heat_step) as heat
+        particles flying at the speed of light."""
+        if rows.size:
+            self.add_ghosts(rows[:, 0], rows[:, 1], rows[:, 4].astype(np.int64), config.VMAX * rows[:, 2],
+                            config.VMAX * rows[:, 3], tag=kernels.HEAT_TAG)
+            self.heat_made += rows.shape[0]
+
+    def energy(self):
+        """Where the universe's energy is (mass x cells^2 / tick^2): (rest - all the mass there is x VMAX^2, the
+        speed of light - kinetic, heat, and minus the binding energy its particles hold). Heat radiated away becomes mass (heat particles), so it is the sum of all
+        three that is kept, not the mass alone (the matter's kinetic energy changes under gravity too: its potential
+        energy isn't counted). Heat counts what is gathering to be radiated (rad_pool) and the radiation in flight."""
+        m = self.mass.astype(np.float64)
+        v2 = self.kin[:, 0].astype(np.float64) ** 2 + self.kin[:, 1].astype(np.float64) ** 2
+        kinetic = 0.5 * (m * v2).sum()
+        light = self.ghost_tag == kernels.HEAT_TAG
+        if self.ghost_m.size:
+            gm = np.where(light, 0.0, self.ghost_m.astype(np.float64))
+            kinetic += 0.5 * (gm * (self.ghost_vx.astype(np.float64) ** 2 + self.ghost_vy.astype(np.float64) ** 2)).sum()
+        kinetic += sum(0.5 * wl.mass * (wl.vx ** 2 + wl.vy ** 2) for wl in self.wells if wl.sign > 0)
+        heat = float(self.kin[:, 4].astype(np.float64)[self.mass > 0].sum()) + float(self.rad_pool.sum())
+        heat += float(self.ghost_m[light].sum()) * self.radiation_cost()    # radiation in flight
+        return self.universe_mass() * config.VMAX ** 2, float(kinetic), heat, -self.binding_energy()
+
+    def binding_energy(self):
+        """The binding energy the particles hold (kernels._binding, summed): fusing light rungs turns some of it into
+        heat, so energy() counts it, negative, as part of what the universe holds."""
+        m = self.mass[self.mass > 0].astype(np.int64)
+        if not m.size:
+            return 0.0
+        bind, peak, top, tail = self.fusion()
+        k = np.log2(m)
+        rung = k == np.round(k)
+        f = np.where(k <= peak, 1.0 - (1.0 - k / max(peak, 1.0)) ** 2, 1.0 - tail * (k - peak) / max(top - peak, 1.0))
+        return float((m * bind * f)[rung].sum())
+
     def universe_mass(self):
         """All the matter there is: the particles, the ghosts (ghost stars too) and what super wells hold (it moves
         between them, but
@@ -3182,7 +3389,7 @@ def warmup(cores=False):
         level = kernels.carry_levels(plan, np.zeros(1, np.int64), steps, w.w, w.h, w.wrap)
         kernels.carry_stars_par(np.argsort(level), np.array([0, 1]), plan, np.zeros(1, np.int64), steps,
                                 config.RESTITUTION, config.WALL_E, w.w, w.h, w.mass, w.kin, w.quad, w.shade, w.stamp,
-                                w.flag, w.owner, w.solid, w.hole, np.zeros((1, w.absorbed.size), np.int64),
+                                w.flag, w.owner, w.solid, w.hole, np.zeros((1,) + w.absorbed.shape),
                                 np.zeros((1, 2)), w.wrap)
     w = World(32, 32, 1, seed=0)
     w.add_well(4, 4, 50.0, radius=2.0)

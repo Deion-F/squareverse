@@ -46,7 +46,7 @@ INFO = {
     "brush": "The radius of the brush circle: where particles are poured or erased, and how big a placed star or "
              "spawner is. The mouse wheel changes it too.",
     "pour": "The mass of each poured particle (heavier ones sink through lighter ones and pull harder), or a random "
-            "mass from {} to {} each. A placed star fills its circle with a core of particles of this mass, "
+            "rung from {} to {} each (masses come in rungs: 1, 2, 4, 8, ...). A placed star fills its circle with a core of particles of this mass, "
             "its outer layers lighter in proportion (3/8, then 1/8 of it), so this sets what it is made of and how "
             "heavy it is. The second row is heavy matter (up to the heaviest a particle can be), for dense stars "
             "that hold together near big super wells. Packed densely enough, heavy matter collapses into a super "
@@ -115,19 +115,25 @@ INFO = {
                "debris that cools and lands as particles. Higher lets super wells grow bigger and hold more of the "
                "universe before they blow; lower makes supernovae more frequent. A well already over a lowered "
                "limit explodes after a short grace. Spin rising with mass reaches its top at this mass.",
-    "radiation": "Merging and splitting lose {:.0%} of the mass involved as heat: a few light, fast particles that fly "
-                 "through everything for {} ticks, blowing light matter they pass away (a heavy particle barely "
-                 "moves and soaks the heat up), then land as ordinary light particles. Stars fuse their light "
-                 "particles into heavier ones, losing {:.0%} as heat, so they blow a wind of light matter away. Super "
-                 "wells spiralling into each other send out gravitational waves: two beams along the line "
-                 "through them that turn as they circle, ever stronger as they near, then a burst as they merge "
-                 "that fades as the merged core settles - up to {:.1%} of their mass, flying straight through "
-                 "everything at the speed limit. Both glow pale blue. No mass is lost: heat and waves are mass, "
-                 "carried off as particles.".format(config.HEAT_SHARE, config.HEAT_TICKS, config.FUSION_HEAT_SHARE,
-                                     config.SUPER_GW_INSPIRAL + config.SUPER_GW_MERGER + config.SUPER_GW_RINGDOWN),
-    "merge": "Particles colliding fast enough sometimes merge into one heavier particle (mass and momentum are "
-             "kept). Key: M.",
-    "split": "Particles hit hard enough break in two. Key: P.",
+    "radiation": "Hot matter radiates from its surface: heat particles (pale blue) of one unit of mass's worth of "
+                 "energy each, flying at the speed of light (the speed limit), the matter recoiling. Radiation is "
+                 "energy only - it never lands as matter: the first particle it meets takes it in as heat (and a "
+                 "push), and a super well that swallows it gains its mass. Super wells spiralling into each other "
+                 "send out gravitational waves: two beams along the line through them that turn as they circle, ever "
+                 "stronger as they near, then a burst as they merge that fades as the merged core settles - up to "
+                 "{:.1%} of their mass, flying straight through everything at the speed limit, then landing as "
+                 "particles.".format(config.SUPER_GW_INSPIRAL + config.SUPER_GW_MERGER + config.SUPER_GW_RINGDOWN),
+    "recycle": "Radiation reaching the universe's edge comes back in from a random point of it, heading inwards, so "
+               "the universe keeps all its energy. Off, it is gone for good (the note counts how much). Turn it off "
+               "if radiation builds up faster than matter takes it in.",
+    "merge": "Fusion. Masses come in rungs - 1, 2, 4, 8, ... up to {:,} - and two particles of the same rung can "
+             "fuse into the next one up. Whether they do depends on the energy they bring, their motion against "
+             "each other and their heat, against a barrier that grows with their mass: the more they bring the "
+             "likelier, so hot matter fuses where it lies and heavy rungs need it hotter. Up to {} fusing gives off "
+             "energy as heat (most from the light rungs); past it fusing takes energy, so matter fused that far can "
+             "no longer heat itself. Key: M.".format(config.MAX_MASS, config.FUSION_PEAK),
+    "split": "Fission: a particle hit hard enough breaks into two of the rung below - it takes the energy fusion "
+             "gave off (past {} it gives energy instead). Key: P.".format(config.FUSION_PEAK),
     "scatter": "Loose particles that collide bounce off at a random angle of up to this much from straight "
                "back, as if they met a little off-centre, so a stream glances off whatever it hits instead of "
                "queueing up in a line behind it. 0 bounces them straight back. Stars' particles always bounce "
@@ -395,6 +401,8 @@ def draw_menu(ui, app, fps):
         w.star_form_on = ui.toggle("formation", "Star formation", w.star_form_on, INFO["formation"])
         w.radiation_on = ui.toggle("radiation", "Radiation (heat)", w.radiation_on, INFO["radiation"],
                                    note=f"{w.heat_count() + w.wave_count():,} in flight" if w.radiation_on else None)
+        w.radiation_recycle = ui.toggle("recycle", "Radiation comes back", w.radiation_recycle, INFO["recycle"],
+                                        note=None if w.radiation_recycle else f"{w.radiation_lost:,} quanta gone")
         w.collapse_on = ui.toggle("collapse", "Collapse into super wells", w.collapse_on, INFO["collapse"],
                                   note=f"at {w.collapse_threshold():,.0f}")
         w.star_collapse = ui.slider("star_collapse", "Stars collapse at", w.star_collapse,
@@ -415,8 +423,9 @@ def draw_menu(ui, app, fps):
 
     if ui.section("advanced", "Advanced", default=False):
         if ui.section("adv_particles", "Particles", level=1):
-            w.merge_on = ui.toggle("merge", "Merging", w.merge_on, INFO["merge"], note=f"{s[2]:,} last tick")
-            w.split_on = ui.toggle("split", "Splitting", w.split_on, INFO["split"], note=f"{s[3]:,} last tick")
+            w.merge_on = ui.toggle("merge", "Fusion", w.merge_on, INFO["merge"],
+                                   note=f"{s[2] + w.fused:,} last tick")
+            w.split_on = ui.toggle("split", "Fission", w.split_on, INFO["split"], note=f"{s[3]:,} last tick")
             w.lean_on = ui.toggle("lean", "Children steer", w.lean_on, INFO["lean"])
             w.scatter = math.radians(ui.slider("scatter", "Bounce angle", math.degrees(w.scatter), 0, 45,
                                                INFO["scatter"], "up to {:.0f}°", step=1))
@@ -441,6 +450,9 @@ def draw_menu(ui, app, fps):
                       ("splits", f"{s[3]:,}"), ("sinks", f"{s[4]:,}"), ("absorbed", f"{s[5]:,}")])
             ui.stats([("heat sent out", f"{w.heat_made:,}"), ("fusions", f"{w.fused:,}"),
                       ("heat in flight", f"{w.heat_count():,}")])
+            rest, kinetic, heat, bound = w.energy()
+            ui.stats([("energy: in motion", f"{kinetic:,.0f}"), ("as heat", f"{heat:,.0f}"),
+                      ("bound in fusion", f"{-bound:,.0f}")])
             ui.stats([("waves sent out", f"{w.waves_made:,}"), ("waves in flight", f"{w.wave_count():,}")])
             ui.stats([("ghosts", f"{w.ghost_count():,} (mass {w.ghost_mass():,})"),
                       ("repulsors", f"{sum(not wl.is_super for wl in w.wells)}"),

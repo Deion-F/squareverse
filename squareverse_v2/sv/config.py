@@ -21,7 +21,8 @@ DEFAULT_PRESET = "systems"             # rain, disk, cloud, binary, systems or e
 SYSTEM_REACH = 120.0                   # the systems and binary presets keep the gravity reach and strength their orbits
 SYSTEM_SCALE = 0.6                     #   were tuned for (at the default 30 a star orbiting a super well spirals in
                                        #   within a few turns: TO_DO.md)
-SYSTEM_WELL = 80_000                   # the systems preset: super wells this heavy (B at pour mass 1, default brush),
+SYSTEM_WELL = 400_000                  # the systems preset: super wells this heavy (the lightest there can be at its
+                                       #   strength, so no star outweighs them),
 SYSTEM_ORBIT = 120.0                   #   each orbited this far out (cells: the middle of where they can, 92-135 at a
 SYSTEM_STAR_RADIUS = 10.0              #   reach of 120) by stars of this size (cells; a 20 px brush: three of the
 SYSTEM_POUR = 16                       #   default size unsettle each other) and pour mass
@@ -31,8 +32,7 @@ SYSTEM_OTHER_STARS = (1, 2)            #   ... with this many stars each, out of
 SYSTEM_SPACING = 5.0                   # (with gravity reaching everywhere: at most this x the orbit apart)
 SYSTEM_EDGE = 10.0                     # their stars clear of the edge by this (cells)
 SYSTEM_BALANCE = 0.1                   # where the others' pulls on the middle one cancel to under this share of one's
-                                       #   at the nearest they may be (else its stars are dragged off their orbits,
-                                       #   as its well responds less: Well.fall)
+                                       #   at the nearest they may be (else its stars are dragged off their orbits)
 DISK_REACH = 20.0                      # the disk preset's gravity reach (cells) and strength, which it was made for
 DISK_SCALE = 0.6
 DISK_MASS = 20_000_000                 # the disk preset's total mass, in particles of every mass from 1 up
@@ -67,18 +67,19 @@ SUPER_SPIN_COLOR = (200, 175, 255)
 GHOST_TINT = (190, 215, 255)           # ghosts are drawn see-through, washed towards this
 
 # --- Particles ---------------------------------------------------------------
-MAX_MASS = 4096                        # merges stop here
+MAX_MASS = 4096                        # the heaviest rung: particle masses come in rungs 1, 2, 4, ... up to this (Fusion)
 POUR_MASSES = (1, 4, 16, 64, 256)      # keys 1-5
-RANDOM_MASS = (1, 256)                 # key 6: each poured particle gets a uniform random mass in this range
+RANDOM_MASS = (1, 256)                 # key 6: each poured particle gets a random rung in this range
 HEAVY_POUR_MASSES = (512, 1024, 2048, 4096)   # shift + 1-4: a second row, up to MAX_MASS, for heavy stars and pours
-RANDOM_HEAVY_MASS = (512, 4096)        # shift + 6: a random mass in this range
+RANDOM_HEAVY_MASS = (512, 4096)        # shift + 6: a random rung in this range
 POUR_CHANCE = 0.25                     # per cell per frame under the brush (sand.py)
 GHOST_TICKS = 180                      # shift+click pours ghosts: they feel gravity (not each other's) but collide
                                        #   with nothing for this many ticks, then land as ordinary particles in
                                        #   the nearest free cells
-GHOST_LAND_NEAR = 3                    # ...within this many cells; with none that close it merges into the lightest
-                                       #   particle there with room, or else stays a ghost and tries again, and only
-GHOST_LAND_PATIENCE = 600              #   after this many ticks of that may it land in a free cell further away
+GHOST_LAND_NEAR = 3                    # ...within this many cells; with none that close it joins a particle there of its
+                                       #   own rung (making the next one up), or else stays a ghost and tries again,
+GHOST_LAND_SPREAD = 2                  #   looking a cell further out every this many ticks it has waited (so in a
+                                       #   packed pile of other rungs it lands at the nearest room, not far away)
 
 # --- Motion ------------------------------------------------------------------
 VMAX = 8.0                             # cells / tick
@@ -101,28 +102,48 @@ LEAN_ON = False                        # children steer their parent (J); off by
 LEAN = 0.002                           #   particles it is a random push comparable to weak gravity
 
 # --- Merging / splitting -----------------------------------------------------
-MERGE_ON = True
-MERGE_SPEED = 1.0                      # only collisions at least this fast (closing speed, cells/tick) may merge
-MERGE_CHANCE = 0.05                    #   the two, with this chance per collision
-SPLIT_ON = True
-SPLIT_SPEED = 2.0                      # only collisions at least this fast may break the particle that is hit...
-BIND = 0.6                             # ...and only with this much impact energy per unit of its mass
-SPLIT_KICK = 0.3                       # separation speed of the parts, x impact speed
+# --- Fusion and fission ------------------------------------------------------------------------------------
+# A particle's mass is a rung: 1, 2, 4, ... MAX_MASS. Two of the same rung can fuse into the next one up (their masses
+# add up to it exactly), and one can break into two of the rung below. Each rung holds binding energy - its mass x
+# VMAX^2 (VMAX is the speed of light) x a share that rises to FUSION_BINDING at FUSION_PEAK ("iron") and falls after
+# it - so fusing light rungs gives off energy (as heat) and fusing past the peak takes it. Whether two touching or
+# colliding particles fuse depends on the energy they bring - their motion against each other and their heat - against
+# a barrier that grows with their masses: they get over it with a chance of exp(-barrier / energy) (kernels._tunnel),
+# so hotter matter fuses more often and heavier rungs need it hotter. Nothing else decides when they fuse.
+MERGE_ON = True                        # fusion (M)
+SPLIT_ON = True                        # fission: a hard enough hit breaks a particle into two of the rung below (P)
+FUSION_BINDING = 0.05                  # binding energy per unit of mass at the peak, as a share of VMAX^2 (the rest
+                                       #   energy): 3.2 per unit of mass. The curve to it is 1 - (1 - rung / peak rung)^2
+FUSION_PEAK = 256                      # the most tightly bound rung: fusing up to it gives off energy, past it takes it
+FUSION_TAIL = 0.15                     # past the peak the binding per unit of mass falls by this share by MAX_MASS
+FUSION_BARRIER = 9.0                   # the barrier two particles of masses a and b must get over: this x a b /
+                                       #   (a^1/3 + b^1/3), in energy (two of mass m: this / 2 x m^5/3). Against their
+                                       #   energy, m a b / (a + b) x (relative speed^2 / 2 + both temperatures): two
+                                       #   mass-1 particles at 2 cells/tick fuse ~1 time in 100, two of 16 need a
+                                       #   temperature of ~6, two of 256 ~40
 
 # --- Radiation (heat) ------------------------------------------------------------------------------------
-RADIATION_ON = True                    # merging, splitting and fusion in stars give off heat
-HEAT_SHARE = 0.01                      # a merge or split loses this share of the mass (rounded at random) as heat:
-HEAT_PIECES = 4                        #   up to this many light heat particles (ghosts) that fly out from it
-HEAT_SPEED = 6.0                       #   this fast (cells/tick, on top of its velocity) in random directions,
-HEAT_TICKS = 40                        #   for this many ticks, then land as ordinary light particles. While faster
-HEAT_COUPLING = 0.5                    #   than HEAT_MIN_SPEED against a free particle in its cell (not a star's),
-HEAT_MIN_SPEED = 1.0                   #   a heat particle hands it this share of a head-on elastic collision's
-                                       #   momentum and slows by as much: light matter is blown away, heavy matter
-                                       #   barely moves and soaks the heat up
-FUSION_LIGHT = 16                      # fusion in stars: a star's particle this light or lighter meets a light
-FUSION_CHANCE = 0.002                  #   neighbour of the same star with this chance per tick, and the two fuse
-FUSION_HEAT_SHARE = 0.05               #   into one, losing this share of their mass as heat (blowing light matter
-                                       #   away from the star: its own particles let heat through)
+RADIATION_ON = True                    # hot surfaces radiate (HEAT_RADIATE) and super well mergers send out waves
+HEAT_MIN_SPEED = 1.0                   # gravitational waves faster than this against a free particle push it
+HEAT_CONDUCT = 0.1                     # heat (energy that collisions, contacts and internal friction lose: see
+                                       #   kernels.KIN) spreads between touching particles, evening out this share of
+                                       #   their difference in temperature (heat per unit mass) each heat step ...
+HEAT_RADIATE = 0.02                    # ... and with radiation on, a particle with open sides radiates this share of its
+                                       #   heat per tick per open side of four, as heat particles of mass 1 (the
+                                       #   lightest), each one unit of mass's worth of energy, VMAX^2 (VMAX is the speed
+                                       #   of light: World.radiation_cost)
+HEAT_EVERY = 2                         # ticks between heat steps (kernels.heat_step; the rates above are per tick)
+RADIATION_RECYCLE = True               # radiation (energy only: quanta of VMAX^2 at the speed of light, taken in as heat
+                                       #   by the first matter it meets) that reaches the universe's edge comes back
+                                       #   in from a random point of it, heading inwards, so the universe keeps its
+                                       #   energy; off, it is gone (menu: Radiation comes back)
+HEAT_PRESSURE = 0.0                    # heat pushes: a particle's pressure is its heat x this (1: as a 2D gas's, energy
+                                       #   per area) and touching particles push each other apart with their mean
+                                       #   pressure, so hot matter expands and a hot core holds up what lies on it
+                                       #   (kernels._pressure_push); 0 turns it off. Off until stars are reworked
+                                       #   (TO_DO.md physics rework step 5): at 1 a star's internal friction turns its
+                                       #   jostling into heat and the pressure turns it back into jostling, so with only
+                                       #   radiation to take it away stars puffed apart and hot piles never slept
 RADIATION_COLOR = (150, 225, 255)      # radiation - heat and gravitational waves - glows this pale blue (yellow
 HEAT_COLOR = RADIATION_COLOR           #   heat looked like the stars' own particles)
 
@@ -141,8 +162,8 @@ GRAVITY_REACH = 30.0                   #   distance R (this many cells; ... but 
                                        #   reaches all the way)
 WELL_DENSITY = 64.0                    # a brush-sized well weighs its circle's area x pour mass x this
 WELL_SOFTENING = 4.0                   # default size of a solid well (cells)
-WELL_INERTIA_MASS = 20000.0            # super wells accelerate (and top out at VMAX) x this / (this + their mass);
-                                       #   so do solid wells in the global orbit and whirlpools
+WELL_INERTIA_MASS = 20000.0            # solid wells respond to the global orbit and the whirlpools x this / (this +
+                                       #   their mass); gravity accelerates every well (super wells too) in full
 STAR_SPIN = (0.005, 0.02)              # a solid well spins at a random speed in this range (rad/tick), either way
 
 # --- Stars: balls of particles held together by their own gravity ----------------------------------
@@ -254,8 +275,11 @@ BLOB_MAX_RADIUS = 25.0                 #   by the global orbit as a whole; one m
 
 # --- Super wells (collapse) --------------------------------------------------
 COLLAPSE_ON = True                     # shift+B
-COLLAPSE_MASS = 40000                  # mass in a COLLAPSE_BLOCKS x COLLAPSE_BLOCKS block window that collapses,
-COLLAPSE_BLOCKS = 5                    #   divided by the gravity scale (blocks are SG_BLOCK cells: 20 x 20 cells)
+COLLAPSE_MASS = 240000                 # mass in a COLLAPSE_BLOCKS x COLLAPSE_BLOCKS block window that collapses,
+COLLAPSE_BLOCKS = 5                    #   divided by the gravity scale (blocks are SG_BLOCK cells: 20 x 20 cells):
+                                       #   200k at the default strength. It is also the lightest a super well can be
+                                       #   and the heaviest a star can be - one that reaches it collapses into a super
+                                       #   well (World._collapse_heavy_stars) - so stars are always lighter
 COLLAPSE_EVERY = 8                     # ticks between collapse checks
 STAR_COLLAPSE_FACTOR = 4.0             # a star's own particles count this many times less in the collapse check, so a
 STAR_COLLAPSE_RANGE = (1.0, 20.0)      #   star becomes a super well only if this many times denser than loose matter
@@ -286,9 +310,10 @@ SUPER_DRAG_TURN_MAX = 0.25             #   circling there has, fading out over t
                                        #   spirals in the way the well spins instead of falling straight. Within
                                        #   its range its whirlpool takes over (across SUPER_SWIRL_EDGE)
 SUPER_WHIRL_COLOR = (90, 80, 120)     # its whirlpool's range (a faint circle; its point of no return is dotted)
-SUPER_SPIN_NATURAL = 1.5               # spin of a super well formed by collapse (which way: see SUPER_SPIN_PLACED)
+SUPER_SPIN_NATURAL = 0.5               # spin of a super well formed by collapse (which way: see SUPER_SPIN_PLACED);
+                                       #   low, so a light well barely stirs what orbits it (it rises with mass)
 SUPER_SPIN_MAX = 7.0                   # ; / ' spin the nearest super well down / up by SUPER_SPIN_STEP, up to this
-SUPER_SPIN_PLACED = 1.5                # spin of a super well placed with B; new ones spin with the global orbit,
+SUPER_SPIN_PLACED = 0.5                # spin of a super well placed with B; new ones spin with the global orbit,
                                        #   or either way at random when it is off
 SUPER_SPIN_STEP = 1.25
 SUPER_SPIN_FOLLOWS_MASS = True        # a new super well's spin rises with its mass, in a straight line from its

@@ -35,7 +35,7 @@ def rain(world, count=None):
 
 def _spread_masses(rng, count, total):
     """count particle masses spread evenly over orders of magnitude (log-uniform, from 1 up to at most MAX_MASS),
-    adding up to about total."""
+    adding up to about total, each the rung below (masses come in rungs)."""
     u = rng.uniform(0, 1, count)
     lo, hi = 1.0, float(config.MAX_MASS)
     for _ in range(40):                              # the top mass that makes them add up to the total
@@ -44,7 +44,7 @@ def _spread_masses(rng, count, total):
             lo = top
         else:
             hi = top
-    return np.minimum(np.floor((hi + 1) ** u), config.MAX_MASS).astype(np.int64)
+    return 1 << np.floor(np.log2(np.minimum(np.floor((hi + 1) ** u), config.MAX_MASS))).astype(np.int64)   # (rungs)
 
 
 def disk(world, count=None):

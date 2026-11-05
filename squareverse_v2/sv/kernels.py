@@ -22,8 +22,9 @@ from numba import njit, prange
  P_CHILD_MOVES, P_SLOSH, P_LEAN, P_MERGE_ON, P_MERGE_SPEED, P_MERGE_CHANCE, P_MAX_MASS,
  P_SPLIT_ON, P_BIND, P_KICK, P_SG_ON, P_CHILD_EVERY, P_ORBIT_W, P_ORBIT_GRIP, P_ORBIT_CX, P_ORBIT_CY,
  P_SLEEP_ACCEL, P_WRAP, P_ORBIT_VMIN, P_WHIRL_SPEED, P_WHIRL_GRIP, P_WHIRL_INFALL, P_WHIRL_EDGE, P_SPLIT_SPEED,
- P_SCATTER, P_REACH, P_SG_COS, P_SG_SIN, P_HEAT, P_DRAG_EDGE, P_DRAG_TURN) = range(40)
-N_PARAMS = 40
+ P_SCATTER, P_REACH, P_SG_COS, P_SG_SIN, P_HEAT, P_DRAG_EDGE, P_DRAG_TURN, P_PRESSURE,
+ P_FUSE_BIND, P_FUSE_PEAK, P_FUSE_TOP, P_FUSE_TAIL, P_BARRIER) = range(46)
+N_PARAMS = 46
 
 # indices into the int64 stats array filled by step()
 S_MOVED, S_COLLISIONS, S_MERGES, S_SPLITS, S_SINKS, S_ABSORBED, S_HEAT = range(7)
@@ -31,6 +32,12 @@ N_STATS = 7
 
 STAR_SHOVE_SHARE = 0.1          # a star shoves loose particles lighter than this share of it aside (star_shift)
 HEAT_TAG = -1                   # ghost tag of heat (radiation): see _shed and heat_push
+DX4 = np.array([1, 0, -1, 0])   # the four sides of a cell
+DY4 = np.array([0, 1, 0, -1])
+KIN = 5                         # kin's columns: velocity (vx, vy), where it is within its cell (ox, oy) and its heat -
+                                #   the kinetic energy its collisions, contacts and internal friction have lost, held
+                                #   as thermal energy (mass x cells^2 / tick^2, like kinetic energy) until it spreads
+                                #   to its neighbours or is radiated away (heat_step)
 WAVE_TAG = -2                   # ghost tag of gravitational waves (World._radiate_waves): they fly straight
 
 N_SHADES = 6
@@ -132,8 +139,9 @@ def wake_blocks(changed, block, cw, w, h, mass, flag):
 def _put(src, dst, mass, kin, quad, shade, stamp, owner):
     """Move the particle in cell src to the empty cell dst (with its star, if any)."""
     mass[dst] = mass[src]
-    for c in range(4):
+    for c in range(KIN):
         kin[dst, c] = kin[src, c]
+    for c in range(4):
         quad[dst, c] = quad[src, c]
     shade[dst] = shade[src]
     stamp[dst] = stamp[src]
@@ -146,8 +154,9 @@ def _put(src, dst, mass, kin, quad, shade, stamp, owner):
 def _swap(a, b, mass, kin, quad, shade, stamp, owner):
     """Swap the particles in cells a and b."""
     mass[a], mass[b] = mass[b], mass[a]
-    for c in range(4):
+    for c in range(KIN):
         kin[a, c], kin[b, c] = kin[b, c], kin[a, c]
+    for c in range(4):
         quad[a, c], quad[b, c] = quad[b, c], quad[a, c]
     shade[a], shade[b] = shade[b], shade[a]
     stamp[a], stamp[b] = stamp[b], stamp[a]
@@ -157,8 +166,9 @@ def _swap(a, b, mass, kin, quad, shade, stamp, owner):
 @njit(cache=True)
 def _clear(i, mass, kin, quad):
     mass[i] = 0
-    for c in range(4):
+    for c in range(KIN):
         kin[i, c] = 0.0
+    for c in range(4):
         quad[i, c] = 0
 
 
@@ -180,6 +190,7 @@ def place(i, m, vx, vy, mass, kin, quad, shade, stamp):
     kin[i, 1] = vy
     kin[i, 2] = 0.0
     kin[i, 3] = 0.0
+    kin[i, 4] = 0.0
     _init_quad(i, m, quad)
     shade[i] = np.random.randint(0, N_SHADES)
     stamp[i] = 0
@@ -200,8 +211,13 @@ def place_many(idx, masses, vxs, vys, mass, kin, quad, shade, stamp, flag, solid
 
 @njit(cache=True)
 def brush(cx, cy, r, m_lo, m_hi, chance, w, h, mass, kin, quad, shade, stamp, flag, solid, wrap):
-    """Pour particles with a mass drawn uniformly from m_lo..m_hi (m_hi > 0), or erase (m_hi == 0), in a circle of
-    r cells around cell (cx, cy)."""
+    """Pour particles of mass m_lo, or of a random rung (mass 2^k) from m_lo to m_hi when they differ (m_hi > 0), or
+    erase (m_hi == 0), in a circle of r cells around cell (cx, cy)."""
+    k_lo, k_hi = 0, 0
+    while (1 << k_lo) < m_lo:
+        k_lo += 1
+    while (1 << (k_hi + 1)) <= m_hi:
+        k_hi += 1
     ri = int(r) + 1
     r2 = r * r
     for y in range(max(0, cy - ri), min(h, cy + ri + 1)):
@@ -211,7 +227,7 @@ def brush(cx, cy, r, m_lo, m_hi, chance, w, h, mass, kin, quad, shade, stamp, fl
             i = y * w + x
             if m_hi > 0:
                 if mass[i] == 0 and not solid[i] and np.random.random() < chance:
-                    m = m_lo if m_lo == m_hi else np.random.randint(m_lo, m_hi + 1)
+                    m = m_lo if m_lo == m_hi else 1 << np.random.randint(k_lo, max(k_lo, k_hi) + 1)
                     place(i, m, 0.0, 0.0, mass, kin, quad, shade, stamp)
                     wake(i, mass, flag)
             elif mass[i] != 0:
@@ -290,52 +306,44 @@ def _slide_target(x, y, d, w, h, mass, solid, wrap):
 
 
 @njit(cache=True)
-def _split(j, kick, w, h, tick, mass, kin, quad, shade, stamp, flag, solid, wrap):
-    """Break the particle in cell j in two, the second part in a free neighbouring cell. Each quadrant's children
-    are halved (odd ones go either way), so mass is conserved. Returns True on success."""
+def _split(j, w, h, tick, mass, kin, quad, shade, stamp, flag, solid, wrap):
+    """Break the particle in cell j into two of the rung below (exactly half its mass each), the second in a free
+    neighbouring cell, both moving as it moved and sharing its heat; its children are shared out so each half's add
+    up to its mass. Returns True on success (False: no free cell next to it)."""
     x, y = j % w, j // w
     start = np.random.randint(0, 8)
     f = -1
-    fdx = fdy = 0
     for k in range(8):
         d = (start + k) % 8
         t = _cell(x + DX[d], y + DY[d], w, h, wrap)
         if t >= 0 and mass[t] == 0 and not solid[t]:
-            f, fdx, fdy = t, DX[d], DY[d]
+            f = t
             break
     if f < 0:
         return False
     m = np.int64(mass[j])
-    ma = 0
+    half = m // 2
+    moved = 0
     for c in range(4):
-        q = np.int64(quad[j, c])
-        a = q // 2
-        if q & 1 and np.random.random() < 0.5:
-            a += 1
-        quad[f, c] = q - a
-        quad[j, c] = a
-        ma += a
-    if ma == 0 or ma == m:                               # every odd child went the same way: hand one over
-        src, dst = (f, j) if ma == 0 else (j, f)
-        for c in range(4):
-            if quad[src, c] > 0:
-                quad[src, c] -= 1
-                quad[dst, c] += 1
-                break
-        ma = 1 if ma == 0 else m - 1
-    mb = m - ma
-    mass[j] = ma
-    mass[f] = mb
-    # the parts fly apart along the j -> f line with equal and opposite momentum
-    inv = 0.7071067811865476 if fdx != 0 and fdy != 0 else 1.0
-    ex, ey = fdx * inv, fdy * inv
-    p = kick * ma * mb / m
-    kin[f, 0] = kin[j, 0] + p / mb * ex
-    kin[f, 1] = kin[j, 1] + p / mb * ey
+        a = np.int64(quad[j, c]) // 2
+        quad[f, c] = a
+        quad[j, c] -= a
+        moved += a
+    c = np.random.randint(0, 4)
+    while moved < half:                                  # the odd children: one more each from wherever there is one
+        if quad[j, c] > 0:
+            quad[j, c] -= 1
+            quad[f, c] += 1
+            moved += 1
+        c = (c + 1) % 4
+    mass[j] = m - half
+    mass[f] = half
+    kin[f, 0] = kin[j, 0]
+    kin[f, 1] = kin[j, 1]
     kin[f, 2] = 0.0
     kin[f, 3] = 0.0
-    kin[j, 0] -= p / ma * ex
-    kin[j, 1] -= p / ma * ey
+    kin[f, 4] = kin[j, 4] * 0.5                          # its heat shared out by mass
+    kin[j, 4] -= kin[f, 4]
     shade[f] = shade[j]
     stamp[f] = 2 * tick
     wake(j, mass, flag)
@@ -393,6 +401,43 @@ def orbit_accel(rx, ry, vx, vy, om, grip, vmin):
 
 
 @njit(cache=True)
+def orbit_push(rx, ry, vx, vy, om, grip, vmin, whirls, host, share):
+    """The global orbit's push on something at (rx, ry) from the centre moving at (vx, vy): its own (orbit_accel),
+    or, bound to a super well (host >= 0: the row of whirls it is most tightly bound to, counting the orbit's shear
+    against it: orbit_shear; share: bound_share), that well's push (whirls columns 11 and 12).
+    So a well and all it holds turn with the universe together and their orbits round it are left alone - the
+    orbit's own push, applied to each separately, braked every orbit towards its flow and pulled them all towards
+    the centre."""
+    ox, oy = 0.0, 0.0
+    if share < 1.0:
+        ox, oy = orbit_accel(rx, ry, vx, vy, om, grip, vmin)
+    if host >= 0:
+        ox += share * (whirls[host, 11] - ox)
+        oy += share * (whirls[host, 12] - oy)
+    return ox, oy
+
+
+@njit(cache=True)
+def orbit_shear(fx, fy, whirls, k):
+    """The global orbit's shear between something where its flow is (fx, fy) and super well k (whirls columns 14 and
+    15: the flow where the well is), as energy per unit mass: the flow pulls them apart with about this much, so it
+    counts against how bound the thing is to the well - far out at the edge of the well's reach, barely bound, the
+    orbit still turns it itself."""
+    dx, dy = fx - whirls[k, 14], fy - whirls[k, 15]
+    return 0.5 * (dx * dx + dy * dy)
+
+
+@njit(cache=True)
+def bound_share(e, phi):
+    """Whether something is bound to a well, 1 or 0: e is its energy against the well (kinetic + potential + the
+    orbit's shear, per unit mass), phi the well's potential there. (A share that rose with how bound it was, 1 only as
+    bound as a circular orbit round a plain inverse-square pull, left stable orbits round a softened, fading pull -
+    less bound than that - with part of the orbit's own push, which threw them out; the shear already stops matter
+    barely bound far out at the edge of a well's reach from counting.)"""
+    return 1.0 if e < 0.0 and phi < 0.0 else 0.0
+
+
+@njit(cache=True)
 def sg_block_at(x, y, w, h, sg_block, sg_w, c, s, ocx, ocy, wrap):
     """The self-gravity mesh block to read for something at (x, y). The mesh is binned only every few ticks; with the
     global orbit on, the matter has turned on with the universe since, by an angle whose cosine and sine are c and s,
@@ -423,6 +468,123 @@ def orbit_flow(rx, ry, om, vmin):
 # --- the tick ----------------------------------------------------------------------------------------
 
 @njit(cache=True)
+def _pressure_push(x, y, m, hq, pressure, w, h, mass, kin, solid, wrap):
+    """Heat pressure on the particle of mass m and heat hq in cell (x, y): each particle's pressure is its heat (as a
+    2D gas's: energy per area, a cell each) x `pressure`, and each particle touching it on a side pushes it away with
+    the two's mean pressure - equal and opposite, so momentum is kept; solid ground and the window's edge push back
+    as hard as it pushes them. Evenly hot matter is pushed alike from every side and stays put; where it is hotter
+    on one side, or open (a surface), it is pushed out: hot matter expands, its heat doing the work (_advance takes
+    the energy of motion it gains out of hq), and a hot core holds up what lies on it. Returns the acceleration."""
+    ax = ay = 0.0
+    pi = max(hq, 0.0)
+    for d in range(4):
+        j = _cell(x + DX4[d], y + DY4[d], w, h, wrap)
+        if j < 0 or solid[j]:
+            pj = pi                                      # ground or the window's edge: as hard back
+        elif mass[j] == 0:
+            continue
+        else:
+            pj = max(np.float64(kin[j, 4]), 0.0)
+        f = 0.5 * (pi + pj)
+        ax -= f * DX4[d]
+        ay -= f * DY4[d]
+    return ax * pressure / m, ay * pressure / m
+
+
+@njit(cache=True)
+def _cap_speed(kin, j, vmax):
+    """The particle in cell j, handed momentum by a heavier one that lost it against it (a star's: the "give" in
+    _advance), is slowed to vmax if that sent it faster. The momentum a heavy particle loses would send a light one
+    off at thousands of cells a tick, with energy that was never there (p^2 / 2m): it is not kept, as heat or
+    otherwise."""
+    v2 = np.float64(kin[j, 0]) ** 2 + np.float64(kin[j, 1]) ** 2
+    if v2 > vmax * vmax:
+        s = vmax / np.sqrt(v2)
+        kin[j, 0] *= s
+        kin[j, 1] *= s
+
+
+@njit(cache=True)
+def _rung(m):
+    """Which rung a mass is (m = 2^rung), or -1 for a mass between rungs."""
+    k = 0
+    while (1 << k) < m:
+        k += 1
+    return k if (1 << k) == m else -1
+
+
+@njit(cache=True)
+def _binding(m, bind, peak, top, tail):
+    """The binding energy a particle of rung mass m holds (0 for one between rungs): m x bind (the peak's, per unit
+    of mass) x a share that rises as 1 - (1 - rung / peak)^2 to 1 at the peak rung, then falls by `tail` by the top
+    rung. Fusing two of a rung into the next gives off the difference (_advance, heat_step)."""
+    k = _rung(m)
+    if k < 0:
+        return 0.0
+    if k <= peak:
+        f = 1.0 - (1.0 - k / max(peak, 1.0)) ** 2
+    else:
+        f = 1.0 - tail * (k - peak) / max(top - peak, 1.0)
+    return m * bind * f
+
+
+@njit(cache=True)
+def _barrier(ma, mb, k):
+    """The barrier particles of masses ma and mb must get over to fuse (or a particle to break into them): k x ma mb
+    / (ma^1/3 + mb^1/3) - it grows with their masses, so heavy rungs need hotter, faster matter."""
+    return k * ma * mb / (ma ** (1.0 / 3.0) + mb ** (1.0 / 3.0))
+
+
+@njit(cache=True)
+def _fuse_energy(ma, mb, u2, qa, qb):
+    """The energy two particles bring to fusing: their motion against each other (u2: relative speed squared) and
+    their heat (qa, qb: their temperatures, heat per unit mass, counted for their reduced mass ma mb / (ma + mb))."""
+    mu = ma * mb / (ma + mb)
+    return mu * (0.5 * u2 + max(qa, 0.0) / ma + max(qb, 0.0) / mb)
+
+
+@njit(cache=True)
+def _tunnel(barrier, energy):
+    """Whether something bringing `energy` gets over `barrier` this time: with a chance of exp(-barrier / energy) -
+    never with none, more often the more it brings, the way fusion tunnels through a barrier."""
+    return energy > 0.0 and np.random.random() < np.exp(-barrier / energy)
+
+
+@njit(cache=True)
+def _unkicked(gain, kick):
+    """Heat gained (gain) less what of it is this tick's outside forces' kick still unspent (kick): a particle resting
+    on another under gravity is kicked into it and stopped every tick, without moving - no work done, so no heat.
+    Returns (the heat, the kick left)."""
+    if gain <= 0.0 or kick <= 0.0:
+        return gain, kick
+    take = min(gain, kick)
+    return gain - take, kick - take
+
+
+@njit(cache=True)
+def _pair_ke(m, vx, vy, mk, kin, j, rock, kvx, kvy):
+    """The kinetic energy of a particle of mass m moving at (vx, vy) and the one of mass mk in cell j it has run
+    into - or, for solid ground (rock) moving at (kvx, kvy), its own against the ground."""
+    if rock:
+        return 0.5 * m * ((vx - kvx) ** 2 + (vy - kvy) ** 2)
+    return 0.5 * m * (vx * vx + vy * vy) + 0.5 * mk * (np.float64(kin[j, 0]) ** 2 + np.float64(kin[j, 1]) ** 2)
+
+
+@njit(cache=True)
+def _heat_loss(e0, m, vx, vy, mk, kin, j, rock, kvx, kvy):
+    """A contact has ended: the kinetic energy it lost since it was e0 (_pair_ke) becomes heat, shared by mass - the
+    other particle's share added to its heat here, the moving one's returned (all of it against solid ground). Some
+    contact rules hand out a little energy instead (a jammed particle counts as standing still, whatever velocity it
+    holds): that comes out of their heat, so kinetic energy + heat is kept exactly. A particle's heat can dip a
+    little below 0 for a moment that way (in a crash, ~0.5% of them for ~25 ticks), until conduction evens it out."""
+    loss = e0 - _pair_ke(m, vx, vy, mk, kin, j, rock, kvx, kvy)
+    if rock:
+        return loss
+    kin[j, 4] += loss * mk / (m + mk)
+    return loss * m / (m + mk)
+
+
+@njit(cache=True)
 def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, fx, fy, sgx, sgy, sg_block, sg_w,
              hole, absorbed, solid, gvx, gvy, whirls, stars, sfx, sfy, s_block, s_cw, s_ch, owner, star_v, star_f,
              stats, blob, blob_v, heat):
@@ -431,7 +593,7 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
     (_shed, into heat)."""
     vmax = P[P_VMAX]
     vmax2 = vmax * vmax
-    heat_share = P[P_HEAT]
+    pressure = P[P_PRESSURE]
     max_steps = int(P[P_MAX_STEPS])
     wall_e = P[P_WALL_E]
     e = P[P_E]
@@ -445,14 +607,10 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
     child_every = max(1, int(P[P_CHILD_EVERY]))
     slosh = P[P_SLOSH]
     lean = P[P_LEAN]
-    merge_on = P[P_MERGE_ON] != 0.0
-    merge_speed = P[P_MERGE_SPEED]
-    merge_chance = P[P_MERGE_CHANCE]
+    merge_on = P[P_MERGE_ON] != 0.0                  # fusion and fission (see _binding, _tunnel)
     max_mass = int(P[P_MAX_MASS])
     split_on = P[P_SPLIT_ON] != 0.0
-    bind = P[P_BIND]
-    split_speed = P[P_SPLIT_SPEED]
-    kick = P[P_KICK]
+    f_bind, f_peak, f_top, f_tail, f_barrier = P[P_FUSE_BIND], P[P_FUSE_PEAK], P[P_FUSE_TOP], P[P_FUSE_TAIL], P[P_BARRIER]
     scatter = P[P_SCATTER]
     kinv = P[P_REACH]                                # 1 / how far gravity reaches (0: all the way)
     sg_c, sg_s = P[P_SG_COS], P[P_SG_SIN]            # how far the universe has turned since the mesh was binned
@@ -481,6 +639,7 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
         sh = shade[i0]
         own = owner[i0]                                  # its star (0: none)
         vx0, vy0, ox0, oy0 = kin[i0, 0], kin[i0, 1], kin[i0, 2], kin[i0, 3]
+        hq = np.float64(kin[i0, 4])                      # its heat: gains whatever kinetic energy its contacts lose
 
         # forces: external field + self-gravity + the children's lean
         ax = np.float64(fx[i0])
@@ -494,15 +653,22 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
         if lean != 0.0:
             ax += lean * ((q1 + q3) - (q0 + q2)) / m
             ay += lean * ((q2 + q3) - (q0 + q1)) / m
-        if orbit_w != 0.0:
-            ox_, oy_ = orbit_accel(x - ocx, y - ocy, vx0, vy0, orbit_w, orbit_grip, orbit_vmin)
-            ax += ox_
-            ay += oy_
         whirled = False                                  # inside a whirlpool: never sleeps or sticks
         turn = carry_x = carry_y = 0.0                   # how far turning space turns and carries it this tick
+        host, e_host, phi_host = -1, 0.0, 0.0            # the super well it is most tightly bound to (orbit_push)
+        flx, fly = orbit_flow(x - ocx, y - ocy, orbit_w, orbit_vmin) if orbit_w != 0.0 else (0.0, 0.0)
         for k in range(whirls.shape[0]):                 # each super well: its pull, exact from where it is now (it
             rx_, ry_ = _axis(x, whirls[k, 0], w, wrap), _axis(y, whirls[k, 1], h, wrap)   # isn't on the field),
             gx_, gy_, phi_ = _pull(-rx_, -ry_, whirls[k, 4], whirls[k, 5], kinv)            # its whirlpool and the
+            if own == 0:                                 # the well feels its pull back (stars pull as wholes)
+                kw = int(whirls[k, 13])
+                absorbed[kw, 3] -= m * gx_
+                absorbed[kw, 4] -= m * gy_
+            e_ = 0.5 * ((vx0 - whirls[k, 9]) ** 2 + (vy0 - whirls[k, 10]) ** 2) + phi_
+            if orbit_w != 0.0:
+                e_ += orbit_shear(flx, fly, whirls, k)
+            if e_ < e_host:
+                host, e_host, phi_host = k, e_, phi_
             wx_, wy_, inside = whirl(rx_, ry_, vx0, vy0, whirls[k, 2], whirls[k, 3], whirls[k, 4], whirls[k, 5],
                                      whirl_speed, whirl_grip, whirl_infall, whirl_edge, kinv, whirls[k, 8], phi_)
             ax += gx_ + wx_                              # space it turns
@@ -515,6 +681,11 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
                 carry_x += cx_
                 carry_y += cy_
                 turn += om_
+        if orbit_w != 0.0:
+            ox_, oy_ = orbit_push(x - ocx, y - ocy, vx0, vy0, orbit_w, orbit_grip, orbit_vmin, whirls, host,
+                                  bound_share(e_host, phi_host))
+            ax += ox_
+            ay += oy_
         if stars.shape[0] > 0:
             sx_, sy_, px_, py_ = _star_pull(x, y, own, stars, sfx, sfy, s_block, s_cw, s_ch, w, h, wrap, kinv)
             if _held_up(x, y, own, px_, py_, w, h, mass, owner, wrap) >= 0:
@@ -540,6 +711,25 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             ax += sx_
             ay += sy_
 
+        # the energy of motion this tick's outside forces (gravity, the orbit, ...) hand it: if what is in the way
+        # takes it straight back, they did no work - it hasn't moved - and it isn't heat (_unkicked)
+        kicked = max(0.0, 0.5 * m * ((vx0 + ax) ** 2 + (vy0 + ay) ** 2 - vx0 * vx0 - vy0 * vy0))
+        if pressure != 0.0:                              # heat pressure (_pressure_push): the energy of motion it
+            pax, pay = _pressure_push(x, y, m, hq, pressure, w, h, mass, kin, solid, wrap)   # adds comes out of its
+            vax, vay = vx0 + ax, vy0 + ay                # heat - and goes back to it if what is in the way stops it -
+            # at most half its heat a tick: a tick is coarse for hot matter, whose push in one would outrun its heat
+            de = 0.5 * m * (2.0 * (vax * pax + vay * pay) + pax * pax + pay * pay)
+            room = 0.5 * max(hq, 0.0)
+            if de > room:
+                p2 = pax * pax + pay * pay
+                b = vax * pax + vay * pay
+                f = (-b + np.sqrt(b * b + 2.0 * room * p2 / m)) / p2 if p2 > 0.0 else 0.0
+                pax *= f
+                pay *= f
+                de = room
+            hq -= de
+            ax += pax
+            ay += pay
         vx = vx0 + ax
         vy = vy0 + ay
         if turn != 0.0:                                  # turning space turns which way it is heading too
@@ -553,6 +743,8 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             s = vmax / np.sqrt(v2)
             vx *= s
             vy *= s
+            g_, kicked = _unkicked(0.5 * m * (v2 - vmax2), kicked)   # nothing goes faster than light: the rest is heat
+            hq += g_
         ox = ox0 + vx + carry_x                          # its own motion, and space carrying it
         oy = oy0 + vy + carry_y
         if own > 0:                                      # in a star: only its motion relative to the star
@@ -579,24 +771,30 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             if nx < 0 or nx >= w:
                 press = max(0.0, ax * sx)
                 impact = impact_min + press
+                ke_ = vx * vx + vy * vy
                 vx = -vx * wall_e if abs(vx) > impact else 0.0
                 if press > 0.0 and abs(vy) < impact:
                     vy = 0.0
+                g_, kicked = _unkicked(0.5 * m * (ke_ - vx * vx - vy * vy), kicked)
+                hq += g_
                 ox = 0.49 * sx
                 blocked = True
                 continue
             if ny < 0 or ny >= h:
                 press = max(0.0, ay * sy)
                 impact = impact_min + press
+                ke_ = vx * vx + vy * vy
                 vy = -vy * wall_e if abs(vy) > impact else 0.0
                 if press > 0.0 and abs(vx) < impact:
                     vx = 0.0
+                g_, kicked = _unkicked(0.5 * m * (ke_ - vx * vx - vy * vy), kicked)
+                hq += g_
                 oy = 0.49 * sy
                 blocked = True
                 continue
             j = ny * w + nx
             if hole[j]:                                  # into a super well's core: absorbed
-                absorbed[hole[j] - 1] += m
+                _absorb(absorbed, hole[j] - 1, m, vx, vy)
                 mass[i] = 0
                 owner[i] = 0
                 wake_around(i, w, h, mass, flag, wrap)
@@ -642,12 +840,17 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             u = (vx - kvx) * nxn + (vy - kvy) * nyn
             if u <= 0.0:
                 break                                    # the one ahead is pulling away: wait behind it
+            # the pair's kinetic energy now (against the ground for solid ground, which takes any momentum): what
+            # the contact below loses of it (or gains), however it ends, goes to their heat (_heat_loss)
+            e0 = _pair_ke(m, vx, vy, mk, kin, j, rock, kvx, kvy)
             press = max(0.0, ax * nxn + ay * nyn)        # how hard the force pushes it into the other one
             impact = impact_min + press
             if rock:
                 if u > impact:                           # bounce off the ground
                     vx -= (1.0 + wall_e) * u * nxn
                     vy -= (1.0 + wall_e) * u * nyn
+                    g_, kicked = _unkicked(_heat_loss(e0, m, vx, vy, mk, kin, j, rock, kvx, kvy), kicked)
+                    hq += g_
                     blocked = True
                     break
             else:
@@ -655,19 +858,26 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
                 if press > 0.0 and m > mk and own == 0 and owner[j] == 0:
                     stay = True                          # a heavier particle keeps trying to sink (sand.py)
 
-                # merging and splitting only happen in collisions at least merge_speed / split_speed fast;
-                # resting and slow contacts just push. A collision that breaks a particle doesn't also merge.
+                # fusion and fission happen in collisions (and, between touching particles at rest, in heat_step):
+                # the energy the two bring - their motion against each other and their heat - against the barrier
+                # (_tunnel), and enough of it for what a break costs or a fusion past the peak takes (_binding).
+                # Resting and slow contacts just push. A collision that breaks a particle doesn't also fuse.
                 split = False
+                ef = _fuse_energy(m, mk, u * u, hq, kin[j, 4]) if u > impact else 0.0
                 if u > impact:
-                    if (split_on and u >= split_speed and mk >= 2
-                            and 0.5 * (m * mk / total) * u * u > bind * mk):
-                        if _split(j, kick * u, w, h, tick, mass, kin, quad, shade, stamp, flag, solid, wrap):
-                            stats[S_SPLITS] += 1
-                            split = True
-                            if heat_share > 0.0:
-                                _shed(j, mk, heat_share, w, mass, kin, quad, heat, stats)
-                            mk = np.int64(mass[j])
-                            total = m + mk
+                    if split_on and mk >= 2 and _rung(mk) > 0:
+                        cost = _binding(mk, f_bind, f_peak, f_top, f_tail) - \
+                            2.0 * _binding(mk // 2, f_bind, f_peak, f_top, f_tail)   # (< 0 past the peak: it gives)
+                        if ef > cost and _tunnel(_barrier(mk // 2, mk // 2, f_barrier), ef):
+                            kin[j, 4] -= cost                    # what breaking it takes comes out of its heat
+                            if _split(j, w, h, tick, mass, kin, quad, shade, stamp, flag, solid, wrap):
+                                stats[S_SPLITS] += 1
+                                split = True
+                                mk = np.int64(mass[j])
+                                total = m + mk
+                                e0 = _pair_ke(m, vx, vy, mk, kin, j, rock, kvx, kvy)
+                            else:
+                                kin[j, 4] += cost                # no room to break into: it stays whole
                     # 1D collision with restitution e (momentum conserved) along the step direction - for loose
                     # particles tilted by a random angle up to scatter, as if they met a little off-centre, so a
                     # stream glances off what it hits instead of queueing up in a line behind it
@@ -691,17 +901,22 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
                     wake(j, mass, flag)
                     stats[S_COLLISIONS] += 1
 
-                if (merge_on and not split and u >= merge_speed and u > impact and total <= max_mass
-                        and np.random.random() < merge_chance):
+                q_ = 0.0
+                fuse = merge_on and not split and u > impact and m == mk and total <= max_mass and _rung(m) >= 0
+                if fuse:                                 # the same rung: they may fuse into the next one up
+                    q_ = _binding(total, f_bind, f_peak, f_top, f_tail) - 2.0 * _binding(m, f_bind, f_peak, f_top,
+                                                                                         f_tail)
+                    fuse = ef + q_ >= 0.0 and _tunnel(_barrier(m, m, f_barrier), ef)
+                if fuse:
                     kin[j, 0] = (m * vx + mk * kin[j, 0]) / total
                     kin[j, 1] = (m * vy + mk * kin[j, 1]) / total
+                    g_, kicked = _unkicked(e0 - 0.5 * total * (kin[j, 0] ** 2 + kin[j, 1] ** 2), kicked)
+                    kin[j, 4] += hq + g_ + q_            # the binding energy it gives off (or takes) is heat
                     mass[j] = total
                     quad[j, 0] += q0
                     quad[j, 1] += q1
                     quad[j, 2] += q2
                     quad[j, 3] += q3
-                    if heat_share > 0.0:
-                        _shed(j, total, heat_share, w, mass, kin, quad, heat, stats)
                     mass[i] = 0
                     owner[i] = 0
                     wake_around(i, w, h, mass, flag, wrap)
@@ -717,13 +932,17 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
                     vx = kvx + (vx - kvx) * 0.5
                     vy = kvy + (vy - kvy) * 0.5
                     mass[i] = mass[j]
-                    for c in range(4):
+                    for c in range(KIN):
                         kin[i, c] = kin[j, c]
+                    for c in range(4):
                         quad[i, c] = quad[j, c]
                     shade[i] = shade[j]
                     stamp[i] = 2 * tick
                     owner[i] = owner[j]
                     wake(i, mass, flag)
+                    g_, kicked = _unkicked(e0 - 0.5 * m * (vx * vx + vy * vy) - 0.5 * mk * (kin[i, 0] ** 2 + kin[i, 1] ** 2),
+                                         kicked)
+                    hq += g_
                     mass[j] = m
                     owner[j] = own
                     i, x, y = j, nx, ny
@@ -757,7 +976,10 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
                 if give:
                     kin[j, 0] -= m * (vx - pvx) / mk
                     kin[j, 1] -= m * (vy - pvy) / mk
+                    _cap_speed(kin, j, vmax)
                     wake(j, mass, flag)
+                g_, kicked = _unkicked(_heat_loss(e0, m, vx, vy, mk, kin, j, rock, kvx, kvy), kicked)
+                hq += g_
                 moved = True
                 continue
 
@@ -772,12 +994,15 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             if give:
                 kin[j, 0] -= m * (vx - pvx) / mk
                 kin[j, 1] -= m * (vy - pvy) / mk
+                _cap_speed(kin, j, vmax)
                 wake(j, mass, flag)
+            g_, kicked = _unkicked(_heat_loss(e0, m, vx, vy, mk, kin, j, rock, kvx, kvy), kicked)
+            hq += g_
             blocked = True
             break
 
         if alive and hole[i]:                            # slid or was put into a core
-            absorbed[hole[i] - 1] += m
+            _absorb(absorbed, hole[i] - 1, m, vx, vy)
             mass[i] = 0
             owner[i] = 0
             wake_around(i, w, h, mass, flag, wrap)
@@ -792,6 +1017,7 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
         kin[i, 1] = vy
         kin[i, 2] = _clamp_offset(ox)
         kin[i, 3] = _clamp_offset(oy)
+        kin[i, 4] = hq
         quad[i, 0] = q0
         quad[i, 1] = q1
         quad[i, 2] = q2
@@ -914,7 +1140,7 @@ def step_tiles(w, h, tick, P, nx, ny, cut_x, cut_y, mass, kin, quad, shade, stam
                         n += 1
         _sort_by_key(cur, base, n, bucket, order, tick)
         counts[t] = n
-        absorbed[t, :] = 0
+        absorbed[t, :, :] = 0
         star_f[t, :, :] = 0.0
         stats[t, :] = 0
     mx, my = max(1, nx // 2), max(1, ny // 2)            # tiles per round along each axis
@@ -981,9 +1207,9 @@ def _ghost_cell(gx, gy, w, h):
 
 @njit(cache=True)
 def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, sg_block, sg_w, hole, hit, whirls,
-                 stars, sfx, sfy, s_block, s_cw, s_ch):
+                 stars, sfx, sfy, s_block, s_cw, s_ch, react):
     """Move ghosts k0 to k1 - 1 one tick (see step_ghosts). hit[k] becomes the hole number of the super well core
-    ghost k crossed (where it stopped), else 0."""
+    ghost k crossed (where it stopped), else 0. react[well] adds up the ghosts' pull back on each super well."""
     vmax = P[P_VMAX]
     drag = P[P_DRAG]
     wall_e = P[P_WALL_E]
@@ -1002,15 +1228,20 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
             b = sg_block_at(i % w, i // w, w, h, sg_block, sg_w, P[P_SG_COS], P[P_SG_SIN], ocx, ocy, wrap)
             ax += sgx[b]
             ay += sgy[b]
-        if orbit_w != 0.0:
-            ox_, oy_ = orbit_accel(gx[k] - ocx, gy[k] - ocy, gvx[k], gvy[k], orbit_w, P[P_ORBIT_GRIP],
-                                   P[P_ORBIT_VMIN])
-            ax += ox_
-            ay += oy_
         turn = carry_x = carry_y = 0.0
+        host, e_host, phi_host = -1, 0.0, 0.0
+        flx, fly = orbit_flow(gx[k] - ocx, gy[k] - ocy, orbit_w, P[P_ORBIT_VMIN]) if orbit_w != 0.0 else (0.0, 0.0)
         for j in range(whirls.shape[0]):                 # each super well's exact pull and whirlpool, and the space
             rx_, ry_ = _axis(gx[k], whirls[j, 0], w, wrap), _axis(gy[k], whirls[j, 1], h, wrap)   # it turns
             px_, py_, phi_ = _pull(-rx_, -ry_, whirls[j, 4], whirls[j, 5], P[P_REACH])
+            kw = int(whirls[j, 13])
+            react[kw, 0] -= gm[k] * px_
+            react[kw, 1] -= gm[k] * py_
+            e_ = 0.5 * ((gvx[k] - whirls[j, 9]) ** 2 + (gvy[k] - whirls[j, 10]) ** 2) + phi_
+            if orbit_w != 0.0:
+                e_ += orbit_shear(flx, fly, whirls, j)
+            if e_ < e_host:
+                host, e_host, phi_host = j, e_, phi_
             wx_, wy_, _ = whirl(rx_, ry_, gvx[k], gvy[k], whirls[j, 2], whirls[j, 3], whirls[j, 4], whirls[j, 5],
                                 P[P_WHIRL_SPEED], P[P_WHIRL_GRIP], P[P_WHIRL_INFALL], P[P_WHIRL_EDGE], P[P_REACH],
                                 whirls[j, 8], phi_)
@@ -1023,6 +1254,11 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
                 carry_x += cx_
                 carry_y += cy_
                 turn += om_
+        if orbit_w != 0.0:
+            ox_, oy_ = orbit_push(gx[k] - ocx, gy[k] - ocy, gvx[k], gvy[k], orbit_w, P[P_ORBIT_GRIP],
+                                  P[P_ORBIT_VMIN], whirls, host, bound_share(e_host, phi_host))
+            ax += ox_
+            ay += oy_
         if stars.shape[0] > 0:
             sx_, sy_, _, _ = _star_pull(gx[k], gy[k], 0, stars, sfx, sfy, s_block, s_cw, s_ch, w, h, wrap, P[P_REACH])
             ax += sx_
@@ -1063,13 +1299,22 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
 
 
 @njit(cache=True)
-def _swallow_ghosts(gm, hit, absorbed):
-    """The ghosts that crossed a core (hit) are swallowed: their mass goes to that well's absorbed and gm becomes 0.
-    Returns how many."""
+def _absorb(absorbed, k, m, vx, vy):
+    """Super well k swallows mass m moving at (vx, vy): absorbed[k] adds up the mass and momentum it swallows (the
+    well takes both on: World._collect_absorbed). Its columns 3 and 4 add up the pull of the matter on the well."""
+    absorbed[k, 0] += m
+    absorbed[k, 1] += m * vx
+    absorbed[k, 2] += m * vy
+
+
+@njit(cache=True)
+def _swallow_ghosts(gm, gvx, gvy, hit, absorbed):
+    """The ghosts that crossed a core (hit) are swallowed: their mass and momentum go to that well's absorbed and gm
+    becomes 0. Returns how many."""
     swallowed = 0
     for k in range(gm.size):
         if hit[k]:
-            absorbed[hit[k] - 1] += gm[k]
+            _absorb(absorbed, hit[k] - 1, gm[k], gvx[k], gvy[k])
             gm[k] = 0
             swallowed += 1
     return swallowed
@@ -1081,9 +1326,14 @@ def step_ghosts(gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, sg_block,
     """Move the ghosts one tick. One that crosses a super well's core is swallowed (its mass goes to absorbed[k]
     and gm becomes 0); at a solid border a ghost bounces off the edge. Returns how many were swallowed."""
     hit = np.empty(gm.size, np.int16)
-    _move_ghosts(0, gm.size, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, sg_block, sg_w, hole, hit, whirls,
-                 stars, sfx, sfy, s_block, s_cw, s_ch)
-    return _swallow_ghosts(gm, hit, absorbed)
+    chunks = min(gm.size, 256)                           # (step_ghosts_par's chunks, so its sums come out the same)
+    react = np.zeros((absorbed.shape[0], 2))
+    for c in range(chunks):
+        react[:] = 0.0
+        _move_ghosts(c * gm.size // chunks, (c + 1) * gm.size // chunks, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy,
+                     sgx, sgy, sg_block, sg_w, hole, hit, whirls, stars, sfx, sfy, s_block, s_cw, s_ch, react)
+        absorbed[:, 3:5] += react
+    return _swallow_ghosts(gm, gvx, gvy, hit, absorbed)
 
 
 @njit(cache=True, parallel=True)
@@ -1093,10 +1343,13 @@ def step_ghosts_par(gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, sg_bl
     added up afterwards in order."""
     hit = np.empty(gm.size, np.int16)
     chunks = min(gm.size, 256)
+    react = np.zeros((max(chunks, 1), absorbed.shape[0], 2))
     for c in prange(chunks):
         _move_ghosts(c * gm.size // chunks, (c + 1) * gm.size // chunks, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy,
-                     sgx, sgy, sg_block, sg_w, hole, hit, whirls, stars, sfx, sfy, s_block, s_cw, s_ch)
-    return _swallow_ghosts(gm, hit, absorbed)
+                     sgx, sgy, sg_block, sg_w, hole, hit, whirls, stars, sfx, sfy, s_block, s_cw, s_ch, react[c])
+    for c in range(chunks):                              # (in order: the same sums as step_ghosts)
+        absorbed[:, 3:5] += react[c]
+    return _swallow_ghosts(gm, gvx, gvy, hit, absorbed)
 
 
 @njit(cache=True)
@@ -1110,23 +1363,23 @@ def _add_children(i, m, quad):
 
 
 @njit(cache=True)
-def land_ghosts(gx, gy, gvx, gvy, gm, gage, life, near, patience, reach, max_mass, w, h, mass, kin, quad, shade, stamp,
+def land_ghosts(gx, gy, gvx, gvy, gm, gage, life, near, spread, reach, max_mass, w, h, mass, kin, quad, shade, stamp,
                 flag, solid, hole, wrap):
     """Ghosts at least `life` ticks old become ordinary particles where they are: in a free cell of the nearest ring
     of cells round them that has one, within `near` cells, picked at random so a crowd landing together spreads
-    evenly. With no free cell that close, one merges into the lightest particle there with room for it (under
-    max_mass; momentum and children are kept, as in a merging collision). With neither, it stays a ghost and tries
-    again next tick, and only after `patience` ticks of that does it search out to `reach` cells for a free cell -
-    so matter doesn't pop up far from where it was. Returns how many landed."""
+    evenly. With no free cell that close, one joins a particle there of its own rung, making the next one up (under
+    max_mass; momentum and children are kept) - masses come in rungs. With neither, it stays a ghost and tries
+    again next tick, looking a cell further out (up to `reach`) for every `spread` ticks it has waited - so matter
+    lands at the nearest room, not far from where it was. Returns how many landed."""
     landed = 0
     for k in range(gm.size):
         if gm[k] == 0 or gage[k] < life:
             continue
         c = _ghost_cell(gx[k], gy[k], w, h)
         cx, cy = c % w, c // w
-        far = gage[k] - life >= patience
+        out = min(reach, near + (gage[k] - life) // max(spread, 1))
         lightest = -1
-        for d in range(reach + 1 if far else near + 1):
+        for d in range(out + 1):
             found = -1
             seen = 0
             for dy in range(-d, d + 1):
@@ -1139,7 +1392,7 @@ def land_ghosts(gx, gy, gvx, gvy, gm, gage, life, near, patience, reach, max_mas
                         seen += 1
                         if np.random.randint(0, seen) == 0:  # reservoir sampling: each free cell equally likely
                             found = j
-                    elif d <= near and mass[j] + gm[k] <= max_mass and (lightest < 0 or mass[j] < mass[lightest]):
+                    elif d <= near and mass[j] == gm[k] and 2 * gm[k] <= max_mass and lightest < 0:
                         lightest = j
             if found >= 0:
                 place(found, gm[k], gvx[k], gvy[k], mass, kin, quad, shade, stamp)
@@ -1192,7 +1445,7 @@ def fly_waves(k, steps, gx, gy, gvx, gvy, gm, gage, w, h, hole, rim_mask, absorb
             if rim_mask.size and rim_mask[i] != 0:
                 edge = True
             if hole[i] > 0:
-                absorbed[hole[i] - 1] += gm[g]
+                _absorb(absorbed, hole[i] - 1, gm[g], gvx[g], gvy[g])
                 gm[g] = 0
                 swallowed += 1
                 break
@@ -1241,43 +1494,165 @@ def heat_push(gx, gy, gvx, gvy, gm, gtag, tag, coupling, min_speed, vmax, w, h, 
 
 
 @njit(cache=True)
-def star_fuse(stars, chance, light, share, max_mass, w, h, mass, kin, quad, owner, flag, heat, stats, wrap):
-    """Fusion in stars (rows of x, y, radius, k): each light particle (mass <= light) belonging to star k meets a
-    light neighbour of the same star with `chance` per tick, and the two fuse into one heavier particle (momentum
-    kept), which sheds share of their mass as heat (_shed). Returns how many fused."""
+def heat_step(w, h, mass, kin, quad, owner, flag, solid, conduct, radiate, cost, speed, rows, pool, block, fuse_on,
+              max_mass, f_bind, f_peak, f_top, f_tail, f_barrier, wrap):
+    """Heat moves (kin[:, 4]: see KIN), and touching particles fuse. Fusion: two touching particles of the same rung
+    may fuse into the next one up, by the same rule as in a collision (_advance): the energy they bring - their heat
+    and their motion against each other - against the barrier (_tunnel), and enough of it if the fusion takes energy
+    (past the peak: _binding); the binding energy it gives off is the product's heat, and so is the energy of their
+    motion against each other. So matter hot enough fuses where it lies - in a hot core, with nothing colliding.
+    Conduction: touching particles even out their temperatures (heat per unit
+    mass) by `conduct` of the difference, weighted so a light particle warms fast and a heavy one slowly - heat
+    flows, never appears. Radiation: a particle with open sides (empty cells next to it, not solid ground) loses
+    `radiate` of its heat per open side of four into pool[] - the radiation gathering in its block x block square
+    of cells - and the square sends it out as radiation, the lightest particles (mass 1), one each time it holds
+    `cost` (a heat particle's rest energy and the speed it flies off at: World.radiation_cost), from where the
+    particle that tipped it over is. (One costs far more than ordinary matter holds - mass x VMAX^2 against heat of a
+    few x its mass - so each particle sending its own never sent any.) It leaves through one of the open sides, within
+    60 degrees of straight out, at `speed` (light's), and the particle recoils with its momentum (cost / speed: E /
+    c), the energy of that recoil coming out of its heat too. Each is noted as a row of rows (x, y, direction x, y,
+    1) for World._radiate. Returns (how many rows, how many fused)."""
+    bw = (w + block - 1) // block
     fused = 0
-    for s in range(stars.shape[0]):
-        cx, cy, r, own = stars[s, 0], stars[s, 1], stars[s, 2], np.int64(stars[s, 3]) + 1
-        x0, x1, xmin = _span(cx, r, w, wrap)
-        y0, y1, ymin = _span(cy, r, h, wrap)
-        for yy in range(y0, y1):
-            for xx in range(x0, x1):
-                i = (yy % h) * w + xx % w
-                if owner[i] != own or mass[i] == 0 or mass[i] > light or np.random.random() >= chance:
-                    continue
-                start = np.random.randint(0, 8)
-                for q in range(8):
-                    d = (start + q) % 8
-                    j = _cell(xx % w + DX[d], yy % h + DY[d], w, h, wrap)
-                    if j < 0 or owner[j] != own or mass[j] == 0 or mass[j] > light:
-                        continue
-                    mi, mj = np.int64(mass[i]), np.int64(mass[j])
-                    total = mi + mj
-                    if total > max_mass:
-                        break
-                    kin[i, 0] = (mi * kin[i, 0] + mj * kin[j, 0]) / total
-                    kin[i, 1] = (mi * kin[i, 1] + mj * kin[j, 1]) / total
+    n = 0
+    for i in range(w * h):
+        if mass[i] == 0:
+            continue
+        m = np.float64(mass[i])
+        x, y = i % w, i // w
+        for d in range(2):                               # right and down: each touching pair once
+            j = _cell(x + 1, y, w, h, wrap) if d == 0 else _cell(x, y + 1, w, h, wrap)
+            if j < 0 or mass[j] == 0:
+                continue
+            mj = np.float64(mass[j])
+            f = conduct * (kin[i, 4] / m - kin[j, 4] / mj) * m * mj / (m + mj)
+            kin[i, 4] -= f
+            kin[j, 4] += f
+            if fuse_on and mass[j] == mass[i] and 2 * mass[i] <= max_mass and _rung(mass[i]) >= 0:
+                dvx, dvy = np.float64(kin[i, 0] - kin[j, 0]), np.float64(kin[i, 1] - kin[j, 1])
+                u2 = dvx * dvx + dvy * dvy
+                ef = _fuse_energy(m, m, u2, kin[i, 4], kin[j, 4])
+                q = _binding(2 * mass[i], f_bind, f_peak, f_top, f_tail) - 2.0 * _binding(mass[i], f_bind, f_peak,
+                                                                                         f_top, f_tail)
+                if ef + q >= 0.0 and _tunnel(_barrier(m, m, f_barrier), ef):
+                    kin[i, 0] = 0.5 * (kin[i, 0] + kin[j, 0])
+                    kin[i, 1] = 0.5 * (kin[i, 1] + kin[j, 1])
+                    kin[i, 4] += kin[j, 4] + 0.25 * m * u2 + q   # (their motion against each other: m/2 x u2/2)
                     for c in range(4):
                         quad[i, c] += quad[j, c]
-                    mass[i] = total
+                    mass[i] = 2 * mass[i]
+                    m = 2.0 * m
                     _clear(j, mass, kin, quad)
                     owner[j] = 0
-                    _shed(i, total, share, w, mass, kin, quad, heat, stats)
                     wake(i, mass, flag)
                     wake_around(j, w, h, mass, flag, wrap)
                     fused += 1
-                    break
-    return fused
+        if radiate <= 0.0 or kin[i, 4] <= 0.0:
+            continue
+        sides = 0
+        for d in range(4):
+            j = _cell(x + DX4[d], y + DY4[d], w, h, wrap)
+            if j >= 0 and mass[j] == 0 and not solid[j]:
+                sides += 1
+        if sides == 0:
+            continue
+        lost = radiate * 0.25 * sides * kin[i, 4]
+        kin[i, 4] -= lost
+        b = (y // block) * bw + x // block
+        pool[b] += lost
+        while pool[b] >= cost and n < rows.shape[0]:
+            pick = np.random.randint(0, sides)          # which open side it leaves through
+            for d in range(4):
+                j = _cell(x + DX4[d], y + DY4[d], w, h, wrap)
+                if j >= 0 and mass[j] == 0 and not solid[j]:
+                    if pick == 0:
+                        break
+                    pick -= 1
+            a = (2.0 * np.random.random() - 1.0) * np.pi / 3.0
+            ex = DX4[d] * np.cos(a) - DY4[d] * np.sin(a)
+            ey = DX4[d] * np.sin(a) + DY4[d] * np.cos(a)
+            rows[n, 0] = x
+            rows[n, 1] = y
+            rows[n, 2] = ex
+            rows[n, 3] = ey
+            rows[n, 4] = 1.0
+            n += 1
+            pool[b] -= cost
+            vx, vy = np.float64(kin[i, 0]), np.float64(kin[i, 1])
+            nvx, nvy = vx - cost / speed * ex / m, vy - cost / speed * ey / m      # the recoil
+            kin[i, 0], kin[i, 1] = nvx, nvy
+            kin[i, 4] -= 0.5 * m * (nvx * nvx + nvy * nvy - vx * vx - vy * vy)
+    return n, fused
+
+
+@njit(cache=True)
+def radiation_step(gx, gy, gvx, gvy, gm, gtag, tag, quantum, w, h, mass, kin, flag, cx, cy, radius, wrap, recycle):
+    """Radiation (ghosts tagged `tag`: energy only, gm quanta of `quantum` each - see World._radiate) after it has
+    moved this tick: the first particle along its way this tick takes it in - its momentum (gm x quantum / its speed,
+    E / c) and the rest of its energy as heat - and it is gone. Reaching the universe's edge (the circle of `radius`
+    round (cx, cy); radius 0: the window's border, unless it wraps, when there is none), it is gone too - or, with
+    `recycle`, comes back in at a random point of the edge, heading inwards (within 60 degrees of straight in) as
+    fast, so the universe keeps its energy. Returns (how many were taken in, how many quanta left the universe)."""
+    taken = 0
+    lost = 0
+    for k in range(gm.size):
+        if gtag[k] != tag or gm[k] == 0:
+            continue
+        sp = np.sqrt(gvx[k] * gvx[k] + gvy[k] * gvy[k])
+        n = max(1, int(np.ceil(sp)))
+        hit = -1
+        for t in range(1, n + 1):                        # along this tick's way (not where it started)
+            px = gx[k] - gvx[k] * (n - t) / n
+            py = gy[k] - gvy[k] * (n - t) / n
+            if wrap:
+                px, py = px % w, py % h
+            c = _ghost_cell(px, py, w, h)
+            if mass[c] > 0:
+                hit = c
+                break
+        if hit >= 0:
+            mt = np.float64(mass[hit])
+            e = gm[k] * quantum
+            vx, vy = np.float64(kin[hit, 0]), np.float64(kin[hit, 1])
+            p = e / max(sp, 1e-9)
+            nvx, nvy = vx + p * gvx[k] / max(sp, 1e-9) / mt, vy + p * gvy[k] / max(sp, 1e-9) / mt
+            kin[hit, 0], kin[hit, 1] = nvx, nvy
+            kin[hit, 4] += e - 0.5 * mt * (nvx * nvx + nvy * nvy - vx * vx - vy * vy)
+            wake(hit, mass, flag)
+            gm[k] = 0
+            taken += 1
+            continue
+        if wrap:
+            continue
+        if radius > 0.0:
+            out = (gx[k] - cx) ** 2 + (gy[k] - cy) ** 2 >= (radius - 0.5) ** 2
+        else:
+            out = gx[k] <= 0.0 or gx[k] >= w - 1.0 or gy[k] <= 0.0 or gy[k] >= h - 1.0
+        if not out:
+            continue
+        if not recycle:
+            lost += gm[k]
+            gm[k] = 0
+            continue
+        if radius > 0.0:                                 # back in from a random point of the rim
+            th = np.random.random() * 2.0 * np.pi
+            nx, ny = -np.cos(th), -np.sin(th)
+            gx[k] = cx + (radius - 1.5) * np.cos(th)
+            gy[k] = cy + (radius - 1.5) * np.sin(th)
+        else:                                            # ... or of the window's border
+            u = np.random.random() * 2.0 * (w + h)
+            if u < w:
+                gx[k], gy[k], nx, ny = u, 0.5, 0.0, 1.0
+            elif u < 2 * w:
+                gx[k], gy[k], nx, ny = u - w, h - 1.5, 0.0, -1.0
+            elif u < 2 * w + h:
+                gx[k], gy[k], nx, ny = 0.5, u - 2 * w, 1.0, 0.0
+            else:
+                gx[k], gy[k], nx, ny = w - 1.5, u - 2 * w - h, -1.0, 0.0
+        a = (2.0 * np.random.random() - 1.0) * np.pi / 3.0
+        gvx[k] = sp * (nx * np.cos(a) - ny * np.sin(a))
+        gvy[k] = sp * (nx * np.sin(a) + ny * np.cos(a))
+    return taken, lost
 
 
 @njit(cache=True)
@@ -1385,7 +1760,10 @@ def mark_holes(cores, w, h, hole, mass, kin, quad, flag, absorbed, wrap):
     for k in range(cores.shape[0]):
         idx = int(cores[k, 0])
         cx, cy, r = cores[k, 1], cores[k, 2], cores[k, 3]
-        absorbed[idx] += absorb_disk(cx, cy, r, w, h, mass, kin, quad, flag, wrap)[0]
+        m_, px_, py_, _ = absorb_disk(cx, cy, r, w, h, mass, kin, quad, flag, wrap)
+        absorbed[idx, 0] += m_
+        absorbed[idx, 1] += px_
+        absorbed[idx, 2] += py_
         _mark_disk(cx, cy, r, w, h, wrap, hole, idx + 1)
 
 
@@ -1430,8 +1808,9 @@ def mark_solid(bodies, w, h, solid, gvx, gvy, mass, kin, quad, shade, stamp, fla
                         break                            # nowhere to go: it stays stuck inside
                     if not solid[j] and mass[j] == 0:
                         mass[j] = mass[i]
-                        for c in range(4):
+                        for c in range(KIN):
                             kin[j, c] = kin[i, c]
+                        for c in range(4):
                             quad[j, c] = quad[i, c]
                         kin[j, 2] = 0.0
                         kin[j, 3] = 0.0
@@ -1848,8 +2227,9 @@ def star_sink(stars, chance, w, h, mass, kin, quad, shade, stamp, owner, wrap):
                 mass[i], mass[j] = mass[j], mass[i]
                 shade[i], shade[j] = shade[j], shade[i]
                 stamp[i], stamp[j] = stamp[j], stamp[i]
-                for c in range(4):
+                for c in range(KIN):
                     kin[i, c], kin[j, c] = kin[j, c], kin[i, c]
+                for c in range(4):
                     quad[i, c], quad[j, c] = quad[j, c], quad[i, c]
                 swaps += 1
     return swaps
@@ -2315,10 +2695,13 @@ def damp_star(idx, x, y, damping, lock, w, h, mass, kin, wrap):
         om = _pairwise_sum(t) / inertia
     if lock:
         om = 0.0
+    keep2 = 1.0 - (1.0 - damping) ** 2
     for j in range(n):                                 # (from the values read above: a cell listed twice gets the
         i = idx[j]                                     #   same, as numpy's fancy -= gave it)
-        kin[i, 0] = np.float32(vx[j] - damping * ((vx[j] - ux) + om * dy[j]))
-        kin[i, 1] = np.float32(vy[j] - damping * ((vy[j] - uy) - om * dx[j]))
+        jx, jy = (vx[j] - ux) + om * dy[j], (vy[j] - uy) - om * dx[j]
+        kin[i, 0] = np.float32(vx[j] - damping * jx)
+        kin[i, 1] = np.float32(vy[j] - damping * jy)
+        kin[i, 4] += np.float32(0.5 * m[j] * (jx * jx + jy * jy) * keep2)   # the jostling it calms becomes heat
 
 
 @njit(cache=True)
@@ -2440,7 +2823,7 @@ def star_shift(k, sx, sy, cx, cy, r, e, wall_e, w, h, mass, kin, quad, shade, st
             continue
         j = y * w + x
         if hole[j]:
-            absorbed[hole[j] - 1] += mass[i]
+            _absorb(absorbed, hole[j] - 1, mass[i], kin[i, 0], kin[i, 1])
             _clear(i, mass, kin, quad)
             owner[i] = 0
             wake_around(i, w, h, mass, flag, wrap)
@@ -2710,7 +3093,7 @@ def carry_blobs(occupied, labels, moves, e, wall_e, w, h, mass, kin, quad, shade
                     continue
                 j = y * w + x
                 if hole[j]:
-                    absorbed[hole[j] - 1] += mass[i]
+                    _absorb(absorbed, hole[j] - 1, mass[i], kin[i, 0], kin[i, 1])
                     _clear(i, mass, kin, quad)
                     labels[i] = 0
                     wake_around(i, w, h, mass, flag, wrap)
@@ -2736,8 +3119,9 @@ def carry_blobs(occupied, labels, moves, e, wall_e, w, h, mass, kin, quad, shade
                             flag[j] = 1
                     continue
                 mass[j] = mass[i]
-                for c in range(4):
+                for c in range(KIN):
                     kin[j, c] = kin[i, c]
+                for c in range(4):
                     quad[j, c] = quad[i, c]
                 shade[j] = shade[i]
                 stamp[j] = stamp[i]
@@ -2776,6 +3160,11 @@ def _render_cell(i, mode, mass, kin, quad, flag, mass_lut, heat_lut, shade_mul, 
         rgb[i, 0] = int(128.0 + 120.0 * lx)
         rgb[i, 1] = int(150.0 - 50.0 * (abs(lx) + abs(ly)))
         rgb[i, 2] = int(128.0 + 120.0 * ly)
+    elif mode == 4:                                      # heat: as hot as its heat per unit mass would be fast
+        s = np.sqrt(2.0 * max(np.float64(kin[i, 4]), 0.0) / m) / vmax
+        idx = min(255, int(s * 255.0))
+        for c in range(3):
+            rgb[i, c] = heat_lut[idx, c]
     elif flag[i]:
         rgb[i, 0] = 240
         rgb[i, 1] = 190

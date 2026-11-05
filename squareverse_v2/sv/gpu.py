@@ -182,7 +182,7 @@ fn cells(@builtin(global_invocation_id) id: vec3<u32>) {
 """
 
 # gp: see Gpu.step_ghosts. aux: the self-gravity mesh (x then y), the stars' block field (x then y), the whirlpools
-# (rows of 6) and the stars (rows of 5), at the offsets gp gives.
+# (rows of 16: World.whirls) and the stars (rows of 5), at the offsets gp gives.
 GHOSTS = COMMON + """
 @group(0) @binding(0) var<storage, read> gp: array<f32>;
 @group(0) @binding(1) var<storage, read> aux: array<f32>;
@@ -206,6 +206,13 @@ fn orbit_accel(rx: f32, ry: f32, vx: f32, vy: f32, om: f32, grip: f32, vmin: f32
     let vt = max(vx * tx + vy * ty, 0.0);
     let c = vt * vt / r;
     return vec2<f32>(-c * rx / r + grip * (target_ * tx - vx), -c * ry / r + grip * (target_ * ty - vy));
+}
+
+fn orbit_flow(rx: f32, ry: f32, om: f32, vmin: f32) -> vec2<f32> {
+    let r2 = rx * rx + ry * ry;
+    if (r2 < 0.25) { return vec2<f32>(0.0); }
+    let k = sqrt(om * om * r2 + vmin * vmin) / sqrt(r2) * select(-1.0, 1.0, om > 0.0);
+    return vec2<f32>(-ry * k, rx * k);
 }
 
 fn whirl(rx: f32, ry: f32, vx: f32, vy: f32, o: i32, kinv: f32, phi: f32) -> vec2<f32> {
@@ -299,14 +306,21 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
         let b = (clamp(i32(sy), 0, ih - 1) / blk) * sw + clamp(i32(sx), 0, iw - 1) / blk;
         a += vec2<f32>(aux[b], aux[i32(gp[25]) + b]);
     }
-    if (gp[7] != 0.0) {
-        a += orbit_accel(g.x - gp[10], g.y - gp[11], g.z, g.w, gp[7], gp[8], gp[9]);
-    }
     var turn = 0.0; var carry = vec2<f32>(0.0);
+    var host = -1; var e_host = 0.0; var phi_host = 0.0;   // the super well it is most tightly bound to (orbit_push)
+    var fl = vec2<f32>(0.0);
+    if (gp[7] != 0.0) { fl = orbit_flow(g.x - gp[10], g.y - gp[11], gp[7], gp[9]); }
     for (var j = 0; j < i32(gp[19]); j++) {      // each super well's exact pull and whirlpool, and the space it turns
-        let o = i32(gp[27]) + j * 9;
+        let o = i32(gp[27]) + j * 16;
         let rx = axis(g.x, aux[o], w, wrap); let ry = axis(g.y, aux[o + 1], h, wrap);
         let p = pull(-rx, -ry, aux[o + 4], aux[o + 5], kinv);
+        let dvx = g.z - aux[o + 9]; let dvy = g.w - aux[o + 10];
+        var e = 0.5 * (dvx * dvx + dvy * dvy) + p.z;
+        if (gp[7] != 0.0) {                      // kernels.orbit_shear
+            let df = fl - vec2<f32>(aux[o + 14], aux[o + 15]);
+            e += 0.5 * dot(df, df);
+        }
+        if (e < e_host) { host = o; e_host = e; phi_host = p.z; }
         a += p.xy + whirl(rx, ry, g.z, g.w, o, kinv, p.z);
         let om = frame_turn(rx, ry, o, kinv, vmax);
         if (om != 0.0) {
@@ -314,6 +328,14 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
             carry += vec2<f32>(c * rx - s * ry - rx, s * rx + c * ry - ry);
             turn += om;
         }
+    }
+    if (gp[7] != 0.0) {                          // kernels.orbit_push: bound to a super well, it gets that well's push
+        var share = 0.0;                         // kernels.bound_share
+        if (host >= 0 && phi_host < 0.0) { share = 1.0; }
+        var o_ = vec2<f32>(0.0);
+        if (share < 1.0) { o_ = orbit_accel(g.x - gp[10], g.y - gp[11], g.z, g.w, gp[7], gp[8], gp[9]); }
+        if (host >= 0) { o_ += share * (vec2<f32>(aux[host + 11], aux[host + 12]) - o_); }
+        a += o_;
     }
     if (gp[20] > 0.0) {
         a += star_pull(g.x, g.y, w, h, wrap, kinv);
@@ -461,6 +483,7 @@ class Gpu:
             self._upload("hole", hole.astype(np.int32))
             self.hole_key = hole_key
         nsg, nsf = sgx.size, sfx.size
+        # (the shader doesn't add up the ghosts' pull back on the super wells, absorbed[:, 3:5], as the CPU does)
         aux = np.concatenate([sgx, sgy, sfx, sfy, whirls.ravel(), stars.ravel()]).astype(np.float32)
         gp = np.array([w, h, P[k.P_VMAX], P[k.P_DRAG], P[k.P_WALL_E], P[k.P_WRAP], P[k.P_SG_ON], P[k.P_ORBIT_W],
                        P[k.P_ORBIT_GRIP], P[k.P_ORBIT_VMIN], P[k.P_ORBIT_CX], P[k.P_ORBIT_CY], P[k.P_WHIRL_SPEED],
@@ -478,7 +501,7 @@ class Gpu:
         self._read("gstate", hit)
         gx[:], gy[:], gvx[:], gvy[:] = state[:, 0], state[:, 1], state[:, 2], state[:, 3]
         gage[gm != 0] += 1
-        return k._swallow_ghosts(gm, hit.astype(np.int16), absorbed)
+        return k._swallow_ghosts(gm, gvx, gvy, hit.astype(np.int16), absorbed)
 
 
 class Chooser:
