@@ -122,6 +122,8 @@ INFO = {
                  "then a burst as they merge that fades as the merged core settles. Radiation and waves are energy "
                  "only - they never land as matter: the first particle they meet takes them in as heat (and a push), "
                  "and a super well that swallows them gains their mass.",
+    "show_radiation": "Draw the radiation particles (pale blue). Off, they are only hidden: they still fly, push, "
+                      "heat and are taken in exactly as before. Saves a little drawing time when there is a lot of it.",
     "recycle": "Radiation reaching the universe's edge comes back in from a random point of it, heading inwards, so "
                "the universe keeps all its energy. Off, it is gone for good (the note counts how much). Turn it off "
                "if radiation builds up faster than matter takes it in.",
