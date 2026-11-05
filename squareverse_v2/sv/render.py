@@ -642,18 +642,13 @@ class Renderer:
             (f"{kind}   mass {wl.mass:,.0f}   cell ({wl.x:.0f}, {wl.y:.0f})", config.FG),
             (f"v ({wl.vx:+.3f}, {wl.vy:+.3f})" + ("" if wl.is_super else f"   mobility {wl.mobility():.3f}"),
              config.FG),
-            (f"no return {world.horizon(wl):.0f} cells   whirlpool {world.well_range(wl):.0f}   drags space "
-             f"{world.reach(wl):.0f}   spin {abs(wl.spin):.2f} (; / ') "
+            (f"core {wl.core():.1f}   no return {world.horizon(wl):.0f}   space faster than matter "
+             f"{world.well_range(wl):.0f} cells   spin {abs(wl.spin):.2f} of the most (; / ') "
              f"{'clockwise' if wl.spin > 0 else 'counterclockwise'}" if wl.is_super else
              f"spin {abs(wl.omega) * config.FPS:.2f} rad/s {'clockwise' if wl.omega > 0 else 'counterclockwise'}   "
              f"reach {world.reach(wl):.0f} cells", config.DIM),
         ]
-        pair = next((bn for bn in world.binaries if wl is bn.a or wl is bn.b), None)
-        if pair:
-            other = pair.b if wl is pair.a else pair.a
-            lines.append((f"spiralling in: {world.distance(wl.x, wl.y, other.x, other.y):.0f} cells apart, "
-                          f"circling {pair.omega * config.FPS / (2 * math.pi):.2f} times a second", config.DIM))
-        elif wl.ring:
+        if wl.ring:
             lines.append(("ringing down after a merger", config.DIM))
         self.panel(lines, (pos[0] + 16, pos[1] + 16), self.small)
 

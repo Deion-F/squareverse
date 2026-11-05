@@ -215,41 +215,14 @@ fn orbit_flow(rx: f32, ry: f32, om: f32, vmin: f32) -> vec2<f32> {
     return vec2<f32>(-ry * k, rx * k);
 }
 
-fn whirl(rx: f32, ry: f32, vx: f32, vy: f32, o: i32, kinv: f32, phi: f32) -> vec2<f32> {
-    let reach = aux[o + 2]; let spin = aux[o + 3]; let strength = aux[o + 4]; let soft = aux[o + 5];
-    let d2 = rx * rx + ry * ry;
-    if (d2 >= reach * reach || d2 < 1e-6) { return vec2<f32>(0.0); }
-    let d = sqrt(d2);
-    let rim = min(1.0, (1.0 - d / reach) / max(gp[15], 1e-9));
-    let s2 = d2 + soft * soft;
-    let orbital = sqrt(strength * d2 / (s2 * sqrt(s2)) * fade(sqrt(s2), kinv).x);
-    let fling = select(1.0, max(1.0, abs(spin)), d < aux[o + 8]);   // it only flings within its point of no return
-    let target_ = min(abs(spin) * gp[12], gp[14] * orbital * fling) * rim * select(-1.0, 1.0, spin >= 0.0);
-    let tx = -ry / d; let ty = rx / d;
-    let vt = vx * tx + vy * ty;
-    var a = gp[13] * rim * (target_ - vt);
-    let nvt = vt + a;
-    if (nvt * nvt > vt * vt) {                   // speeding it up: never so far it could get away (kernels.whirl)
-        let room = -2.0 * (phi + gp[33]) - (vx * vx + vy * vy - vt * vt);
-        if (room <= vt * vt) { a = 0.0; }
-        else if (nvt * nvt > room) { a = sqrt(room) * select(-1.0, 1.0, nvt >= 0.0) - vt; }
-    }
-    return vec2<f32>(a * tx, a * ty);
-}
-
-// kernels.frame_turn: how fast a super well turns space round here (rad/tick)
+// kernels.frame_turn: how fast a super well turns space round here (rad/tick): 2 G J / c^2 / rho^3, faded
 fn frame_turn(rx: f32, ry: f32, o: i32, kinv: f32, vmax: f32) -> f32 {
-    let share = aux[o + 6]; let reach = aux[o + 7]; let strength = aux[o + 4]; let soft = aux[o + 5];
+    let jterm = aux[o + 6]; let reach = aux[o + 7]; let soft = aux[o + 5];
     let d2 = rx * rx + ry * ry;
-    if (share == 0.0 || d2 >= reach * reach) { return 0.0; }
-    let s2 = d2 + soft * soft;
-    let rho = sqrt(s2);
-    let d = sqrt(d2);
-    let band = aux[o + 2] * gp[15];             // the whirlpool takes over within its range
-    let om = share * sqrt(strength / (s2 * rho) * fade(rho, kinv).x)
-             * min(1.0, (1.0 - d / reach) / max(gp[31], 1e-9))
-             * clamp((d - aux[o + 2] + band) / max(band, 1e-9), 0.0, 1.0);
-    let cap = select(vmax / d, gp[32], d * gp[32] <= vmax);
+    if (jterm == 0.0 || d2 >= reach * reach) { return 0.0; }
+    let rho = sqrt(d2 + soft * soft);
+    let om = jterm * fade(rho, kinv).x / (rho * rho * rho);
+    let cap = vmax / max(sqrt(d2), 1e-9);
     return clamp(om, -cap, cap);
 }
 
@@ -321,7 +294,7 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
             e += 0.5 * dot(df, df);
         }
         if (e < e_host) { host = o; e_host = e; phi_host = p.z; }
-        a += p.xy + whirl(rx, ry, g.z, g.w, o, kinv, p.z);
+        a += p.xy;
         let om = frame_turn(rx, ry, o, kinv, vmax);
         if (om != 0.0) {
             let c = cos(om); let s = sin(om);
@@ -349,7 +322,12 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
         vx = tvx;
     }
     var v = sqrt(vx * vx + vy * vy);
-    if (v > vmax) {
+    let s0 = length(g.zw);                       // faster than vmax: light, which keeps its speed (kernels._move_ghosts)
+    if (s0 > vmax * (1.0 + 1e-6)) {
+        vx *= s0 / max(v, 1e-12);
+        vy *= s0 / max(v, 1e-12);
+        v = s0;
+    } else if (v > vmax) {
         vx *= vmax / v;
         vy *= vmax / v;
         v = vmax;
@@ -501,7 +479,7 @@ class Gpu:
         self._read("gstate", hit)
         gx[:], gy[:], gvx[:], gvy[:] = state[:, 0], state[:, 1], state[:, 2], state[:, 3]
         gage[gm != 0] += 1
-        return k._swallow_ghosts(gm, gvx, gvy, hit.astype(np.int16), absorbed)
+        return k._swallow_ghosts(gx, gy, gm, gvx, gvy, hit.astype(np.int16), absorbed)
 
 
 class Chooser:

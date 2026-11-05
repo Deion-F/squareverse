@@ -16,7 +16,6 @@ from sv.world import World
 def make_world(seed=1, pw=400, ph=320, cell=2, cores=True):
     w = World(pw, ph, cell, seed=seed)
     w.collapse_on = False
-    w.spin_follows_mass = False
     if cores:
         w.accelerate(cores=True)
     return w
@@ -108,7 +107,7 @@ def test_parallel_ghosts_match_one_core():
     w._star_field()
     g = (w.ghost_x, w.ghost_y, w.ghost_vx, w.ghost_vy, w.ghost_m, w.ghost_age)
     a, b = [x.copy() for x in g], [x.copy() for x in g]
-    absorbed = [np.zeros((len(w.wells), 5)) for _ in range(2)]
+    absorbed = [np.zeros((len(w.wells), 6)) for _ in range(2)]
     swallowed = []
     for state, ab, fn in ((a, absorbed[0], kernels.step_ghosts), (b, absorbed[1], kernels.step_ghosts_par)):
         for _ in range(60):
@@ -195,7 +194,7 @@ def test_gpu_ghosts_match_the_cpu(device):
     a, b = [x.copy() for x in g], [x.copy() for x in g]
     rest = (w.w, w.h, params, w.fx, w.fy, w.sg.gx, w.sg.gy, w.sg.block, w.sg.cw, w.hole)
     tail = (whirls, w.star_pulls, w.sfx, w.sfy, config.STAR_FIELD_BLOCK, w.scw, w.sch)
-    absorbed = [np.zeros((len(w.wells), 5)) for _ in range(2)]
+    absorbed = [np.zeros((len(w.wells), 6)) for _ in range(2)]
     kernels.step_ghosts(*a, *rest, absorbed[0], *tail)
     device.step_ghosts(*b, *rest, absorbed[1], *tail)
     assert np.abs(a[0] - b[0]).max() < 1e-3 and np.abs(a[1] - b[1]).max() < 1e-3

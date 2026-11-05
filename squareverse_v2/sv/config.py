@@ -82,7 +82,13 @@ GHOST_LAND_SPREAD = 2                  #   looking a cell further out every this
                                        #   packed pile of other rungs it lands at the nearest room, not far away)
 
 # --- Motion ------------------------------------------------------------------
-VMAX = 8.0                             # cells / tick
+VMAX = 8.0                             # cells / tick: the fastest matter can move
+LIGHT_SPEED = 24.0                     # cells / tick: the speed of light - radiation's speed, rest energy mass x this^2,
+                                       #   and a super well's core is where even light can't get away (smaller than
+                                       #   where matter can't: VMAX). Faster than any matter, so a black hole is far more
+                                       #   compact than a star as heavy (it pulls alike: the same mass). At reach 60 /
+                                       #   strength 1.2 a super well's core is 1.3 cells at 200k, 7.5 at 1M, 43 at 10M
+                                       #   (16: 3.5, 15, 60; 32: 0.8, 4.3, 31)
 MAX_STEPS = 8                          # cell moves per tick
 WALL_E = 0.3                           # restitution against the window edge
 RESTITUTION = 0.2                      # restitution between particles
@@ -112,8 +118,8 @@ LEAN = 0.002                           #   particles it is a random push compara
 # so hotter matter fuses more often and heavier rungs need it hotter. Nothing else decides when they fuse.
 MERGE_ON = True                        # fusion (M)
 SPLIT_ON = True                        # fission: a hard enough hit breaks a particle into two of the rung below (P)
-FUSION_BINDING = 0.05                  # binding energy per unit of mass at the peak, as a share of VMAX^2 (the rest
-                                       #   energy): 3.2 per unit of mass. The curve to it is 1 - (1 - rung / peak rung)^2
+FUSION_BINDING = 0.0056                # binding energy per unit of mass at the peak, as a share of LIGHT_SPEED^2 (the
+                                       #   rest energy): 3.2 per unit of mass. The curve to it is 1 - (1 - rung / peak rung)^2
 FUSION_PEAK = 256                      # the most tightly bound rung: fusing up to it gives off energy, past it takes it
 FUSION_TAIL = 0.15                     # past the peak the binding per unit of mass falls by this share by MAX_MASS
 FUSION_BARRIER = 9.0                   # the barrier two particles of masses a and b must get over: this x a b /
@@ -155,7 +161,7 @@ GRAVITY_DIR = None                     # starting global gravity: None or down, 
 GRAVITY_SCALE = 1.2                    # starting strength of all gravity (< / >): strong up close ...
 G = 0.002                              # gravitational constant: particles, wells and super wells all pull with
                                        #   accel = G * mass * r / (r^2 + soft^2)^1.5, in full out to the softened
-GRAVITY_REACH = 30.0                   #   distance R (this many cells; ... but short: in a universe this small a long
+GRAVITY_REACH = 60.0                   #   distance R (this many cells; ... but short: in a universe this small a long
                                        #   reach gathers a supernova's debris into a few big clumps whose stars all
                                        #   merge, while 30 leaves ~40 separate stars), then fading smoothly to nothing at 2 R
                                        #   (kernels.fade), so things must come close to interact and further apart
@@ -275,93 +281,51 @@ BLOB_MAX_RADIUS = 25.0                 #   by the global orbit as a whole; one m
                                        #   gyration, cells: a long arc, say) is left to move a particle at a time
 
 # --- Super wells (collapse) --------------------------------------------------
-COLLAPSE_ON = True                     # shift+B
-COLLAPSE_MASS = 240000                 # mass in a COLLAPSE_BLOCKS x COLLAPSE_BLOCKS block window that collapses,
-COLLAPSE_BLOCKS = 5                    #   divided by the gravity scale (blocks are SG_BLOCK cells: 20 x 20 cells):
-                                       #   200k at the default strength. It is also the lightest a super well can be
-                                       #   and the heaviest a star can be - one that reaches it collapses into a super
-                                       #   well (World._collapse_heavy_stars) - so stars are always lighter
-COLLAPSE_EVERY = 8                     # ticks between collapse checks
-STAR_COLLAPSE_FACTOR = 4.0             # a star's own particles count this many times less in the collapse check, so a
-STAR_COLLAPSE_RANGE = (1.0, 20.0)      #   star becomes a super well only if this many times denser than loose matter
-                                       #   must be (the menu's Stars collapse at, between these)
-STAR_COLLAPSE_WARN = 0.7               # the Star tool's brush turns amber when its star would hold this share of that
+COLLAPSE_ON = True                     # shift+B. Matter inside its own horizon - the mass within some distance of a spot
+                                       #   so much that the speed it takes to get away from there reaches VMAX - collapses
+                                       #   into a super well (World.check_collapse): stars and loose matter alike, set by
+                                       #   gravity's strength and reach and VMAX alone
+COLLAPSE_EVERY = 8                     # ticks between collapse checks ...
+COLLAPSE_SPOTS = 8                     #   ... round every star heavy enough and this many of the densest spots of loose
+                                       #   matter (where to look; not what collapses)
+STAR_COLLAPSE_WARN = 0.7               # the Star and Pour tools' brush turns amber when what it places would hold this
+                                       #   share of the mass that collapses (World.placement_collapse)
 SUPER_RANGE_ACCEL = 0.01               # a well's reach: where its pull drops below this
-SUPER_RANGE_FACTOR = 0.25              # a super well's range (the faint circle) is this x its reach: it spins
-                                       #   space round within it, and overlapping ranges merge. Its pull goes on
-SUPER_SOFTENING = 0.25                 # its pull is softened over this share of its range (as it would be if
-                                       #   gravity reached all the way: GRAVITY_REACH), so infalling particles
-                                       #   keep their sideways motion (under VMAX) and can miss the core or orbit
-SUPER_CORE = 0.75                      # absorbing core radius (cells) = SUPER_CORE + SUPER_CORE_GROWTH * sqrt(mass)
-SUPER_CORE_GROWTH = 0.002
-SUPER_SWIRL_SPEED = 20.0               # a spinning super well whirls everything inside its range: sideways speed
-SUPER_SWIRL_GRIP = 0.25                #   is driven towards spin x this, gripped this hard (per tick), all the way
-SUPER_SWIRL_EDGE = 0.15                #   out, fading in only over this outer share of the range. Inside, nothing
-                                       #   sleeps or rests on friction: it moves unless matter blocks the way
-SUPER_SWIRL_INFALL = 0.98              # ...but never faster than this share of the speed that would hold it in
-                                       #   orbit there (x its spin above 1), so whirling matter still spirals in;
-                                       #   a well spun up past 1 flings matter out into a ring instead
-SUPER_DRAG = 0.35                      # a spinning super well drags space itself round (frame dragging), out to its
-SUPER_DRAG_MAX = 0.7                   #   reach (where its pull drops to SUPER_RANGE_ACCEL): space there turns at
-SUPER_DRAG_EDGE = 0.5                  #   this x its spin (at most SUPER_DRAG_MAX) of the angular speed something
-SUPER_DRAG_TURN_MAX = 0.25             #   circling there has, fading out over this outer share of the reach, never
-                                       #   faster than this (rad/tick) nor carrying anything faster than VMAX.
-                                       #   Everything in it is carried round - where it is and which way it is
-                                       #   heading, turned together - so nothing is sped up, but what falls in
-                                       #   spirals in the way the well spins instead of falling straight. Within
-                                       #   its range its whirlpool takes over (across SUPER_SWIRL_EDGE)
-SUPER_WHIRL_COLOR = (90, 80, 120)     # its whirlpool's range (a faint circle; its point of no return is dotted)
-SUPER_SPIN_NATURAL = 0.5               # spin of a super well formed by collapse (which way: see SUPER_SPIN_PLACED);
-                                       #   low, so a light well barely stirs what orbits it (it rises with mass)
-SUPER_SPIN_MAX = 7.0                   # ; / ' spin the nearest super well down / up by SUPER_SPIN_STEP, up to this
+SUPER_SOFTENING = 1.0                  # cells its pull is softened over: a point, as a black hole is (only to keep the
+                                       #   numbers sane; what is within its horizon is swallowed anyway)
+SUPER_CORE = 0.75                      # a super well's core is its horizon (World.edge_for_mass: where the speed it takes
+                                       #   to get away reaches LIGHT_SPEED), at least this (cells)
+# A super well spins with the angular momentum it holds (World.max_spin_j: at most G M^2 / c, spin 1) - of what collapsed
+# into it, what it swallows and what merges into it - and drags space round that way (frame dragging: 2 G J / c^2 /
+# r^3, kernels.frame_turn), so what falls in spirals in. Its faint circle is where space moves faster than matter can.
+SUPER_WHIRL_COLOR = (90, 80, 120)      # its faint circle (where space moves faster than matter can; its point of no
+                                       #   return for matter is dotted)
+SUPER_SPIN_MAX = 1.0                   # the most a super well can spin (the most angular momentum a black hole can hold)
 SUPER_SPIN_PLACED = 0.5                # spin of a super well placed with B; new ones spin with the global orbit,
-                                       #   or either way at random when it is off
-SUPER_SPIN_STEP = 1.25
-SUPER_SPIN_FOLLOWS_MASS = True        # a new super well's spin rises with its mass, in a straight line from its
-SUPER_SPIN_FULL = 3.0                 #   starting spin to this at SUPER_EXPLODE_MASS: the heavier it gets, the more
-                                      #   it flings matter out instead of feeding, so it grows steadily (setting
-                                      #   its spin by hand stops this for that well)
-SUPER_SPIN_ARMS_AT = 0.5               # its spiral arms turn as fast as its whirlpool carries matter round this share
-                                       #   of the way out to its faint circle...
-SUPER_SPIN_FRAME_MAX = 0.6             # ...eased to less than this many radians per frame when that is faster (three
-                                       #   arms a third of a turn apart turning further would seem to turn backwards)
-SUPER_INSPIRAL_TICKS = 540             # super wells whose ranges overlap fall into orbit round each other and spiral
-                                       #   in: from ranges just touching to merging takes about this many ticks, the
-SUPER_INSPIRAL_SHRINK = 1.5            #   gap closing ~ (sum of ranges / gap) ^ this (slowly at first, ever faster) ...
-SUPER_INSPIRAL_PLUNGE = 0.12           #   ... and at the end by at most this share of it a tick: the final plunge
-SUPER_INSPIRAL_SPIN = 0.03             # they circle each other this fast (rad/tick) when their ranges just touch, and
-SUPER_INSPIRAL_SPIN_MAX = 0.35         #   faster as they near (~ gap ^ -1.5, as Kepler's law), up to this and never
-                                       #   faster than VMAX against each other
-SUPER_INSPIRAL_GRIP = 0.1              # a pair just caught settles onto that orbit over 1 / this ticks
+                                       #   or either way at random when it is off; ; / ' spin the nearest one down / up
+SUPER_SPIN_STEP = 1.25                 #   by this
+SUPER_SPIN_FRAME_MAX = 0.6             # its spiral arms turn as fast as space does at its point of no return, eased to
+                                       #   less than this many radians per frame when that is faster (three arms a
+                                       #   third of a turn apart turning further would seem to turn backwards)
 SUPER_STRETCH = 0.6                    # drawn: each core stretches towards the other by up to this share (~ 1 / gap^2),
 SUPER_BRIDGE = 1.6                     #   and once their gap is under this x their cores' radii added up a bridge
                                        #   joins them
 SUPER_RINGDOWN = 0.5                   # the merged core is a bar this stretched, turning as fast as they circled at
 SUPER_RINGDOWN_TICKS = 18              #   the end, settling into a round core (e-folding time, ticks)
-SUPER_GW_INSPIRAL = 0.012              # gravitational waves (radiation; at most, for equal masses, x 4 m1 m2 / M^2): a
-                                       #   pair radiates this share of its mass as it spirals in, ever faster (the
-                                       #   binding energy it gives up: ~ 1 / gap) ...
-SUPER_GW_MERGER = 0.01                 #   ... this share in a burst as they merge ...
+# Gravitational waves: super wells orbiting each other lose energy as they do, 32/5 G^4 m1^2 m2^2 (m1 + m2) / (c^5 d^5)
+# a tick (World._gravitational_waves), so they spiral in and merge; the waves are radiation, energy only, flying at
+# the speed of light (World._radiate_waves) ...
+SUPER_GW_MERGER = 0.01                 #   ... and a merger sends this share of the mass (x 4 m1 m2 / M^2) out in a burst ...
 SUPER_GW_RINGDOWN = 0.008              #   ... and this share, fading, while the merged core settles
-SUPER_GW_SPEED = 8.0                   # waves are particles flying straight at this speed (cells/tick), unbent by
-SUPER_GW_TICKS = 50                    #   gravity, for this many ticks, then land as ordinary particles. They leave
-SUPER_GW_SPREAD = 0.35                 #   in two beams along the line through the pair (spread this much, radians),
-SUPER_GW_BURST_SPREAD = 0.9            #   (the merger's burst this much), so they trace a two-armed spiral
-SUPER_GW_PIECES = 48                   #   at most this many a tick (the merger's burst: 8 x this), heavier when more
-SUPER_GW_COUPLING = 0.15               #   is radiated; like heat they hand matter this share of a head-on hit
+SUPER_GW_SPREAD = 0.35                 # they leave in two beams along the line through the pair (spread this much,
+SUPER_GW_BURST_SPREAD = 0.9            #   radians; the merger's burst this much), so they trace a two-armed spiral,
+SUPER_GW_PIECES = 48                   #   at most this many a tick (the merger's burst: 8 x this)
 SUPER_GW_COLOR = RADIATION_COLOR       #   and glow this colour
 SUPER_MERGE_GRACE = 120               # a super well that has just merged, or just got over SUPER_EXPLODE_MASS in
                                        #   any way, can't go supernova for this many ticks (from the first merger:
                                        #   more in that time don't stretch it, unless one takes it over the limit)
-SUPER_MERGE_SHOCK_REACH = 1.5          # a merger sends a shock front out to this x the merged well's range ...
-SUPER_MERGE_SHOCK_SPEED = 6.0          #   ... starting at this speed (cells/tick), slowing as it goes; behind it a
-SUPER_MERGE_SHOCK_KICK = 7.0           #   wind keeps everything moving outwards at this (cells/tick), stronger than
-SUPER_MERGE_SHOCK_TICKS = 90           #   what pulls it back, for this many ticks in all
-MERGE_EJECT = (0.002, 0.02)           # share of the combined mass a super well merger spits out as particles
-MERGE_LOSS_BIAS = 1.0                  # who loses that mass: each well's share ~ its mass ^ -bias. 1 = inversely
-                                       #   to size (a well merging with one half its size loses half as much as
-                                       #   it); 0 = equal shares; -1 = in proportion to size
-COLLAPSE_EJECT = (0.10, 0.30)          # share of the collapsed mass a new super well spits out
+MERGE_LOSS_BIAS = 1.0                  # (sv.world.merge_losses: who loses mass shared between two wells, each ~ its
+                                       #   mass ^ -bias. 1 = inversely to size; 0 = equal shares; -1 = by size)
 EJECT_MASS = (1, 256)                  # masses of the ejected particles (uniform)
 EJECT_ESCAPE = 1.2                     # ejected particles leave at this x the speed needed to escape the range
 SUPER_EXPLODE_MASS = 10_000_000        # a super well this heavy explodes like a supernova: all its mass leaves its spot

@@ -11,7 +11,7 @@ from .presets import PRESETS
 from .render import Renderer, mass_label, pour_label
 from .ui import UI
 from .usage import Usage
-from .world import VIEW_MODES, super_core, super_mass_for_core
+from .world import VIEW_MODES
 
 PRESET_KEYS = {pygame.K_F1: "rain", pygame.K_F2: "disk", pygame.K_F3: "cloud", pygame.K_F4: "binary",
                pygame.K_F5: "systems"}
@@ -225,8 +225,8 @@ class App:
     # --- what the placing tools place: each one's mass and size, linked ---------------------------------
 
     def super_mass_range(self):
-        """The lightest super well that can be placed (what collapse makes) and the heaviest."""
-        return self.world.collapse_threshold(), float(config.SUPER_EXPLODE_RANGE[1])
+        """The lightest super well there can be (one with a horizon: World.lightest_super_mass) and the heaviest."""
+        return self.world.lightest_super_mass(), float(config.SUPER_EXPLODE_RANGE[1])
 
     def clamp_super(self, mass):
         lo, hi = self.super_mass_range()
@@ -237,11 +237,11 @@ class App:
         return self.clamp_super(self.super_mass)
 
     def super_core_px(self):
-        return super_core(self.placed_super_mass()) * self.world.cell
+        return self.world.edge_for_mass(self.placed_super_mass()) * self.world.cell
 
     def set_super_core_px(self, px):
-        """Size the super well by its core (px): its mass becomes what that core takes (to 3 figures)."""
-        m = super_mass_for_core(px / self.world.cell)
+        """Size the super well by its core - its horizon - (px): its mass becomes what that takes (to 3 figures)."""
+        m = self.world.mass_for_edge(px / self.world.cell)
         self.super_mass = self.clamp_super(float(f"{m:.3g}") if m > 0 else 0.0)
 
     def repulsor_px(self):
@@ -275,7 +275,7 @@ class App:
         super well at once (World.star_collapse_check); the largest brush there is when every star holds (or
         collapse is off), None when none does."""
         w = self.world
-        key = (self.pour_mass, w.cell, w.star_collapse_limit(), w.collapse_on)
+        key = (self.pour_mass, w.cell, w.g_scale, w.kinv, w.collapse_on)
         if self._star_px_cache[0] == key:
             return self._star_px_cache[1]
         lo, hi = config.PLACE_SIZE_PX
@@ -303,7 +303,7 @@ class App:
             m = self.placed_super_mass()
             warn = (f"over the supernova mass ({mass_label(w.explode_mass)}): it will explode",
                     (235, 190, 90)) if m >= w.explode_mass else None
-            return f"super well {mass_label(m)}   core {super_core(m):.1f} cells", warn
+            return f"super well {mass_label(m)}   horizon {w.edge_for_mass(m):.1f} cells", warn
         if tool == "repulsor":
             return (f"repulsor {mass_label(self.repulsor_mass)}   radius {self.repulsor_px() / w.cell:.1f} cells",
                     None)

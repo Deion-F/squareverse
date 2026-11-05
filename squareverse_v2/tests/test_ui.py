@@ -158,17 +158,17 @@ def test_super_well_tool_links_mass_and_core():
     pygame.display.set_mode((800, 600))
     try:
         from sv.app import App
-        from sv.world import World, super_core
+        from sv.world import World
         a = App(World(800, 600, 2, seed=1))
         a.tool = "super"
         a.super_mass = 3e6
-        assert a.tool_radius_px() == pytest.approx(super_core(3e6) * 2)    # the cursor is the core it places
+        assert a.tool_radius_px() == pytest.approx(a.world.edge_for_mass(3e6) * 2)   # the cursor is its horizon
         a.scroll_size(1)
         assert a.super_mass == 4e6                                         # the wheel steps whole millions
         a.scroll_size(-5)
-        assert a.super_mass == a.world.collapse_threshold()                # ...down to the lightest there is
+        assert a.super_mass == a.world.lightest_super_mass()              # ...down to the lightest there is
         a.set_super_core_px(10 * 2)
-        assert super_core(a.super_mass) == pytest.approx(10, rel=0.01)    # a core size sets the mass it takes
+        assert a.world.edge_for_mass(a.super_mass) == pytest.approx(10, rel=0.01)   # a horizon sets its mass
         wl = a.place("super", 400, 300)
         assert wl.is_super and wl.mass == a.super_mass
         a.set_repulsor_px(80)
@@ -181,8 +181,8 @@ def test_super_well_tool_links_mass_and_core():
 def test_placement_collapse_counts_what_is_already_there():
     from sv.world import World
     w = World(400, 300, 2, seed=1)
-    most, limit = w.placement_collapse(200, 150, 30, 256)
-    assert most > limit                                    # a brush full of 256s collapses
+    most, limit = w.placement_collapse(200, 150, 30, 4096)
+    assert most > limit                                    # a brush full of 4096s collapses
     assert w.placement_collapse(200, 150, 30, 16)[0] < limit
     star = w.placement_collapse(200, 150, 20, 64, star=True)
     assert star == pytest.approx(w.star_collapse_check(20, 64))            # on empty space, as the star check

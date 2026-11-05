@@ -4,7 +4,6 @@ from sv import config
 
 config.GRAVITY_REACH = 60.0
 config.GRAVITY_SCALE = 1.0
-config.COLLAPSE_MASS = 40000.0
 config.ORBIT_EDGE_SPEED = 4.0
 config.RADIATION_ON = False
 config.SG_ON = False

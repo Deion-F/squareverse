@@ -72,6 +72,74 @@ first item at the top of this file):
    user asks.
 
 Progress:
+- **To come back to after the steps (user, 2026-11-05): flip the size relationship, so bigger super wells can hold
+  more in stable orbit** (as bigger black holes hold bigger galaxies). Now the reach fade caps stable orbits at
+  ~1.16 x reach (~0.6 x reach for bound ones) whatever the mass, while the core, point of no return and innermost
+  stable orbit (6 G M / c^2) grow with mass - so the bigger the well, the less room. Ideas to weigh: a reach that
+  grows with the source's mass; or gravity unfaded for super wells.
+- Reach default 60 (user, 2026-11-05).
+- Light speed (2026-11-05): LIGHT_SPEED 24 (3 x VMAX), separate from VMAX (matter's top speed; the user's collapse rule
+  stays: matter collapses where even VMAX can't escape). A super well's core is where light can't escape
+  (`edge_for_mass` at c: compact - reach 60 / strength 1.2: 1.3 cells at 200k, 7.5 at 1M, 43 at 10M; 16 would give
+  3.5 / 15 / 60, 32 0.8 / 4.3 / 31), its dotted point of no return where matter can't (`trap_for_mass`, VMAX).
+  Rest energy and radiation quanta are mass x c^2; radiation flies at c (light keeps its speed in `_move_ghosts` /
+  the GPU shader: a ghost faster than VMAX is light); FUSION_BINDING rescaled to 0.0056 (same 3.2 / unit mass).
+- The radiation "ripples" (user, 2026-11-05): gravitational waves - beams along the line through merging super wells
+  (two-armed spirals), which flew straight, unbent, then landed as matter in the middle of nowhere ~50 ticks later;
+  and, far fewer, quanta coming back in at the edge (`World.radiation_back` counts them). Waves are now energy only.
+- Step 6 coded (2026-11-05, uncommitted): spin = the angular momentum a super well holds (`Well.jz`; at most G M^2 / c,
+  `max_spin_j`; spin = jz / that, -1..1): from collapse (`absorb_disk` lz), swallowed matter (`absorbed` column 5,
+  every swallow site, turned about the well in `_collect_absorbed`), swallowed solid wells, and mergers (both spins +
+  the pair's orbit). Frame dragging from it: space turns at 2 G J / c^2 / rho^3, faded, never carrying matter past
+  VMAX (`kernels.frame_turn`); the faint circle (`well_range`) is now where that reaches VMAX (an ergosphere; the
+  core when not spinning); things it carries faster than SLEEP_EPS don't sleep. The whirlpool is gone (kernel whirl,
+  SUPER_SWIRL_*, SUPER_DRAG_*, spin rising with mass, SUPER_SPIN_NATURAL / FULL / ARMS_AT, SUPER_RANGE_FACTOR). Pairs:
+  plain gravity (the scripted inspiral, Binary, SUPER_INSPIRAL_*, merger ejecta MERGE_EJECT and merger shock gone);
+  with radiation on they lose 32/5 G^4 m1^2 m2^2 (m1 + m2) / (c^5 d^5) a tick to waves, taken with its angular
+  momentum from their going round each other (at most half of it a tick); inside their innermost stable orbit (6 G M
+  / c^2) they plunge within about an orbit and merge spinning with the angular momentum they had there
+  (`World._plunging`). Waves are radiation: energy-only quanta at c, absorbed or brought back at the edge like heat.
+  Tried and dropped: the relativistic 3 G M h^2 / (c^2 r^4) pull with super wells allowed up to c (one-tick steps
+  overshot near close approach and flung pairs across the universe); with it at VMAX the cap held pairs in orbits
+  inside the innermost stable one.
+  Measured (1920x1080 cell 2, reach 60): two 1M wells 60 apart merge after 1.2 orbits, 4% radiated, spin 0.65; 300k
+  pairs from 20 / 40 cells: 2.2 / 20 orbits, 4%, spin 0.64 / 0.59 (real equal-mass mergers: ~5%, 0.69); without
+  waves a pair holds its orbit (111+ orbits). A maximally spinning 1M well drags space round at 2.1 cells/tick 20
+  cells out, 0.5 at 40, 0.1 at 80; its faint circle is at 10 (core 7.5). Swallowed matter spins a well up, but VMAX
+  caps what angular momentum it brings in (r x VMAX per unit mass at the core): a sparse orbiting ring gave its well
+  15% of its angular momentum. Systems preset holds 9 stars 900 ticks, 6-7 ms a tick; disk preset collapses into
+  0.8-2.6M wells with 2.6-8 cell cores, 30-43 ms a tick.
+  Tests: 182 pass, 2 xfail (`test_ejected_mass_escapes_the_range`: `eject` is no longer used by anything;
+  `test_auto_star_fills_an_orbit_evenly...`: retune), whirlpool / inspiral / spin-follows-mass tests replaced by
+  step 6 ones (pair orbits by gravity alone, waves spiral it in and it merges spinning, waves are energy taken in,
+  faint circle = where space outruns matter, spinning well carries what falls in, collapse spins the way matter
+  went round, swallowed orbiting matter spins a well up, arms turn with space at the point of no return).
+- Step 4 coded (2026-11-05, uncommitted): a super well's core is its horizon (`Well.edge`, kept by
+  `World._set_edges` -> `edge_for_mass`: where escape speed reaches VMAX), softening SUPER_SOFTENING 1 cell (a
+  point; the old 0.25 x a quarter of the reach made it ~14 cells at 200k, so nothing under ~167k could have a
+  horizon). Collapse (`check_collapse`): round each star at least `lightest_super_mass()` and the COLLAPSE_SPOTS (8)
+  densest spots, the mass within each distance r (`kernels.mass_rings`) against `mass_for_edge(r)` = (VMAX^2 / 2)
+  rho / (G strength fade) - matter inside its own horizon - collapses: all within the largest such r becomes the
+  well (`_collapse_at`: momentum, angular momentum in `Well.jz` for step 6, stars centred there dropped). The same
+  for stars and loose matter (the user's TO_DO item). Gone: COLLAPSE_MASS, COLLAPSE_BLOCKS, STAR_COLLAPSE_FACTOR /
+  RANGE, COLLAPSE_EJECT, SUPER_CORE_GROWTH, `collapse_threshold`, `_collapse_heavy_stars` (stars may now outweigh the
+  lightest super well if they are spread out), the menu's "Stars collapse at". Tools: Star / Pour cursor warning and
+  largest star brush use the same figure (`placement_collapse`, `star_collapse_check`); Super well tool sizes by
+  horizon. At reach 30 / strength 1.2: lightest super well 17k; horizon 3.3 cells at 50k, 11 at 200k, 28 at 1M, 44 at
+  10M; packed discs: pour 64 r30 (181k) 0.16 of collapsing, pour 256 r20 (322k) 0.65, pour 1024 r8 (206k) and pour
+  4096 r3 (116k) collapse. (reach 60: 12.8 at 200k, 40 at 1M; strength 0.6 halves the mass for the same horizon.)
+  Found: a heavy super well's horizon outgrows its whirlpool range (test settings: 1M edge 36.5 vs range 27.7), so
+  the whirlpool / frame dragging sit inside it - step 6 replaces both. Measured (1920x1080 cell 2): systems preset
+  holds all 9 stars 900 ticks (400k wells, horizon 13.8), 7 ms a tick; disk preset: 9 regions of its heavy matter
+  collapse into 1.6-2.4M wells (horizons 20-22) within 300 ticks, then none, ~40 ms a tick.
+  Tests: 180 pass, 10 marked xfail (strict=False) with reasons - to revisit: step 6 (whirlpool / frame dragging /
+  scripted inspiral tuned to the old softened pull): `test_super_wells_spiral_in_circling_ever_faster_then_merge`,
+  `test_inspiral_radiates_ever_more_waves...` (the 1-mass wave leak), `test_ejected_mass_escapes_the_range` (only
+  mergers eject now), `test_spin_curves_infall...`, `test_whirlpool_is_strong...`, `test_spinning_super_well_drags_
+  space...`, `test_clump_inside_whirlpool...`, `test_merger_shock_clears...`, `test_super_well_arms_turn...`; step 7:
+  `test_auto_star_fills_an_orbit_evenly...`. Rewritten for the rule: `dense_patch` (a block as near `factor` x
+  collapsing as rungs allow), star collapse (inside its own horizon), lightest super well, Super well tool, Pour /
+  Star cursor, heavy-but-thin star stays a star, collapse takes the whole patch.
 - Radiation is energy only (user, 2026-11-04): heat particles are quanta of VMAX^2 (one unit of mass's worth) flying
   at VMAX, sent through an open side with the emitter recoiling (p = E/c); the first particle in their way takes them
   in as heat + momentum (`kernels.radiation_step`); they never land as matter; a super well swallowing one gains 1

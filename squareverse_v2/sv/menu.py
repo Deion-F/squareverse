@@ -7,7 +7,7 @@ import math
 from . import config
 from .presets import PRESETS
 from .render import mass_label
-from .world import DIRS, VIEW_MODES, Spawner, Star, Well, super_core
+from .world import DIRS, VIEW_MODES, Spawner, Star, Well
 
 # the mouse tools: what a left click on the universe does
 TOOLS = [("pour", "Pour"), ("ghosts", "Ghosts"), ("erase", "Erase"), ("star", "Star"), ("auto", "Auto star"),
@@ -62,8 +62,10 @@ INFO = {
                   "the supernova mass (Stars and black holes) or over, it explodes moments after it is placed. The "
                   "mouse wheel steps it too. Key: B places one at the mouse.".format(
                       mass_label(config.SUPER_PLACE_STEP)),
-    "super_size": "The radius of the super well's core. Its core grows with the square root of its mass, so the mass "
-                  "changes to what that core takes: dragging this is the other way to set the same thing.",
+    "super_size": "The radius of the super well's core - its horizon, where the speed it takes to get away reaches the "
+                  "speed of light (faster than matter's speed limit: matter can't get away from further out, the dotted "
+                  "point of no return). It grows with its mass (in proportion, until gravity's reach caps it), so the mass "
+                  "changes to what that horizon takes: dragging this is the other way to set the same thing.",
     "repulsor_mass": "What the repulsor weighs: how hard it pushes. A repulsor is a solid body of fixed density, so "
                      "its size follows its mass (and the other way round below). Type one in (k / M for thousands "
                      "/ millions) or pick one. Key: shift+G places one at the mouse.",
@@ -101,30 +103,25 @@ INFO = {
              "explodes, or is torn apart by a heavier neighbour's tide.",
     "formation": "Every second, dense round knots of matter with a heavy core inside a lighter envelope that hold "
                  "themselves together become stars. Off: only stars you place appear.",
-    "collapse": "Matter packed densely enough collapses into a super well: a black hole that swallows what touches "
-                "its core. The threshold is the mass in a 20 x 20 cell window, and falls as gravity gets stronger; "
-                "stars need to be denser still (Stars collapse at, below). A super well reaching the supernova mass "
-                "(below) explodes. Key: shift+B.",
-    "star_collapse": "How much denser than loose matter a star must be to collapse into a super well: its own "
-                     "particles count this many times less in the collapse check (x1: the same as loose matter). "
-                     "The figure in brackets is what a star must hold in a 20 x 20 cell window. With the Star tool "
-                     "picked, the cursor turns amber when the star it would place there (with whatever is already "
-                     "there) is near that and red (with a note) when it would collapse at once; the tool's settings "
-                     "say how big a star stays one at its particle mass.",
+    "collapse": "Matter so dense that even moving at the speed limit nothing could get away from it - the mass within "
+                "some distance is enough that the speed it takes to escape reaches the limit there - collapses into a "
+                "super well, a black hole holding all of it, with its momentum and spin. Stars and loose matter alike: "
+                "nothing but gravity's strength and reach and the speed limit decide it, so only heavy matter packed "
+                "tight does (light matter never, however much piles up, at a short reach). A super well's core is "
+                "that horizon: whatever crosses it is swallowed. The note is the lightest super well there can be. "
+                "With the Star or Pour tool, the cursor turns amber near that and red when what it places would "
+                "collapse at once. A super well reaching the supernova mass (below) explodes. Key: shift+B.",
     "explode": "How heavy a super well gets before it goes supernova: all its mass blasts out as a ring of heavy "
                "debris that cools and lands as particles. Higher lets super wells grow bigger and hold more of the "
                "universe before they blow; lower makes supernovae more frequent. A well already over a lowered "
                "limit explodes after a short grace. Spin rising with mass reaches its top at this mass.",
     "radiation": "Hot matter radiates from its surface: heat particles (pale blue) of one unit of mass's worth of "
-                 "energy each, flying at the speed of light (the speed limit), the matter recoiling. Radiation is "
-                 "energy only - it never lands as matter: the first particle it meets takes it in as heat (and a "
-                 "push), and a super well that swallows it gains its mass. Super wells spiralling into each other "
-                 "send out gravitational waves: two beams along the line through them that turn as they circle, ever "
-                 "stronger as they near, then a burst as they merge that fades as the merged core settles - up to "
-                 "{:.1%} of their mass, flying straight through everything at the speed limit, then landing as "
-                 "particles.".format(config.SUPER_GW_INSPIRAL + config.SUPER_GW_MERGER + config.SUPER_GW_RINGDOWN),
-    "show_radiation": "Draw the radiation particles (pale blue). Off, they are only hidden: they still fly, push, "
-                      "heat and are taken in exactly as before. Saves a little drawing time when there is a lot of it.",
+                 "energy each, flying at the speed of light, the matter recoiling. Super wells orbiting each other "
+                 "lose energy to gravitational waves - the closer and heavier, the faster (P ~ m1^2 m2^2 (m1 + m2) / "
+                 "d^5) - so they spiral in and merge, sending the waves out in two beams along the line through them, "
+                 "then a burst as they merge that fades as the merged core settles. Radiation and waves are energy "
+                 "only - they never land as matter: the first particle they meet takes them in as heat (and a push), "
+                 "and a super well that swallows them gains their mass.",
     "recycle": "Radiation reaching the universe's edge comes back in from a random point of it, heading inwards, so "
                "the universe keeps all its energy. Off, it is gone for good (the note counts how much). Turn it off "
                "if radiation builds up faster than matter takes it in.",
@@ -160,18 +157,12 @@ INFO = {
                    "whenever it is faster than the cores (timed every so often, so this can change). Start with "
                    "--cpu to run on one core without the GPU, as before.",
     "selected": "The body you clicked with Select / move. Drag it to move it.",
-    "spin_mass": "A new super well starts spinning at {} and spins faster as it grows, reaching {} when it is about "
-                 "to go supernova. The faster it spins, the more matter it flings out into a ring instead of "
-                 "swallowing, so a well grows steadily instead of running away, several share the universe, and "
-                 "one blowing up rarely sets off its neighbours at once. Setting a well's spin by hand stops it "
-                 "following its mass. Turning this off sets every super well back to {}.".format(
-                     config.SUPER_SPIN_PLACED, config.SUPER_SPIN_FULL, config.SUPER_SPIN_PLACED),
-    "spin": "How fast the super well whirls the space inside its faint circle round. Above 1 it whirls matter "
-            "faster than it would orbit and flings it out - but only inside its dotted circle, the point of no "
-            "return, where escaping would take more than the top speed: what is flung can't get away and comes back "
-            "to orbit or fall in. (A light super well has none outside its core.) Out to 4 times the faint circle, "
-            "as far as its pull reaches, it drags space itself round the same way, faster the faster it spins, so "
-            "whatever falls in spirals in instead of falling straight. Keys: ; / '.",
+    "spin": "How fast the super well spins, as a share of the most a black hole of its mass can (1). Its spin is "
+            "the angular momentum it holds - of the matter that collapsed into it, all it swallows and the wells "
+            "that merged into it - so it spins up as matter swirls in. It drags space itself round the same way "
+            "(frame dragging): strongest near it, fading as its pull does, so whatever falls in spirals in instead of "
+            "falling straight. Inside its faint circle space moves faster than matter can, so nothing there can "
+            "hold still or go against its spin. Keys: ; / '.",
     "ghost_stars": "A placed star arrives as a ghost star: its particles fly together through everything, feeling "
                    f"gravity, for {config.GHOST_TICKS} ticks, then land as a star where it got to (any of its "
                    "particles whose cell is taken land nearby as ordinary particles). Shift+click with the Star tool "
@@ -212,14 +203,13 @@ def draw_tool_settings(ui, app):
         app.super_mass = ui.number_field("super_typed", "Or type a mass", app.super_mass, lo, hi, INFO["super_mass"],
                                          fmt=mass_label)
         core = app.super_core_px()
-        size = ui.slider("super_size", "Core size", core, super_core(lo) * w.cell, super_core(hi) * w.cell,
+        size = ui.slider("super_size", "Horizon", core, w.edge_for_mass(lo) * w.cell, w.edge_for_mass(hi) * w.cell,
                          INFO["super_size"], lambda v: f"{v / w.cell:.2f} cells", step=0.25 * w.cell)
         if size != core:
             app.set_super_core_px(size)
         m = app.placed_super_mass()
-        wl = Well(0.0, 0.0, m, is_super=True)
-        ui.stats([("mass", f"{m:,.0f}"), ("point of no return", f"{w.horizon(wl):.0f} cells"),
-                  ("whirlpool", f"{w.well_range(wl):.0f} cells")])
+        wl = Well(0.0, 0.0, m, is_super=True, edge=w.edge_for_mass(m))
+        ui.stats([("mass", f"{m:,.0f}"), ("core", f"{wl.core():.1f}"), ("no return", f"{w.horizon(wl):.0f} cells")])
         if m >= w.explode_mass:
             ui.note(f"At or over the supernova mass ({mass_label(w.explode_mass)}): it explodes moments after it is "
                     "placed.", WARN)
@@ -321,7 +311,8 @@ def draw_menu(ui, app, fps):
             body.locked = ui.toggle("locked", "Locked in place", body.locked)
         else:
             ui.stats([("mass", f"{body.mass:,.0f}"), ("speed", f"{math.hypot(body.vx, body.vy):.2f}")]
-                     + ([("range", f"{w.well_range(body):.0f} cells")] if body.is_super else []))
+                     + ([("core", f"{body.core():.1f}"), ("faint circle", f"{w.well_range(body):.0f} cells")]
+                        if body.is_super else []))
         if not isinstance(body, Spawner) and not getattr(body, "is_super", False):
             hit = ui.buttons("body_mass", [(0.8, "Lighter"), (1.25, "Heavier")], INFO["body_mass"], "Mass",
                              columns=2)
@@ -331,14 +322,11 @@ def draw_menu(ui, app, fps):
             way = ui.choice("spin_way", "Spin direction", [(1, "Clockwise"), (-1, "Counter-clockwise")],
                             1 if body.spin >= 0 else -1, INFO["spin"], columns=2)
             if way != (1 if body.spin >= 0 else -1):
-                body.spin = -body.spin                   # a turn the other way keeps it following its mass
-            following = w.spin_follows_mass and body.auto_spin
-            spin = ui.slider("spin", "Spin", abs(body.spin), 0.05, config.SUPER_SPIN_MAX, INFO["spin"], "{:.2f}",
-                             log=True, step=0.1, note="follows mass" if following else None)
+                w.set_spin(body, -body.spin)
+            spin = ui.slider("spin", "Spin", abs(body.spin), 0.0, config.SUPER_SPIN_MAX, INFO["spin"], "{:.2f}",
+                             step=0.05)
             if spin != abs(body.spin):
                 w.set_spin(body, way * spin)
-            if w.spin_follows_mass:
-                body.auto_spin = ui.toggle("auto_spin", "Spin follows its mass", body.auto_spin, INFO["spin_mass"])
         hit = ui.buttons("body", [("delete", "Delete"), ("deselect", "Deselect")], columns=2)
         if hit == "delete":
             w.remove_body(body)
@@ -407,19 +395,11 @@ def draw_menu(ui, app, fps):
         w.radiation_recycle = ui.toggle("recycle", "Radiation comes back", w.radiation_recycle, INFO["recycle"],
                                         note=None if w.radiation_recycle else f"{w.radiation_lost:,} quanta gone")
         w.collapse_on = ui.toggle("collapse", "Collapse into super wells", w.collapse_on, INFO["collapse"],
-                                  note=f"at {w.collapse_threshold():,.0f}")
-        w.star_collapse = ui.slider("star_collapse", "Stars collapse at", w.star_collapse,
-                                    *config.STAR_COLLAPSE_RANGE, INFO["star_collapse"],
-                                    lambda v: f"x{v:.1f} ({w.collapse_threshold() * v / 1000:,.0f}k)", log=True,
-                                    step=0.5)
+                                  note=f"lightest {w.lightest_super_mass():,.0f}")
         step = config.SUPER_EXPLODE_STEP
         boom = ui.slider("explode", "Supernova at", w.explode_mass, *config.SUPER_EXPLODE_RANGE, INFO["explode"],
                          lambda v: f"{v / 1e6:g}M mass", log=True, step=step)
         w.explode_mass = int(round(boom / step) * step)
-        follows = ui.toggle("spin_mass", "Spin rises with mass", w.spin_follows_mass, INFO["spin_mass"],
-                            note=f"{config.SUPER_SPIN_PLACED:g} to {config.SUPER_SPIN_FULL:g}")
-        if follows != w.spin_follows_mass:
-            w.set_spin_follows_mass(follows)
         ui.stats([("super wells", f"{sum(wl.is_super for wl in w.wells)}"), ("holding", f"{w.super_mass():,}"),
                   ("supernovae", f"{w.explosions}")])
         ui.gap()

@@ -618,11 +618,6 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
     orbit_w = P[P_ORBIT_W]
     orbit_grip = P[P_ORBIT_GRIP]
     orbit_vmin = P[P_ORBIT_VMIN]
-    whirl_speed = P[P_WHIRL_SPEED]
-    whirl_grip = P[P_WHIRL_GRIP]
-    whirl_infall = P[P_WHIRL_INFALL]
-    whirl_edge = P[P_WHIRL_EDGE]
-    drag_edge, drag_turn = P[P_DRAG_EDGE], P[P_DRAG_TURN]
     ocx, ocy = P[P_ORBIT_CX], P[P_ORBIT_CY]
     wrap = P[P_WRAP] != 0.0
 
@@ -669,13 +664,10 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
                 e_ += orbit_shear(flx, fly, whirls, k)
             if e_ < e_host:
                 host, e_host, phi_host = k, e_, phi_
-            wx_, wy_, inside = whirl(rx_, ry_, vx0, vy0, whirls[k, 2], whirls[k, 3], whirls[k, 4], whirls[k, 5],
-                                     whirl_speed, whirl_grip, whirl_infall, whirl_edge, kinv, whirls[k, 8], phi_)
-            ax += gx_ + wx_                              # space it turns
-            ay += gy_ + wy_
-            whirled = whirled or (inside and whirls[k, 3] != 0.0)
-            om_ = frame_turn(rx_, ry_, whirls[k, 6], whirls[k, 7], whirls[k, 4], whirls[k, 5], kinv, drag_edge,
-                             drag_turn, vmax, whirls[k, 2], whirl_edge)
+            ax += gx_                                    # space it turns
+            ay += gy_
+            om_ = frame_turn(rx_, ry_, whirls[k, 6], whirls[k, 7], whirls[k, 5], kinv, vmax)
+            whirled = whirled or om_ * om_ * (rx_ * rx_ + ry_ * ry_) > eps2   # carried round: it doesn't sleep
             if om_ != 0.0 and own == 0:                  # (a star's particles are carried with it: carry_stars)
                 cx_, cy_ = frame_carry(rx_, ry_, om_)
                 carry_x += cx_
@@ -794,7 +786,7 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
                 continue
             j = ny * w + nx
             if hole[j]:                                  # into a super well's core: absorbed
-                _absorb(absorbed, hole[j] - 1, m, vx, vy)
+                _absorb(absorbed, hole[j] - 1, m, vx, vy, nx, ny)
                 mass[i] = 0
                 owner[i] = 0
                 wake_around(i, w, h, mass, flag, wrap)
@@ -1002,7 +994,7 @@ def _advance(order, t0, t1, w, h, tick, P, mass, kin, quad, shade, stamp, flag, 
             break
 
         if alive and hole[i]:                            # slid or was put into a core
-            _absorb(absorbed, hole[i] - 1, m, vx, vy)
+            _absorb(absorbed, hole[i] - 1, m, vx, vy, x, y)
             mass[i] = 0
             owner[i] = 0
             wake_around(i, w, h, mass, flag, wrap)
@@ -1221,6 +1213,7 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
         hit[k] = 0
         if gm[k] == 0:
             continue
+        s0 = np.sqrt(gvx[k] * gvx[k] + gvy[k] * gvy[k])   # (faster than vmax: light - see below)
         i = _ghost_cell(gx[k], gy[k], w, h)
         ax = np.float64(fx[i])
         ay = np.float64(fy[i])
@@ -1242,13 +1235,9 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
                 e_ += orbit_shear(flx, fly, whirls, j)
             if e_ < e_host:
                 host, e_host, phi_host = j, e_, phi_
-            wx_, wy_, _ = whirl(rx_, ry_, gvx[k], gvy[k], whirls[j, 2], whirls[j, 3], whirls[j, 4], whirls[j, 5],
-                                P[P_WHIRL_SPEED], P[P_WHIRL_GRIP], P[P_WHIRL_INFALL], P[P_WHIRL_EDGE], P[P_REACH],
-                                whirls[j, 8], phi_)
-            ax += px_ + wx_
-            ay += py_ + wy_
-            om_ = frame_turn(rx_, ry_, whirls[j, 6], whirls[j, 7], whirls[j, 4], whirls[j, 5], P[P_REACH],
-                             P[P_DRAG_EDGE], P[P_DRAG_TURN], vmax, whirls[j, 2], P[P_WHIRL_EDGE])
+            ax += px_
+            ay += py_
+            om_ = frame_turn(rx_, ry_, whirls[j, 6], whirls[j, 7], whirls[j, 5], P[P_REACH], vmax)
             if om_ != 0.0:
                 cx_, cy_ = frame_carry(rx_, ry_, om_)
                 carry_x += cx_
@@ -1269,7 +1258,11 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
             tc, ts = np.cos(turn), np.sin(turn)
             vx, vy = tc * vx - ts * vy, ts * vx + tc * vy
         v = np.sqrt(vx * vx + vy * vy)
-        if v > vmax:
+        if s0 > vmax * (1.0 + 1e-9):                     # light (only it outruns matter): it flies at its own speed,
+            vx *= s0 / max(v, 1e-12)                     #   gravity only turning it
+            vy *= s0 / max(v, 1e-12)
+            v = s0
+        elif v > vmax:
             vx *= vmax / v
             vy *= vmax / v
             v = vmax
@@ -1299,22 +1292,24 @@ def _move_ghosts(k0, k1, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, 
 
 
 @njit(cache=True)
-def _absorb(absorbed, k, m, vx, vy):
-    """Super well k swallows mass m moving at (vx, vy): absorbed[k] adds up the mass and momentum it swallows (the
-    well takes both on: World._collect_absorbed). Its columns 3 and 4 add up the pull of the matter on the well."""
+def _absorb(absorbed, k, m, vx, vy, x, y):
+    """Super well k swallows mass m at (x, y) moving at (vx, vy): absorbed[k] adds up the mass, momentum and angular
+    momentum (column 5, about the origin, > 0 clockwise) it swallows - the well takes them all on
+    (World._collect_absorbed). Its columns 3 and 4 add up the pull of the matter on the well."""
     absorbed[k, 0] += m
     absorbed[k, 1] += m * vx
     absorbed[k, 2] += m * vy
+    absorbed[k, 5] += m * (x * vy - y * vx)
 
 
 @njit(cache=True)
-def _swallow_ghosts(gm, gvx, gvy, hit, absorbed):
+def _swallow_ghosts(gx, gy, gm, gvx, gvy, hit, absorbed):
     """The ghosts that crossed a core (hit) are swallowed: their mass and momentum go to that well's absorbed and gm
     becomes 0. Returns how many."""
     swallowed = 0
     for k in range(gm.size):
         if hit[k]:
-            _absorb(absorbed, hit[k] - 1, gm[k], gvx[k], gvy[k])
+            _absorb(absorbed, hit[k] - 1, gm[k], gvx[k], gvy[k], gx[k], gy[k])
             gm[k] = 0
             swallowed += 1
     return swallowed
@@ -1333,7 +1328,7 @@ def step_ghosts(gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, sg_block,
         _move_ghosts(c * gm.size // chunks, (c + 1) * gm.size // chunks, gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy,
                      sgx, sgy, sg_block, sg_w, hole, hit, whirls, stars, sfx, sfy, s_block, s_cw, s_ch, react)
         absorbed[:, 3:5] += react
-    return _swallow_ghosts(gm, gvx, gvy, hit, absorbed)
+    return _swallow_ghosts(gx, gy, gm, gvx, gvy, hit, absorbed)
 
 
 @njit(cache=True, parallel=True)
@@ -1349,7 +1344,7 @@ def step_ghosts_par(gx, gy, gvx, gvy, gm, gage, w, h, P, fx, fy, sgx, sgy, sg_bl
                      sgx, sgy, sg_block, sg_w, hole, hit, whirls, stars, sfx, sfy, s_block, s_cw, s_ch, react[c])
     for c in range(chunks):                              # (in order: the same sums as step_ghosts)
         absorbed[:, 3:5] += react[c]
-    return _swallow_ghosts(gm, gvx, gvy, hit, absorbed)
+    return _swallow_ghosts(gx, gy, gm, gvx, gvy, hit, absorbed)
 
 
 @njit(cache=True)
@@ -1445,14 +1440,13 @@ def fly_waves(k, steps, gx, gy, gvx, gvy, gm, gage, w, h, hole, rim_mask, absorb
             if rim_mask.size and rim_mask[i] != 0:
                 edge = True
             if hole[i] > 0:
-                _absorb(absorbed, hole[i] - 1, gm[g], gvx[g], gvy[g])
+                _absorb(absorbed, hole[i] - 1, gm[g], gvx[g], gvy[g], gx[g], gy[g])
                 gm[g] = 0
                 swallowed += 1
                 break
-            if edge:
-                gage[g] = life
-                gvx[g] = 0.0
-                gvy[g] = 0.0
+            if edge:                                     # (radiation_step: back in at the edge, or gone)
+                gx[g] = nx
+                gy[g] = ny
                 break
             gx[g] = nx
             gy[g] = ny
@@ -1592,9 +1586,11 @@ def radiation_step(gx, gy, gvx, gvy, gm, gtag, tag, quantum, w, h, mass, kin, fl
     E / c) and the rest of its energy as heat - and it is gone. Reaching the universe's edge (the circle of `radius`
     round (cx, cy); radius 0: the window's border, unless it wraps, when there is none), it is gone too - or, with
     `recycle`, comes back in at a random point of the edge, heading inwards (within 60 degrees of straight in) as
-    fast, so the universe keeps its energy. Returns (how many were taken in, how many quanta left the universe)."""
+    fast, so the universe keeps its energy. Returns (how many were taken in, how many quanta left the universe, how
+    many came back in)."""
     taken = 0
     lost = 0
+    back = 0
     for k in range(gm.size):
         if gtag[k] != tag or gm[k] == 0:
             continue
@@ -1652,7 +1648,8 @@ def radiation_step(gx, gy, gvx, gvy, gm, gtag, tag, quantum, w, h, mass, kin, fl
         a = (2.0 * np.random.random() - 1.0) * np.pi / 3.0
         gvx[k] = sp * (nx * np.cos(a) - ny * np.sin(a))
         gvy[k] = sp * (nx * np.sin(a) + ny * np.cos(a))
-    return taken, lost
+        back += 1
+    return taken, lost, back
 
 
 @njit(cache=True)
@@ -1743,6 +1740,26 @@ def absorb_disk(cx, cy, r, w, h, mass, kin, quad, flag, wrap):
 
 
 @njit(cache=True)
+def mass_rings(cx, cy, rmax, w, h, mass, wrap):
+    """The mass in each ring round (cx, cy) out to rmax cells: ring k holds the particles from k to k + 1 cells out
+    (World.collapse_check adds them up into the mass within each distance)."""
+    rings = np.zeros(int(rmax) + 1)
+    x0, x1, xmin = _span(cx, rmax, w, wrap)
+    y0, y1, ymin = _span(cy, rmax, h, wrap)
+    for yy in range(y0, y1):
+        dy = _axis(yy, cy, h, ymin)
+        for xx in range(x0, x1):
+            i = (yy % h) * w + xx % w
+            if mass[i] == 0:
+                continue
+            dx = _axis(xx, cx, w, xmin)
+            k = int(np.sqrt(dx * dx + dy * dy))
+            if k <= rmax:
+                rings[k] += mass[i]
+    return rings
+
+
+@njit(cache=True)
 def _mark_disk(cx, cy, r, w, h, wrap, grid, value):
     """grid[cell] = value for every cell within r of (cx, cy)."""
     x0, x1, xmin = _span(cx, r, w, wrap)
@@ -1763,10 +1780,11 @@ def mark_holes(cores, w, h, hole, mass, kin, quad, flag, absorbed, wrap):
     for k in range(cores.shape[0]):
         idx = int(cores[k, 0])
         cx, cy, r = cores[k, 1], cores[k, 2], cores[k, 3]
-        m_, px_, py_, _ = absorb_disk(cx, cy, r, w, h, mass, kin, quad, flag, wrap)
+        m_, px_, py_, lz_ = absorb_disk(cx, cy, r, w, h, mass, kin, quad, flag, wrap)
         absorbed[idx, 0] += m_
         absorbed[idx, 1] += px_
         absorbed[idx, 2] += py_
+        absorbed[idx, 5] += lz_ + cx * py_ - cy * px_    # (about the origin, as _absorb counts it)
         _mark_disk(cx, cy, r, w, h, wrap, hole, idx + 1)
 
 
@@ -1878,63 +1896,22 @@ def _pull(dx, dy, strength, soft, kinv):
 
 
 @njit(cache=True)
-def whirl(rx, ry, vx, vy, reach, spin, strength, soft, speed, grip, infall, edge, kinv, horizon, phi):
-    """A spinning super well's whirlpool on something at (rx, ry) from it moving at (vx, vy): inside its range
-    (reach) its sideways motion is driven towards spin x speed - but never past `infall` of the speed that would hold
-    it in orbit there, so it still spirals in - gripped `grip` hard. Both fade in over the outer `edge` share of the
-    range, so it is at full strength through nearly all of it. Spun past 1 the cap rises with the spin, flinging
-    matter out into a ring - but only within `horizon`, its point of no return (the dotted circle): nothing can be
-    thrown out of there faster than VMAX, which is too slow to get away, so what it flings always comes back; further
-    out it only ever draws matter in. However it speeds something up, it never leaves it energy enough to escape
-    the well's pull (`phi`, its potential there: WHIRL_BOUND short of that), so nothing it whirls can be thrown out
-    for good - it orbits or falls back in. spin > 0 turns clockwise on screen; motion in or out is left alone. Returns the acceleration and whether it is
-    inside the range."""
-    d2 = rx * rx + ry * ry
-    if d2 >= reach * reach:
-        return 0.0, 0.0, False
-    if d2 < 1e-6:
-        return 0.0, 0.0, True
-    d = np.sqrt(d2)
-    rim = min(1.0, (1.0 - d / reach) / max(edge, 1e-9))
-    orbital = np.sqrt(strength * d2 / (d2 + soft * soft) ** 1.5 * fade(np.sqrt(d2 + soft * soft), kinv)[0])
-    fling = max(1.0, abs(spin)) if d < horizon else 1.0
-    target = min(abs(spin) * speed, infall * orbital * fling) * rim * (1.0 if spin >= 0 else -1.0)
-    tx, ty = -ry / d, rx / d
-    vt = vx * tx + vy * ty
-    a = grip * rim * (target - vt)
-    nvt = vt + a
-    if nvt * nvt > vt * vt:                              # speeding it up: never so far it could get away
-        room = -2.0 * (phi + WHIRL_BOUND) - (vx * vx + vy * vy - vt * vt)
-        if room <= vt * vt:
-            a = 0.0
-        elif nvt * nvt > room:
-            a = np.sqrt(room) * (1.0 if nvt >= 0.0 else -1.0) - vt
-    return a * tx, a * ty, True
-
-
-@njit(cache=True)
-def frame_turn(rx, ry, share, reach, strength, soft, kinv, edge, turn_max, vmax, inner, inner_edge):
+def frame_turn(rx, ry, jterm, reach, soft, kinv, vmax):
     """How fast a spinning super well turns space itself round at (rx, ry) from it (rad/tick, > 0 clockwise on
-    screen): `share` (signed by its spin) of the angular speed something circling there would have, out to `reach`
-    and fading out over the outer `edge` share of it, at most turn_max and never carrying anything faster than vmax.
-    Within its range (`inner`, the faint circle) its whirlpool takes over, across the same outer `inner_edge` share
-    of the range that the whirlpool fades in over (whirling space on top of the whirlpool feeds it far faster).
-    Everything there is carried round with space - where it is and which way it is heading turned together (see
-    frame_carry) - so its motion through space is unchanged and nothing is sped up: something falling straight in
-    through turning space spirals in, dragged round the way the well spins (frame dragging)."""
-    if share == 0.0:
+    screen): frame dragging, jterm / rho^3 - jterm = 2 G J / c^2, J the angular momentum it holds (Lense-Thirring) -
+    faded as its pull is, out to `reach`, and never carrying anything faster than vmax (the fastest matter moves:
+    where it would, matter can't hold still or go against the spin at all). Everything there is carried round with
+    space - where it is and which way it is heading turned together (frame_carry) - so its motion through space is
+    unchanged and nothing is sped up: something falling straight in through turning space spirals in, dragged round
+    the way the well spins."""
+    if jterm == 0.0:
         return 0.0
     d2 = rx * rx + ry * ry
     if d2 >= reach * reach:
         return 0.0
-    s2 = d2 + soft * soft
-    rho = np.sqrt(s2)
-    om = share * np.sqrt(strength / (s2 * rho) * fade(rho, kinv)[0])   # circling speed / distance, x share
-    d = np.sqrt(d2)
-    om *= min(1.0, (1.0 - d / reach) / max(edge, 1e-9))
-    band = inner * inner_edge
-    om *= min(1.0, max(0.0, (d - inner + band) / max(band, 1e-9)))
-    cap = turn_max if d * turn_max <= vmax else vmax / d
+    rho = np.sqrt(d2 + soft * soft)
+    om = jterm * fade(rho, kinv)[0] / (rho * rho * rho)
+    cap = vmax / max(np.sqrt(d2), 1e-9)
     return min(max(om, -cap), cap)
 
 
@@ -2826,7 +2803,7 @@ def star_shift(k, sx, sy, cx, cy, r, e, wall_e, w, h, mass, kin, quad, shade, st
             continue
         j = y * w + x
         if hole[j]:
-            _absorb(absorbed, hole[j] - 1, mass[i], kin[i, 0], kin[i, 1])
+            _absorb(absorbed, hole[j] - 1, mass[i], kin[i, 0], kin[i, 1], x, y)
             _clear(i, mass, kin, quad)
             owner[i] = 0
             wake_around(i, w, h, mass, flag, wrap)
@@ -3096,7 +3073,7 @@ def carry_blobs(occupied, labels, moves, e, wall_e, w, h, mass, kin, quad, shade
                     continue
                 j = y * w + x
                 if hole[j]:
-                    _absorb(absorbed, hole[j] - 1, mass[i], kin[i, 0], kin[i, 1])
+                    _absorb(absorbed, hole[j] - 1, mass[i], kin[i, 0], kin[i, 1], i % w, i // w)
                     _clear(i, mass, kin, quad)
                     labels[i] = 0
                     wake_around(i, w, h, mass, flag, wrap)
