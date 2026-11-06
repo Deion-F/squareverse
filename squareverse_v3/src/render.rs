@@ -2,7 +2,7 @@
 //! screen. Positions stay fixed point all the way into the vertex shader, which subtracts the camera in integers.
 
 use crate::fixed::{Fixed2, TWO_32};
-use crate::sim::{Sim, shader};
+use crate::sim::Sim;
 use crate::timing::GpuTimer;
 
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -98,7 +98,12 @@ impl Renderer {
         let view_buf = uniform("view", std::mem::size_of::<ViewUniform>() as u64);
         let tone_buf = uniform("tone", std::mem::size_of::<ToneUniform>() as u64);
 
-        let squares_module = shader(device, "squares", include_str!("../shaders/squares.wgsl"));
+        let squares_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("squares"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", include_str!("../shaders/fixed.wgsl"), include_str!("../shaders/squares.wgsl")).into(),
+            ),
+        });
         let add = wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
             dst_factor: wgpu::BlendFactor::One,
@@ -117,10 +122,15 @@ impl Renderer {
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![0 => Uint32x4],
                     }),
+                    // (vx, vy, temperature, luminosity): the last two
                     Some(wgpu::VertexBufferLayout {
-                        array_stride: 8,
+                        array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![1 => Float32x2],
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        }],
                     }),
                 ],
             },
@@ -283,8 +293,8 @@ impl Renderer {
             });
             pass.set_pipeline(&self.squares);
             pass.set_bind_group(0, &self.view_bind, &[]);
-            pass.set_vertex_buffer(0, sim.pos.slice(..));
-            pass.set_vertex_buffer(1, sim.star.slice(..));
+            pass.set_vertex_buffer(0, sim.pos_buffer().slice(..));
+            pass.set_vertex_buffer(1, sim.kin_buffer().slice(..));
             pass.draw(0..6, 0..sim.n);
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
