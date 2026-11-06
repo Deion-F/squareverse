@@ -1,0 +1,37 @@
+[package]
+name = "squareverse"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Squareverse v3: galaxies and the universe they live in, on the GPU"
+license = "MIT"
+publish = false
+
+[dependencies]
+wgpu = "30"
+winit = "0.30.13"
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = { version = "0.37", features = ["winit"] }
+egui-winit = "0.37"
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = { version = "0.34", features = ["bytemuck"] }
+pollster = "1"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand_core = "0.10"
+rand_pcg = "0.10"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+png = "0.18"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,276 @@
+# Squareverse v3: plan
+
+Written 2026-11-06. Nothing is built yet; this is the plan to pick up from. `squareverse_v2` stays as it is (frozen,
+still runnable). v3 is a fresh project in `squareverse_v3/`.
+
+## Why a new version
+
+v2 is a 2D cell grid with one square particle per cell (falling-sand style, numba on the CPU, optional wgpu). That
+design can't stretch from star formation up to galaxies orbiting each other:
+
+- positions snap to cells and speed is capped (VMAX), so orbits are coarse and super wells crowd out the room they
+  need (see the TO_DO.md notes on "bigger wells hold more");
+- one particle per cell means mass, not just distance, sets the cost;
+- the invented rules (mass rungs, collision fusion, VMAX as c) don't scale to real timescales.
+
+v3 keeps the look and the spirit (squares, emergent behaviour, a hands-on sandbox) but uses the methods real
+astrophysics codes use, running on the GPU.
+
+## Decisions (user, 2026-11-06)
+
+| Topic | Decision |
+|---|---|
+| Platform | **Rust + wgpu.** One native executable per OS (Windows: DX12/Vulkan, Mac: Metal, Linux: Vulkan); nothing for users to install. |
+| Physics | **Real astrophysics, real units**, with sub-grid models where the scale is too small to resolve. |
+| Zoom model | **One shared simulation; zoom only changes the drawing (level of detail).** Every galaxy always runs with all its particles, so the zoomed-in and zoomed-out views are literally the same data. |
+| Dimensions | **2D**, with gravity falling off as 1/r² as in 3D (as v2). |
+| Star particle | **A setting, "stars per particle", default 1**: each particle is one real star (mass from the real IMF). Higher values make each particle a star cluster, so galaxies can be Milky Way mass. |
+| Dark matter | **Coarse DM particles**, invisible by default (toggle to draw), forming halos and the cosmic web. |
+| Start | **Both**: placed-galaxy presets, plus an "early universe" preset where near-smooth gas + DM collapses on its own. |
+| Planets | **Star system view**: planets are sub-grid, decided by the heavy elements in the gas the star formed from; selecting a star opens a third zoom level that shows them. |
+| Time | **One universe clock; zoom suggests the speed** (e.g. 1 Myr/frame zoomed out, ~10 kyr/frame on a galaxy), and the user can override it. Per-particle adaptive steps. |
+| Binaries | **Hybrid**: wide pairs are two real particles; tight pairs are one particle carrying an exact Kepler orbit (drawn as two in the star system view), which can merge, swap partners or be torn apart. |
+| Tools | Place galaxy; place super well / pour gas; select & inspect (follow, zoom in, edit, drag); delete / kick; **save the current tools + universe state as a new preset**. |
+| Frame rate | **Aim for 60 fps, with a 30 fps option** for weaker machines. Drawing interpolates between sim steps; the sim takes as many steps as fit in the frame budget. |
+| Look | **Squares, coloured realistically**: stars by surface temperature (red dwarf → blue giant), gas by temperature/density, additive glow (HDR + tonemap) so dense regions brighten. |
+| Small super wells | **Both routes**: stellar black holes left by massive stars sink and merge in dense clusters into intermediate wells; rarely, dense metal-poor gas collapses straight into one. |
+| Elements | **Five groups per particle**: H, He, C/N/O (ices), Mg/Si (rock), Fe. |
+| v2 | **Kept frozen**; the Claude helper agents are rewritten for v3. |
+
+On the user's request to start the two views separately: because of the "one sim" decision, v3 is **one engine**,
+but the galaxy scale (phases 2–4) and the universe scale (phase 5) get **their own presets, test scenes and tuning
+passes**. They are joined in phase 6. Phase 5 can start as soon as phase 1 is done, in parallel with 2–4.
+
+## Units and numbers
+
+- Length in parsecs (pc), mass in solar masses (M☉), time in megayears (Myr). G = 4.50e-3 pc³ / (M☉ Myr²);
+  1 pc/Myr ≈ 0.98 km/s; c ≈ 306,600 pc/Myr.
+- **Positions are 64-bit fixed point** per axis, stored on the GPU as two u32 words (hi, lo) with carry, not
+  floats. (Corrected 2026-11-06: 32 bits over a 20 Mpc box is only ~0.005 pc, ~1,000 AU, too coarse near a super
+  well and lossy when rounding small sub-steps.) 64 bits give ~1e-12 pc everywhere, the same near the centre of a
+  galaxy as in the voids, and integer wrap-around gives the periodic universe for free. Differences are taken in
+  integers, then converted to f32 for forces (GPUs are slow at f64). Velocities and everything else are f32.
+- **Two target machines** (user, 2026-11-06): the desktop (RTX 2070 Super, 8 GB) at 60 fps, and the laptop
+  (Ryzen 5 PRO 5650U, integrated Radeon, WSL2) at 60 fps if possible and never below a stable 30. The default
+  particle count is picked for the GPU found (`src/budget.rs`, provisional until phase 1 measures both), and
+  the 30 fps setting exists for the laptop. Desktop budget, to be measured in phase 1: ~2–4M particles at 60 fps (for
+  example 20–50 galaxies), at ~60–100 bytes per particle; the laptop's is likely 5–10x less. Quality settings:
+  Low (~250k), Medium (~1M), High (2–4M), with the default chosen per machine.
+
+## Particles
+
+One structure-of-arrays set of GPU buffers; a `kind` field picks the physics.
+
+| Kind | Holds | Notes |
+|---|---|---|
+| Gas (SPH) | mass, internal energy, density, smoothing length, 5 element fractions | merges in thin hot gas, splits in dense gas (adaptive resolution) |
+| Star | mass, birth time, elements, binary data (companion mass, a, e, phase) | one star, or a population if stars per particle > 1 |
+| Remnant | white dwarf / neutron star / stellar black hole | stellar black holes can grow into intermediate super wells |
+| Super well (black hole) | mass, spin (angular momentum), accretion rate | sink particle; small numbers, smallest timesteps |
+| Dark matter | mass | heavy, with large softening (see Gravity) |
+
+Common to all: id, position, velocity, timestep bin, flags.
+
+## Physics by scale, and what gets approximated
+
+The guiding rule: compute exactly what you can see at the current scale, and replace what you can't resolve with a
+model that gives the right averages.
+
+### Gravity
+- **TreePM.** A 2D quadtree on the GPU (Morton codes → radix sort → tree → Barnes-Hut walk, opening angle ~0.5–0.7)
+  for short range, and from phase 5 a particle-mesh (FFT) part for long range in the periodic box. Force softening
+  per kind; for a 2D disc the softening also stands in for disc thickness, which keeps the disc from tearing itself
+  into unphysical rings.
+- **Dark matter acts only through a smoothed field** (large softening), so a few heavy DM particles don't kick
+  1 M☉ stars about (2-body heating).
+- **Adaptive steps:** hierarchical power-of-two timestep bins (kick-drift-kick leapfrog); each particle steps as often
+  as its own acceleration / gas sound speed needs. The tree is rebuilt each base step and only refitted for
+  sub-steps. Close pairs near a super well take tiny steps without slowing everything else.
+- Newtonian only. Super well horizons are far below resolution (4e-7 pc for 4e6 M☉), so they are drawn at a minimum
+  size; swallowing happens inside an accretion radius. Super well pairs that get closer than resolution spiral in by
+  the gravitational-wave formula (Peters, as v2 step 6) and merge with spin from their angular momentum.
+
+### Gas
+- **SPH** (Wendland kernel, ~20–30 neighbours in 2D), neighbour search on the same Morton-sorted order.
+- **Cooling** from a tabulated cooling function of temperature and metallicity, with a temperature floor; an optional
+  uniform UV background in the early-universe preset.
+- **Merge / split:** gas particles merge where the gas is thin and hot (the gas between galaxies, so it never needs
+  millions of particles) and split where it is dense, limiting the mass ratio between neighbours to keep SPH accurate.
+- No magnetic fields, no radiative transfer (see Feedback).
+
+### Stars: birth, life, death
+- **Birth:** gas that is dense, cold, collapsing and Jeans unstable turns into stars at a set efficiency per
+  free-fall time; the gas particle is split into stars drawn from the IMF (0.1–100 M☉) adding up to its mass.
+- **Life:** no star interiors are simulated. Lifetime, luminosity and temperature come from fitting formulas of mass
+  and metallicity (main sequence → giant → remnant). Fusion shows up as composition: what a star returns to the gas
+  when it dies.
+- **Death and enrichment:** below ~8 M☉: a white dwarf, with the envelope (rich in C/N/O) returned as gas; 8–25 M☉:
+  core-collapse supernova (10⁵¹ erg, O/Mg/Si/Fe yields), leaving a neutron star; above ~25 M☉: a stellar black hole.
+  Type Ia supernovae (Fe) come from white dwarfs in tight binaries. Each generation forms from gas enriched by the
+  last.
+- **Feedback:** supernova energy goes into the neighbouring gas as stochastic thermal injection (so it doesn't cool
+  away at once at low resolution); massive stars heat and ionise the gas around them through a Strömgren-sphere
+  approximation instead of real radiative transfer.
+- With stars per particle > 1, a star particle is a population, and the same tables are applied statistically
+  over time.
+
+### Binaries
+- Wide pairs are two particles. Tight pairs are one particle with an exact Kepler orbit. The binary fraction and
+  orbits at birth follow observed distributions for the star's mass. Close encounters harden, soften, disrupt or swap
+  pairs by encounter rates (later option: unpack a tight pair into two particles while a perturber is close). Mass
+  transfer and mergers by simple rules; this is the route to Type Ia supernovae.
+
+### Super wells (black holes)
+- **Central:** a sink particle; Bondi accretion capped at the Eddington rate; AGN feedback heats nearby gas. It
+  dominates only the very centre; the galaxy's rotation comes from the halo + disc, as in real galaxies.
+- **Small ones in the arms:** stellar black holes sink in dense clusters (mass segregation is resolved when stars
+  per particle is 1) and merge inside a capture radius into intermediate wells; and direct collapse, where a dense,
+  metal-poor gas clump above a mass threshold becomes a seed well. Either can sink to the centre (dynamical
+  friction, with a sub-grid correction when it is under-resolved) and merge with the central one.
+
+### Universe scale
+- Periodic box, TreePM. The early-universe preset uses comoving coordinates with a scale factor a(t) (expansion) and
+  starts from Zel'dovich-approximation initial conditions drawn from a power spectrum. Placed-galaxy presets use a
+  static box.
+- The gas between galaxies is the same SPH gas, merged into heavy particles where it is thin.
+- A **galaxy finder** (friends-of-friends on the GPU every few steps) labels galaxies, their super wells and
+  totals, and drives "select a galaxy".
+
+### Planets (star system view)
+- Not simulated as particles. Each star's system is generated deterministically from its id, mass and the five
+  element groups it was born with (giant-planet chance rising with Fe; rocky planets need Mg/Si; ice giants need
+  C/N/O), so it costs no memory and is the same every time it is looked at. Systems are destroyed or changed when
+  the star dies (planets round white dwarfs may survive). The view shows analytic orbits, including a tight
+  companion, on years-per-second time while the universe clock runs at its own speed.
+
+## Drawing and zoom
+
+- One continuous camera from the universe down to a single galaxy's centre; "same thing at every zoom" holds
+  because there is only one set of particles.
+- Every particle is drawn as a square. At small zoom a square is ≤ 1 pixel and they add up (HDR, additive) into
+  glowing galaxies, with gas as a density splat coloured by temperature. As you zoom in, squares grow by luminosity,
+  and detail overlays (super well marks, binaries, remnants) fade in. DM is drawn only when toggled.
+- Drawing interpolates between sim steps at 60 fps (30 fps option); the sim fills the rest of the frame budget.
+- Selecting a galaxy follows it and zooms in, with the suggested speed changing smoothly; selecting a star at close
+  zoom opens the star system view.
+
+## Tech stack
+
+- Crates: `wgpu` (compute + rendering), `winit` (window), `egui` + `egui-wgpu` + `egui-winit` (menu: sliders,
+  toggles, (i) help, keyboard shortcuts, carrying over v2's menu conventions), `glam`, `bytemuck`, `serde` +
+  `postcard` and `lz4_flex` (saved universes and presets, pure Rust), `rand_pcg`, `clap`.
+- WGSL has no f64 and no float atomics: deposits (mesh, density sums) use integer fixed-point atomics, which also
+  makes runs reproducible from a seed (stable sorts, no order-dependent float sums), and that is what testing needs.
+- **Development from WSL:** build the Windows executable (`x86_64-pc-windows-gnu` with mingw-w64, or `cargo-xwin`)
+  and run the `.exe` from WSL, so it uses DX12 / Vulkan directly instead of WSL's Mesa D3D12 translation. Linux
+  builds run in WSL for headless tests. Mac builds come from a GitHub Actions macOS runner; they are unsigned, so
+  the first start needs right-click → Open.
+- Minimum hardware: any GPU with compute shaders (DX12 / Vulkan / Metal; GLES 3.1 through wgpu's GL backend).
+- **Headless mode** for agents and tests: `squareverse --headless --preset X --steps N --report out.json`
+  (timings per pass from GPU timestamp queries, conserved totals, star formation rate, metallicity, galaxy list).
+
+## Phases
+
+Each phase ends with measurements (via the sim-experimenter) and tests passing. Global numbers in the acceptance
+lines are targets, to be confirmed in phase 1.
+
+0. **Setup.** `squareverse_v3/` cargo project; window + egui + wgpu; Windows build from WSL; headless runner;
+   rewrite the helper agents for v3 (sim-experimenter → headless JSON runs, test-runner → `cargo test` + headless
+   checks, sim-optimizer → GPU timestamp profiling, docs-sync → v3 README) and update CLAUDE.md.
+1. **Gravity core.** Fixed-point positions, GPU radix sort, quadtree, Barnes-Hut, block timesteps, square
+   rendering with zoom / pan, frame-rate setting. Tests: two-body orbit energy drift, force error vs direct sum,
+   reproducibility from a seed. *Accept:* 1M particles at ≥ 60 fps on the 2070 Super; record the 4M figure.
+2. **Galaxy, collisionless** (galaxy scale). Galaxy generator in equilibrium (disc + bulge + smoothed DM halo +
+   central super well; velocities from the potential, Toomre Q setting); IMF stars with lifetimes and colours;
+   super well sink. *Accept:* flat rotation curve, disc stable for ≥ 10 rotations, spiral arms in a cold disc.
+3. **Gas and star cycle** (galaxy scale). SPH, cooling, star formation by gas splitting, stellar deaths with element
+   yields, feedback, gas merge / split, remnants, central super well accretion + AGN. *Accept:* star formation rate
+   vs gas density near the observed (Kennicutt-Schmidt) relation; several generations with rising metallicity; no
+   runaway cooling or blow-out.
+4. **Binaries and small super wells** (galaxy scale). Tight-binary sub-grid, encounters, Type Ia; stellar black
+   holes → intermediate wells; direct collapse seeds; sinking to the centre; super well pairs and gravitational-wave
+   merging.
+5. **Universe scale** (can run alongside 2–4). Periodic box, PM long range (WGSL FFT) → TreePM, comoving expansion,
+   Zel'dovich start, intergalactic gas with merging, galaxy finder, placed-galaxy presets (pair on a collision
+   course, group). *Accept:* cosmic web forms from the early-universe preset; galaxy pairs merge on sensible
+   timescales; 20–50 galaxies at the target frame rate.
+6. **Join the views.** Continuous zoom with level of detail, zoom-suggested speed, select → follow → zoom.
+   *Accept:* zooming in and out changes nothing in the physics (same totals and same state as an unzoomed headless
+   run from the same seed).
+7. **Star system view.** Deterministic planet generation from composition, the third zoom level, tight binaries
+   drawn.
+8. **Tools, presets, release.** All the tools, save / load universe state and "save as preset", menu polish,
+   README, release builds for Windows / Linux / Mac, then `/optimize` if the user asks.
+
+## Risks to watch
+
+- **Razor-thin 2D discs** are more unstable than real ones: rely on softening as thickness and a Toomre Q setting;
+  measure in phase 2.
+- **Heavy DM next to 1 M☉ stars** heats discs: DM is force-smoothed; check disc thickness / dispersion growth over
+  time.
+- **Feedback at low resolution** tends to cool away (overcooling): use stochastic injection; tune in phase 3.
+- **With 1 star per particle galaxies are dwarf-sized** (~10⁵–10⁶ M☉): the presets should state this, and the stars
+  per particle setting covers big galaxies.
+- **Writing an FFT and a GPU tree in WGSL** is the largest piece of engine work: keep a CPU reference implementation
+  for tests.
+- **Mac / Metal limits** (storage buffers per shader stage etc.): keep binding counts within wgpu's default limits.
+
+## Carried over from v2
+
+Ideas that transfer: the menu style ((i) help on every setting, ◀ ▶ fine steps, keyboard shortcuts, H for help,
+Advanced fold), the status figures in the corners, conserved-totals checks in tests, and the super well pair
+physics from step 6 (spin from angular momentum, Peters inspiral). The open v2 TO_DO items (merge-rate cap, fusion
+ladder tuning, heavy super well speed) are superseded by v3's design, not carried over.
+
+## Progress
+
+Phase 0 (started 2026-11-06):
+
+- [x] Toolchain: rustup in `~/.cargo` (stable 1.99.1, targets linux-gnu and windows-gnu); `build-essential` and
+  `mingw-w64` installed by the user. (A Zig linker stood in before that; no longer needed.)
+- [x] `squareverse_v3/` cargo project (wgpu 30, winit 0.30, egui 0.37 with `default_fonts`, which 0.37 no longer
+  turns on by itself). `src/fixed.rs` + `shaders/fixed.wgsl` (64-bit fixed point), `src/gpu.rs` (adapter pick: DX12
+  first on Windows; WSL D3D12 env set up as v2 did), `src/timing.rs` (GPU timestamps per pass, non-blocking),
+  `src/sim/` (phase-0 workload: orbits round one point mass, KDK; IMF masses and main-sequence colours),
+  `src/render.rs` (squares, HDR additive, tonemap), `src/ui.rs` + `src/app.rs` (window, menu, HUD, keys, zoom /
+  pan, 60 / 30 fps pacing), `src/headless.rs` (`--headless --report --snapshot`), `src/budget.rs`.
+- [x] Tests: `cargo test` (9 pass): fixed-point round trip / wrap / sub-AU separations, IMF, main sequence, seed
+  reproducibility, energy (-4e-7 over 2,000 steps), GPU vs CPU f64 reference across the box edge (worst 3e-4 pc after
+  20 steps, 181 particles crossing). Clippy clean.
+- [x] Windows `.exe` built from WSL (`cargo build --release --target x86_64-pc-windows-gnu`) and run natively:
+  RTX 2070 Super on DX12, 1M particles, window 59.9 fps (GPU 0.68 step + 2.56 draw ms a frame).
+- [x] Integrated-GPU stand-in: the desktop's Intel UHD 630 (weaker than the laptop's Radeon): 250k particles
+  59.2 fps at the 60 target, 29.9 at 30 (GPU ~11.6 ms a frame, 8.2 of it drawing). It crashes on Vulkan (old driver),
+  hence DX12 first. Headless step: 0.60 ms at 250k, 4.4 ms at 1M (RTX: 0.032 / 0.13).
+- [x] Helper agents rewritten for v3 (sim-experimenter, test-runner, sim-optimizer, docs-sync, /optimize: they
+  check the Windows exe with `tasklist.exe` too, and name the machine), CLAUDE.md updated, `squareverse_v3/README.md`.
+- [ ] **Laptop check** (user, on the laptop; fill in the table below). Steps, in WSL from the repo root:
+  1. Once: `sudo apt update && sudo apt install -y build-essential mingw-w64` and
+     `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -t x86_64-pc-windows-gnu`,
+     then open a new terminal.
+  2. `cd squareverse_v3 && cargo build --release --target x86_64-pc-windows-gnu`
+  3. `E=target/x86_64-pc-windows-gnu/release/squareverse.exe; $E --list-adapters`
+  4. Window at the default count, 60 then 30 fps target (each prints one JSON line):
+     `$E --exit-after-frames 600` and `$E --fps 30 --exit-after-frames 300`
+  5. If 60 isn't held: `$E --particles 100000 --exit-after-frames 600` to see where it is.
+  6. Headless step cost: `$E --headless --steps 300 --particles 250000 | grep -E '"(name|backend|gpu_ms_per_step)"'`
+
+### Laptop results (Ryzen 5 PRO 5650U, integrated Radeon)
+
+| Date | Command | Adapter / backend | Particles | fps (target) | Worst frame ms | GPU ms: step / draw / tonemap / ui |
+|---|---|---|---|---|---|---|
+| | `--exit-after-frames 600` | | | ( 60) | | |
+| | `--fps 30 --exit-after-frames 300` | | | ( 30) | | |
+| | `--headless --steps 300 --particles 250000` | | 250,000 | n/a | n/a | step only: |
+
+Target: 60 fps if possible, never below a stable 30 at the default count (`src/budget.rs`: 250,000 for an
+integrated GPU). If it misses, lower that default for integrated GPUs, and note it here.
+
+Notes for phase 1:
+
+- Drawing dominates on integrated GPUs (6 vertices per particle, instanced). Try a compute splat (atomic adds into
+  a fixed-point accumulation buffer, then tonemap) when particles are <= 1 px, and keep quads for bigger squares.
+- The integrated GPU is ~20-30x slower than the RTX on the same work: measure the gravity budget on it, not just on
+  the desktop, and let `src/budget.rs` follow measurement.
+- The window's `--exit-after-frames` JSON line (fps, worst frame, GPU ms per pass) is the quick fps check on any
+  machine.
