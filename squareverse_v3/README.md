@@ -8,6 +8,20 @@ nothing for users to install. The design, the decisions behind it and progress a
 pieces underneath (fixed-point positions, GPU timing, drawing, the menu, headless runs and tests). Phase 1 replaces
 the point mass with real self-gravity.
 
+## Setting up a machine (WSL / Ubuntu), once
+
+Paste these two lines into the WSL terminal (the first asks for your password), then open a new terminal:
+
+```
+sudo apt update && sudo apt install -y build-essential mingw-w64
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -t x86_64-pc-windows-gnu
+```
+
+`build-essential` is the C linker Rust needs on Linux, `mingw-w64` builds the Windows exe from WSL, and the second
+line installs Rust into `~/.cargo`.
+
+## Running
+
 ```
 cargo run --release                                   # the window
 cargo run --release -- --particles 500000 --fps 30    # options: see --help

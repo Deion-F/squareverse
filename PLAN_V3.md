@@ -245,9 +245,14 @@ Phase 0 (started 2026-11-06):
 - [x] Helper agents rewritten for v3 (sim-experimenter, test-runner, sim-optimizer, docs-sync, /optimize: they
   check the Windows exe with `tasklist.exe` too, and name the machine), CLAUDE.md updated, `squareverse_v3/README.md`.
 - [ ] **Laptop check** (user, on the laptop; fill in the table below). Steps, in WSL from the repo root:
-  1. Once: `sudo apt update && sudo apt install -y build-essential mingw-w64` and
-     `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -t x86_64-pc-windows-gnu`,
-     then open a new terminal.
+  1. Once, paste these two lines into the WSL terminal (the first asks for your password), then open a new
+     terminal:
+
+     ```
+     sudo apt update && sudo apt install -y build-essential mingw-w64
+     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -t x86_64-pc-windows-gnu
+     ```
+
   2. `cd squareverse_v3 && cargo build --release --target x86_64-pc-windows-gnu`
   3. `E=target/x86_64-pc-windows-gnu/release/squareverse.exe; $E --list-adapters`
   4. Window at the default count, 60 then 30 fps target (each prints one JSON line):
