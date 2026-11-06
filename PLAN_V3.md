@@ -244,7 +244,7 @@ Phase 0 (started 2026-11-06):
   hence DX12 first. Headless step: 0.60 ms at 250k, 4.4 ms at 1M (RTX: 0.032 / 0.13).
 - [x] Helper agents rewritten for v3 (sim-experimenter, test-runner, sim-optimizer, docs-sync, /optimize: they
   check the Windows exe with `tasklist.exe` too, and name the machine), CLAUDE.md updated, `squareverse_v3/README.md`.
-- [ ] **Laptop check** (user, on the laptop; fill in the table below). Steps, in WSL from the repo root:
+- [x] **Laptop check** (2026-11-06; results below). Steps, in WSL from the repo root:
   1. Once, paste these two lines into the WSL terminal (the first asks for your password), then open a new
      terminal:
 
@@ -264,9 +264,16 @@ Phase 0 (started 2026-11-06):
 
 | Date | Command | Adapter / backend | Particles | fps (target) | Worst frame ms | GPU ms: step / draw / tonemap / ui |
 |---|---|---|---|---|---|---|
-| | `--exit-after-frames 600` | | | ( 60) | | |
-| | `--fps 30 --exit-after-frames 300` | | | ( 30) | | |
-| | `--headless --steps 300 --particles 250000` | | 250,000 | n/a | n/a | step only: |
+| 2026-11-06 | `--exit-after-frames 600` | AMD Radeon (integrated) / Dx12 | 250,000 | 59.7 ( 60) | 21.1 | 3.04 / 4.33 / 1.00 / 0.01 |
+| 2026-11-06 | `--fps 30 --exit-after-frames 300` | AMD Radeon (integrated) / Dx12 | 250,000 | 30.1 ( 30) | 34.3 | 4.81 / 5.20 / 1.30 / 0.01 |
+| 2026-11-06 | `--headless --steps 300 --particles 250000` | AMD Radeon (integrated) / Dx12 | 250,000 | n/a | n/a | step only: 1.17 |
+| 2026-11-06 | `--particles 500000 --exit-after-frames 600` | AMD Radeon (integrated) / Dx12 | 500,000 | 57.7 ( 60) | 34.9 | 5.10 / 8.46 / 1.61 / 0.02 |
+| 2026-11-06 | `--particles 1000000 --exit-after-frames 600` | AMD Radeon (integrated) / Dx12 | 1,000,000 | 33.1 ( 60) | 51.7 | 10.12 / 16.76 / 0.96 / 0.01 |
+| 2026-11-06 | `--particles 1000000 --fps 30 --exit-after-frames 300` | AMD Radeon (integrated) / Dx12 | 1,000,000 | 30.0 ( 30) | 36.7 | 10.30 / 17.37 / 1.09 / 0.02 |
+| 2026-11-06 | `--headless --steps 300 --particles 1000000` | AMD Radeon (integrated) / Dx12 | 1,000,000 | n/a | n/a | step only: 3.57 |
+
+Result: the 250,000 default for integrated GPUs holds 60 fps (and a stable 30 at the 30 target); 500k just misses
+60, with drawing the largest pass. Driver 31.0.21924.4004 (DX12); Vulkan and GL adapters are also listed.
 
 Target: 60 fps if possible, never below a stable 30 at the default count (`src/budget.rs`: 250,000 for an
 integrated GPU). If it misses, lower that default for integrated GPUs, and note it here.
