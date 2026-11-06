@@ -277,7 +277,8 @@ impl Running {
             fps: self.fps.value,
             adapter: self.gpu.summary.name.clone(),
             backend: self.gpu.summary.backend.clone(),
-            gpu_ms: self.timer.last.clone(),
+            // per stage, summed over the frame's passes
+            gpu_ms: self.timer.labels().into_iter().map(|l| (l, self.timer.ms(l).unwrap_or(0.0))).collect(),
             timestamps: self.timer.enabled(),
             default_particles: self.default_particles,
         };
@@ -359,7 +360,7 @@ impl ApplicationHandler for App {
                         (r.frames - 1) as f64 / secs.max(1e-9),
                         r.ui.fps_target,
                         r.worst_ms,
-                        r.timer.last
+                        r.timer.labels().into_iter().map(|l| (l, r.timer.ms(l).unwrap_or(0.0))).collect::<Vec<_>>()
                     );
                     event_loop.exit();
                 }

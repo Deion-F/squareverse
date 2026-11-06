@@ -24,7 +24,30 @@ use crate::units::G;
 use init::Initial;
 
 const NODE_WORDS: u64 = 16;
-const FORCE_GROUP: u32 = 128;
+/// How the force pass walks the tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, clap::ValueEnum)]
+pub enum Walk {
+    /// 64 neighbouring particles walk together, sharing each node read (`shaders/force.wgsl`): more accurate.
+    Group,
+    /// One particle a thread (`shaders/force_particle.wgsl`): faster on the GPUs measured so far (the default).
+    Particle,
+}
+
+impl Walk {
+    /// The default walk. Measured 2026-11-06, 1M particles, theta 0.6: RTX 2070 Super on Vulkan, force pass 20.3 ms
+    /// (particle) against 27.9 (group); Intel UHD 630 on DX12, 250k: 76 against 171 ms. The group walk is the more
+    /// accurate at a given theta (median force error 5e-4 against 3e-3 at 0.6).
+    pub fn for_gpu(_gpu: &Gpu) -> Self {
+        Walk::Particle
+    }
+
+    fn workgroup(self) -> u32 {
+        match self {
+            Walk::Group => 64,    // force.wgsl GROUP
+            Walk::Particle => 128, // force_particle.wgsl workgroup_size
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SimConfig {
@@ -45,8 +68,12 @@ pub struct SimConfig {
     pub dt_myr: f64,
     /// The particles' softening (Plummer), pc.
     pub softening_pc: f64,
-    /// Opening angle: a tree node acts as one mass when its size / distance is below this.
+    /// Opening angle: a tree node acts as one mass (+ quadrupole) when its size / distance is below this.
     pub theta: f64,
+    pub walk: Walk,
+    /// Steps between full tree rebuilds (sort + build); between them the tree is only refitted to the new
+    /// positions. 1: rebuild every step.
+    pub rebuild_every: u32,
     /// Random speed spread, as a fraction of the circular speed.
     pub dispersion: f64,
 }
@@ -67,6 +94,8 @@ impl Default for SimConfig {
             dt_myr: 0.25,
             softening_pc: 20.0,
             theta: 0.6,
+            rebuild_every: 4,
+            walk: Walk::Particle,
             dispersion: 0.1,
         }
     }
@@ -138,6 +167,13 @@ pub struct Sim {
     pub steps: u64,
 }
 
+fn begin<'e>(encoder: &'e mut wgpu::CommandEncoder, timer: &mut GpuTimer, label: &'static str) -> wgpu::ComputePass<'e> {
+    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: timer.compute(label) })
+}
+
+/// The stages a step's GPU time is split into (timer labels).
+pub const STAGES: [&str; 5] = ["integrate", "sort", "gather", "tree", "force"];
+
 fn module(body: &str) -> String {
     format!("{}{}", prelude(), body)
 }
@@ -155,8 +191,8 @@ impl Sim {
         anyhow::ensure!(n >= 1, "a universe needs at least one particle");
         cfg.particles = n;
         let groups = Groups::for_items(n, 256);
-        let force_groups = Groups::for_items(n, FORCE_GROUP);
-        let force_row = force_groups.x * FORCE_GROUP;
+        let force_groups = Groups::for_items(n, cfg.walk.workgroup());
+        let force_row = force_groups.x * cfg.walk.workgroup();
 
         let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
         let make = |label: &str, bytes: &[u8], vertex: bool| {
@@ -200,7 +236,7 @@ impl Sim {
                 eps2_c: cfg.central_softening_pc.powi(2) as f32,
             },
         );
-        // the force pass runs 128 to a group: its row must be the same length
+        // the force pass's workgroups have their own size, so its rows have their own length
         let force_common = uniform(
             d,
             "common (force)",
@@ -233,8 +269,23 @@ impl Sim {
             ),
             gather: Kernel::new(d, "gather", &module(include_str!("../../shaders/gather.wgsl")), &[U, R, R, R, R, W, W, W], &["main"]),
             karras: Kernel::new(d, "karras", &module(include_str!("../../shaders/karras.wgsl")), &[U, R, W, W, W], &["main"]),
-            moments: Kernel::new(d, "moments", &module(include_str!("../../shaders/moments.wgsl")), &[U, R, R, R, R, W, W], &["main"]),
-            force: Kernel::new(d, "force", &module(include_str!("../../shaders/force.wgsl")), &[U, R, R, R, R, W], &["main"]),
+            moments: Kernel::new(
+                d,
+                "moments",
+                &module(include_str!("../../shaders/moments.wgsl")),
+                &[U, R, R, R, R, W, W],
+                &["reset", "main"],
+            ),
+            force: Kernel::new(
+                d,
+                "force",
+                &module(match cfg.walk {
+                    Walk::Group => include_str!("../../shaders/force.wgsl"),
+                    Walk::Particle => include_str!("../../shaders/force_particle.wgsl"),
+                }),
+                &[U, R, R, R, R, W],
+                &["main"],
+            ),
         };
         let sort = RadixSort::new(d, n);
         let set = |s: usize| {
@@ -270,45 +321,67 @@ impl Sim {
         };
         // the first step's half kick needs forces
         let mut enc = d.create_command_encoder(&Default::default());
-        {
-            let mut pass = enc.begin_compute_pass(&Default::default());
-            sim.encode_forces(&mut pass);
-        }
+        sim.encode_forces(&mut enc, &mut GpuTimer::new(d, &gpu.queue, false));
         gpu.queue.submit([enc.finish()]);
         Ok(sim)
     }
 
     /// Sort the current set into the other one, build the tree and find the forces; the other set becomes current.
-    fn encode_forces(&mut self, pass: &mut wgpu::ComputePass) {
+    /// Each stage is its own compute pass so the timer can time it (labels "sort", "gather", "tree", "force").
+    fn encode_forces(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer) {
         let (s, o) = (self.cur, 1 - self.cur);
         let g = self.groups;
-        self.k.morton.run(pass, "bbox_reset", &self.sets[s].morton, Groups { x: 1, y: 1 });
-        self.k.morton.run(pass, "bbox_reduce", &self.sets[s].morton, g);
-        self.k.morton.run(pass, "keys_main", &self.sets[s].morton, g);
-        self.sort.encode(pass);
-        self.k.gather.run(pass, "main", &self.sets[s].gather, g);
-        self.k.karras.run(pass, "main", &self.karras, g);
-        self.k.moments.run(pass, "main", &self.sets[o].moments, g);
-        self.k.force.run(pass, "main", &self.sets[o].force, self.force_groups);
+        {
+            let mut pass = begin(encoder, timer, "sort");
+            self.k.morton.run(&mut pass, "bbox_reset", &self.sets[s].morton, Groups { x: 1, y: 1 });
+            self.k.morton.run(&mut pass, "bbox_reduce", &self.sets[s].morton, g);
+            self.k.morton.run(&mut pass, "keys_main", &self.sets[s].morton, g);
+            self.sort.encode(&mut pass);
+        }
+        {
+            let mut pass = begin(encoder, timer, "gather");
+            self.k.gather.run(&mut pass, "main", &self.sets[s].gather, g);
+        }
+        {
+            let mut pass = begin(encoder, timer, "tree");
+            self.k.karras.run(&mut pass, "main", &self.karras, g);
+            self.k.moments.run(&mut pass, "main", &self.sets[o].moments, g);
+        }
         self.cur = o;
+        self.encode_force_pass(encoder, timer);
     }
 
-    /// Records `k` steps into the encoder (one compute pass, timed as "step" when the timer has room).
-    pub fn encode_steps(&mut self, encoder: &mut wgpu::CommandEncoder, k: u32, timer: &mut GpuTimer) {
-        if k == 0 {
-            return;
+    /// The same tree, its moments recomputed for the particles' new positions ("refit"), then the forces.
+    fn encode_refit(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer) {
+        {
+            let mut pass = begin(encoder, timer, "tree");
+            self.k.moments.run(&mut pass, "reset", &self.sets[self.cur].moments, self.groups);
+            self.k.moments.run(&mut pass, "main", &self.sets[self.cur].moments, self.groups);
         }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("step"),
-            timestamp_writes: timer.compute("step"),
-        });
+        self.encode_force_pass(encoder, timer);
+    }
+
+    fn encode_force_pass(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer) {
+        let mut pass = begin(encoder, timer, "force");
+        self.k.force.run(&mut pass, "main", &self.sets[self.cur].force, self.force_groups);
+    }
+
+    /// Records `k` steps into the encoder; passes are timed under "integrate", "sort", "gather", "tree", "force".
+    pub fn encode_steps(&mut self, encoder: &mut wgpu::CommandEncoder, k: u32, timer: &mut GpuTimer) {
         for _ in 0..k {
-            self.k.integrate.run(&mut pass, "kick_drift", &self.sets[self.cur].integrate, self.groups);
-            self.encode_forces(&mut pass);
+            {
+                let mut pass = begin(encoder, timer, "integrate");
+                self.k.integrate.run(&mut pass, "kick_drift", &self.sets[self.cur].integrate, self.groups);
+            }
+            if (self.steps + 1).is_multiple_of(self.cfg.rebuild_every.max(1) as u64) {
+                self.encode_forces(encoder, timer);
+            } else {
+                self.encode_refit(encoder, timer);
+            }
+            self.steps += 1;
+            let mut pass = begin(encoder, timer, "integrate");
             self.k.integrate.run(&mut pass, "kick", &self.sets[self.cur].integrate, self.groups);
         }
-        drop(pass);
-        self.steps += k as u64;
         self.time_myr += k as f64 * self.cfg.dt_myr;
     }
 

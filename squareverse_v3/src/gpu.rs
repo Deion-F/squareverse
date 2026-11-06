@@ -59,11 +59,15 @@ fn rank(adapter: &wgpu::Adapter) -> (u8, u8) {
         wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => 2,
         wgpu::DeviceType::Cpu => 0,
     };
-    // On Windows DX12 first: it is the drivers' best-kept path. Measured 2026-11-06: an Intel UHD 630 (driver
-    // 26.20.100.7642) crashes the process on Vulkan and runs fine on DX12. Set WGPU_BACKEND to override.
+    // Vulkan first: it compiles our shaders in ~2 s, where DX12 with its built-in compiler (FXC) takes ~170 s
+    // (measured 2026-11-06; DX12 uses the fast DXC instead when dxcompiler.dll sits beside the exe). Except on Intel:
+    // a UHD 630 (driver 26.20.100.7642) crashes the process on Vulkan and runs fine on DX12.
+    // Set WGPU_BACKEND to override.
+    let intel = i.vendor == 0x8086;
     let backend = match i.backend {
-        wgpu::Backend::Dx12 => 3,
-        wgpu::Backend::Vulkan | wgpu::Backend::Metal => 2,
+        wgpu::Backend::Vulkan if !intel => 3,
+        wgpu::Backend::Dx12 | wgpu::Backend::Metal => 2,
+        wgpu::Backend::Vulkan => 1,
         wgpu::Backend::Gl => 1,
         _ => 0,
     };

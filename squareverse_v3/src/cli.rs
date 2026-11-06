@@ -25,6 +25,15 @@ pub struct Cli {
     /// Myr per step.
     #[arg(long)]
     pub dt: Option<f64>,
+    /// Opening angle of the gravity tree (smaller: more accurate, slower).
+    #[arg(long)]
+    pub theta: Option<f64>,
+    /// How the force pass walks the tree (default: chosen for the GPU).
+    #[arg(long, value_enum)]
+    pub walk: Option<crate::sim::Walk>,
+    /// Steps between full tree rebuilds (refits in between).
+    #[arg(long)]
+    pub rebuild_every: Option<u32>,
     /// Use only a GPU whose name contains this (any case).
     #[arg(long)]
     pub adapter: Option<String>,

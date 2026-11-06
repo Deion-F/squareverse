@@ -4,9 +4,10 @@ Galaxies and the universe they live in, simulated on the GPU and drawn as square
 `squareverse_v2` in Rust + wgpu: one native program per OS (Windows: DX12 / Vulkan, Mac: Metal, Linux: Vulkan / GL),
 nothing for users to install. The design, the decisions behind it and progress are in `../PLAN_V3.md`.
 
-**Status: phase 0 (setup).** The engine runs a stand-in workload: stars orbiting one point mass, to prove the
-pieces underneath (fixed-point positions, GPU timing, drawing, the menu, headless runs and tests). Phase 1 replaces
-the point mass with real self-gravity.
+**Status: phase 1 (gravity core), first part done.** Every particle pulls on every other through a Barnes-Hut tree
+built on the GPU each step, plus a central point mass (phase 2 makes it a super well). Still to come in phase 1:
+adaptive per-particle time steps, and spreading a step over several frames so the frame rate holds when the sim
+can't keep up.
 
 ## Setting up a machine (WSL / Ubuntu), once
 
@@ -28,6 +29,7 @@ cargo run --release -- --particles 500000 --fps 30    # options: see --help
 cargo run --release -- --headless --steps 500 --snapshot frame.png   # no window: JSON report (+ a PNG)
 cargo run --release -- --list-adapters                # the GPUs wgpu can see
 cargo run --release -- --exit-after-frames 600        # close after 600 frames and print the fps reached
+cargo run --release -- --headless --theta 0.5 --walk group --rebuild-every 1   # gravity options
 cargo test -- --nocapture                             # unit + GPU tests
 cargo build --release --target x86_64-pc-windows-gnu  # the Windows exe, from WSL (needs mingw-w64)
 ```
@@ -43,19 +45,47 @@ default 20 Mpc box one unit is ~1e-12 pc, the same everywhere. Separations are t
 into floats, so they are as precise near the centre of a galaxy as in the voids, and the drawing subtracts the camera
 the same way (no jitter at any zoom).
 
-## The phase-0 scene
+## Gravity (`src/sim/mod.rs`, `src/sort.rs`, `shaders/`)
 
-`SimConfig::default()` (`src/sim/mod.rs`): a point mass of 1e10 Msun in the middle of a 20 Mpc box, stars spread
-evenly over the area between 1 and 15 kpc on near-circular orbits (3% random speed spread), softening 50 pc, 0.25 Myr
-a step, integrated by kick-drift-kick leapfrog (`shaders/step.wgsl`). Each star gets a mass from the Kroupa IMF
-(0.08 - 100 Msun) and a main-sequence temperature and luminosity (`src/sim/init.rs`), which set its colour and
-brightness.
+A step, all on the GPU, all deterministic (integer atomics only, so a seed gives the same state on the same GPU
+and backend):
 
-How many particles by default depends on the GPU (`src/budget.rs`, provisional until phase 1 measures them):
-1,000,000 on a discrete GPU, 250,000 on an integrated one, 500,000 on a known discrete GPU reached through a
-translation layer (WSL's OpenGL over D3D12), 200,000 on another unknown one, 30,000 in software. The frame-rate
-targets: 60 fps on the desktop (RTX 2070 Super); on the laptop (integrated Radeon) 60 if possible, never below a
-stable 30.
+1. **Kick, drift** (`integrate.wgsl`): half a kick with last step's acceleration, then the drift, in fixed point.
+2. **Sort** (`morton.wgsl`, `radix.wgsl`, `scan.wgsl`): the particles' bounding box and 48-bit Morton keys over it,
+   then a stable radix sort, 8 bits a pass, six passes (each 256-particle tile sorted in shared memory by eight 1-bit
+   splits, tiles placed by a scanned histogram). `gather.wgsl` then moves the particles into key order, so
+   neighbours in space are neighbours in memory.
+3. **Tree** (`karras.wgsl`, `moments.wgsl`): a binary radix tree over the sorted keys (Karras 2012), then each node's
+   mass, centre of mass (fixed point), bounding box, opening radius and second moments, climbing from the leaves.
+4. **Force** (`force_particle.wgsl`): each particle walks the tree; a node beyond its opening radius (size / theta +
+   the centre of mass's offset from the box centre) acts as a softened point mass plus its quadrupole, a nearer one
+   is opened. `--walk group` uses `force.wgsl` instead: 64 neighbouring particles walk together and share each node
+   read; more accurate at the same theta, slower on the GPUs measured so far.
+5. **Kick** with the new forces.
+
+Between full rebuilds (`rebuild_every`, 4) the tree is only refitted: the moments are recomputed for the new
+positions over the same tree, skipping the sort and build. Forces stay right (the opening test uses each node's
+actual bounds); only the tree's efficiency slowly drops.
+
+Measured 2026-11-06 (tests, Gaussian cluster of 20k against direct summation), force error median / 99th
+percentile: theta 0.6 3.1e-3 / 2.0e-2, theta 0.3 3.3e-4 / 2.3e-3 (group walk: 5.0e-4 / 7.9e-3 and 4.3e-5 / 5.6e-4).
+Without quadrupoles theta 0.6 was 2.5e-2 / 8.5e-2.
+
+## The scene
+
+`SimConfig::default()` (`src/sim/mod.rs`): a central point mass of 1e10 Msun (softening 50 pc) in the middle of a
+20 Mpc box, and a disc of 2e9 Msun (`disc_mass`) between 1 and 15 kpc on near-circular orbits (10% random speed
+spread; the circular speed counts the disc inside each radius), softening 20 pc, theta 0.6, 0.25 Myr a step. Each
+particle gets a mass from the Kroupa IMF (0.08 - 100 Msun), scaled so the disc weighs `disc_mass` (each particle then
+stands for several stars), and its star's main-sequence temperature and luminosity for its colour
+(`src/sim/init.rs`). The cold disc soon breaks into flocculent spiral arms and clumps. At 0.25 Myr steps their close
+encounters cost 1e-4 - 4e-4 of the energy over 500 Myr at 20k particles; 0.125 Myr steps keep it near 3e-6
+(adaptive steps will handle this).
+
+How many particles by default depends on the GPU (`src/budget.rs`): 500,000 on a discrete GPU, 50,000 on an
+integrated one (provisional until the laptop measures it), 250,000 on a known discrete GPU reached through a
+translation layer (WSL's OpenGL over D3D12). The frame-rate targets: 60 fps on the desktop (RTX 2070 Super); on the
+laptop (integrated Radeon) 60 if possible, never below a stable 30.
 
 ## The window
 
@@ -99,30 +129,40 @@ final state into a 1280 x 800 PNG with the window's default view and look (`src/
 
 ## Tests
 
-`cargo test -- --nocapture`. Unit tests: fixed-point round trip, wrap and sub-AU separations, the IMF's range and
-mean, the main sequence. GPU tests (`tests/gpu.rs`, one shared device; with no GPU they print why and check nothing,
-`SV_ALLOW_CPU=1` runs them in software): the same seed gives the same state and another seed doesn't; energy holds on
-the orbits; the GPU matches a CPU f64 reference (`src/sim/reference.rs`) with the disc centred on the box's corner,
-so particles cross the wrap and every step carries between the words.
+`cargo test --release -- --nocapture`. Unit tests: fixed-point round trip, wrap and sub-AU separations, the IMF's
+range and mean, the main sequence, the disc's mass. GPU tests (`tests/gpu.rs`, one shared device; with no GPU they
+print why and check nothing, `SV_ALLOW_CPU=1` runs them in software): the same seed gives the same state and another
+seed doesn't; tree forces against direct summation for both walks at two thetas; two bodies keep their orbit for 10
+orbits; energy with self-gravity; momentum without the central mass; the GPU matches a CPU f64 reference
+(`src/sim/reference.rs`) with the disc centred on the box's corner, so particles cross the wrap and every step carries
+between the words. `cargo test --release --test gpu -- --ignored --nocapture force_accuracy_table` prints the force
+error for theta 0.4 - 1.0.
 
-## Measured (2026-11-06, phase-0 workload, Windows exe on DX12)
+## Measured (2026-11-06, Windows exe)
 
-| GPU | particles | fps (target) | GPU ms a frame: step / draw / tonemap |
+Phase 1, self-gravity, per-particle walk, theta 0.6, rebuild every 4 steps, GPU ms a step:
+
+| GPU (backend) | particles | step | force / sort / tree / other |
 |---|---|---|---|
-| RTX 2070 Super | 1,000,000 | 59.9 (60) | 0.68 / 2.56 / 0.04 (4 steps a frame) |
-| Intel UHD 630 (integrated) | 250,000 | 59.2 (60), 29.9 (30) | 2.4 / 8.2 / 1.0 |
+| RTX 2070 Super (Vulkan) | 500,000 | 12.2 | 10.7 / 0.56 / 0.74 / 0.2 |
+| RTX 2070 Super (Vulkan) | 1,000,000 | 23.1 | 20.3 / 1.6 / 1.5 / 0.4 |
+| Intel UHD 630 (DX12) | 100,000 | 36.4 | 27.7 / 4.6 / 3.3 / 0.7 |
 
-GPU time a step, headless: RTX 2070 Super 0.032 ms at 250k, 0.13 ms at 1M, 0.54 ms at 4M; Intel UHD 630 0.60 ms at
-250k, 4.4 ms at 1M. The laptop's integrated Radeon has not been measured yet. Drawing is the largest cost on the
-integrated GPU.
+Window, RTX 2070 Super, 500,000 particles, a step a frame: 60.0 fps (worst frame 17.2 ms). The laptop has not been
+measured with self-gravity yet.
+
+Phase 0 (the stand-in point-mass workload): RTX 2070 Super 1,000,000 at 59.9 fps; Intel UHD 630 250,000 at 59.2;
+the laptop's integrated Radeon 250,000 at 59.7 (results in `../PLAN_V3.md`).
 
 ## Choosing the GPU
 
-The best adapter wins: discrete before integrated, then DX12 before Vulkan / Metal before OpenGL, never a software
-one unless `--allow-cpu` (`gpu::pick_adapter`). DX12 comes first on Windows because it is the drivers' best-kept
-path: this desktop's Intel UHD 630 (driver 26.20.100.7642) crashes the process on Vulkan and runs fine on DX12.
-`--adapter NAME` keeps only GPUs whose name contains NAME; the `WGPU_BACKEND` environment variable (`dx12`, `vulkan`,
-`metal`, `gl`) limits the backends (from WSL, pass it to the exe with `WSLENV=WGPU_BACKEND/w`).
+The best adapter wins: discrete before integrated, then Vulkan before DX12 / Metal before OpenGL, never a software
+one unless `--allow-cpu` (`gpu::pick_adapter`). Vulkan comes first because it compiles our shaders in ~2 s, where
+DX12 with its built-in compiler (FXC) takes ~170 s (DX12 uses the fast DXC instead when `dxcompiler.dll` and
+`dxil.dll` sit beside the exe). Intel GPUs are the exception and get DX12: this desktop's UHD 630 (driver
+26.20.100.7642) crashes the process on Vulkan. `--adapter NAME` keeps only GPUs whose name contains NAME; the
+`WGPU_BACKEND` environment variable (`dx12`, `vulkan`, `metal`, `gl`) limits the backends (from WSL, pass it to the exe
+with `WSLENV=WGPU_BACKEND/w`).
 
 ## Under WSL
 

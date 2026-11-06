@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-const MAX_PASSES: u32 = 16;
+const MAX_PASSES: u32 = 64;
 
 // read-back states
 const IDLE: u8 = 0;
@@ -148,6 +148,23 @@ impl GpuTimer {
         t.read.unmap();
         t.state.store(IDLE, Ordering::Release);
         true
+    }
+
+    /// The mean of the last times for passes with this name (several steps' passes share a name).
+    pub fn mean_ms(&self, label: &str) -> Option<f64> {
+        let v: Vec<f64> = self.last.iter().filter(|(l, _)| *l == label).map(|(_, ms)| *ms).collect();
+        (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
+    }
+
+    /// The pass names in the last times, in first-seen order.
+    pub fn labels(&self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        for (l, _) in &self.last {
+            if !out.contains(l) {
+                out.push(l);
+            }
+        }
+        out
     }
 
     /// Total of the last times for passes with this name.

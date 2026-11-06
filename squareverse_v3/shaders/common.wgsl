@@ -19,7 +19,8 @@ struct Common {
 // Particle arrays: pos vec4<u32> (fixed point), kin vec4<f32> (vx, vy, temperature K, luminosity Lsun),
 // body vec2<u32> (mass f32 bits, id). Node records: NODE_WORDS u32s a node: centre of mass (4, fixed point),
 // box (4: min x, min y, max x, max y, hi words relative to the origin), mass, opening radius^2, and the second
-// moments about the centre of mass sxx, sxy, syy (Msun pc^2) for the quadrupole (all f32 bits), one word spare.
+// moments about the centre of mass sxx, sxy, syy (Msun pc^2) for the quadrupole (all f32 bits), then the node's
+// particles: the first one's index and how many (a node covers a contiguous run of the sorted particles).
 // `parents`: internal node k's parent at k, particle j's at n + j.
 const NODE_WORDS: u32 = 16u;
 

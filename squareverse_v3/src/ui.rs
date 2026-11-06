@@ -26,7 +26,7 @@ impl UiState {
     pub fn new(particles: u32, seed: u64, fps_target: u32) -> Self {
         Self {
             paused: false,
-            steps_per_frame: 4,
+            steps_per_frame: 1,
             fps_target,
             brightness: crate::snapshot::default_look().brightness,
             exposure: crate::snapshot::default_look().exposure,

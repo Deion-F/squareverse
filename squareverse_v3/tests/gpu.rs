@@ -7,7 +7,7 @@ use squareverse::fixed::Fixed2;
 use squareverse::gpu::Gpu;
 use squareverse::headless;
 use squareverse::sim::init::Initial;
-use squareverse::sim::{Sim, SimConfig, State, reference, state_hash};
+use squareverse::sim::{Sim, SimConfig, State, Walk, reference, state_hash};
 use squareverse::timing::GpuTimer;
 use squareverse::units::G;
 
@@ -67,10 +67,13 @@ fn same_seed_gives_the_same_universe() {
 fn energy_holds_with_self_gravity() {
     let Some(g) = gpu() else { return };
     let g = g.lock().unwrap_or_else(|e| e.into_inner());
-    // 500 Myr: the inner orbits go round ~17 times, the outer ones not quite once
-    let r = headless::run(&g, small(20_000, 1), 2_000).unwrap();
+    // 250 Myr: the inner orbits go round ~8 times. The cold disc fragments into clumps; at 0.25 Myr steps their close
+    // encounters cost 1e-4 - 4e-4 of the energy by 500 Myr (it varies by seed), at 0.125 Myr ~3e-6: adaptive steps
+    // will handle it (PLAN_V3.md phase 1)
+    let cfg = SimConfig { dt_myr: 0.125, ..small(20_000, 1) };
+    let r = headless::run(&g, cfg, 2_000).unwrap();
     eprintln!("energy change over 2,000 steps with self-gravity: {:.2e}", r.energy_rel_change);
-    assert!(r.energy_rel_change.abs() < 2e-4, "{}", r.energy_rel_change);
+    assert!(r.energy_rel_change.abs() < 5e-5, "{}", r.energy_rel_change);
 }
 
 /// A Gaussian cluster (sigma 1 kpc) of equal masses: its field doesn't cancel the way a uniform disc's does.
@@ -89,9 +92,15 @@ fn cluster(cfg: &SimConfig, n: usize, seed: u64) -> Initial {
 fn tree_forces_match_direct_summation() {
     let Some(g) = gpu() else { return };
     let g = g.lock().unwrap_or_else(|e| e.into_inner());
-    // measured 2026-11-06 with quadrupoles: 0.6 -> median 3.1e-3, p99 2.0e-2; 0.3 -> 3.3e-4, 2.3e-3
-    for (theta, median_max, p99_max) in [(0.6, 5e-3, 3e-2), (0.3, 1e-3, 5e-3)] {
-        let cfg = SimConfig { central_mass: 0.0, theta, ..Default::default() };
+    // measured 2026-11-06 with quadrupoles: particle walk 0.6 -> median 3.1e-3, p99 2.0e-2; 0.3 -> 3.3e-4, 2.3e-3;
+    // group walk (more conservative) 0.6 -> 5.0e-4, 7.9e-3; 0.3 -> 4.3e-5, 5.6e-4
+    for (walk, theta, median_max, p99_max) in [
+        (Walk::Particle, 0.6, 5e-3, 3e-2),
+        (Walk::Particle, 0.3, 1e-3, 5e-3),
+        (Walk::Group, 0.6, 1e-3, 1.5e-2),
+        (Walk::Group, 0.3, 1e-4, 1.5e-3),
+    ] {
+        let cfg = SimConfig { central_mass: 0.0, theta, walk, ..Default::default() };
         let sim = Sim::from_initial(&g, cfg.clone(), &cluster(&cfg, 20_000, 5)).unwrap();
         let s = sim.read_state(&g).unwrap();
         let mut errs = Vec::new();
@@ -102,8 +111,8 @@ fn tree_forces_match_direct_summation() {
         }
         let median = percentile(&mut errs, 0.5);
         let p99 = percentile(&mut errs, 0.99);
-        eprintln!("theta {theta}: force error median {median:.2e}, 99th percentile {p99:.2e} ({} particles)", errs.len());
-        assert!(median < median_max && p99 < p99_max, "theta {theta}: median {median}, p99 {p99}");
+        eprintln!("{walk:?} walk, theta {theta}: force error median {median:.2e}, 99th percentile {p99:.2e} ({} particles)", errs.len());
+        assert!(median < median_max && p99 < p99_max, "{walk:?} theta {theta}: median {median}, p99 {p99}");
     }
 }
 
@@ -185,4 +194,26 @@ fn gpu_matches_the_cpu_reference_across_the_box_edge() {
 fn hash_sees_one_changed_word() {
     let s = |x: u64| State { pos: vec![Fixed2 { x, y: 5 }], vel: vec![[1.0, 2.0]], mass: vec![1.0], acc: vec![[0.0; 4]] };
     assert_ne!(state_hash(&s(1)), state_hash(&s(2)));
+}
+
+/// Diagnostic, run on demand: `cargo test --release --test gpu -- --ignored --nocapture force_accuracy_table`.
+/// Force error against direct summation for a range of opening angles (Gaussian cluster, 20k particles).
+#[test]
+#[ignore]
+fn force_accuracy_table() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    for theta in [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] {
+        let cfg = SimConfig { central_mass: 0.0, theta, ..Default::default() };
+        let sim = Sim::from_initial(&g, cfg.clone(), &cluster(&cfg, 20_000, 5)).unwrap();
+        let s = sim.read_state(&g).unwrap();
+        let mut errs = Vec::new();
+        for i in (0..s.pos.len()).step_by(67) {
+            let direct = reference::direct_accel(&cfg, &s.pos, &s.mass, i);
+            let (ex, ey) = (s.acc[i][0] as f64 - direct[0], s.acc[i][1] as f64 - direct[1]);
+            errs.push(ex.hypot(ey) / direct[0].hypot(direct[1]));
+        }
+        let (m, p) = (percentile(&mut errs, 0.5), percentile(&mut errs, 0.99));
+        eprintln!("theta {theta:.1}: median {m:.2e}, 99th percentile {p:.2e}");
+    }
 }

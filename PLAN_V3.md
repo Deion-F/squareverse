@@ -286,3 +286,26 @@ Notes for phase 1:
   the desktop, and let `src/budget.rs` follow measurement.
 - The window's `--exit-after-frames` JSON line (fps, worst frame, GPU ms per pass) is the quick fps check on any
   machine.
+
+Phase 1 (started 2026-11-06):
+
+- [x] Self-gravity on the GPU: Morton keys, stable radix sort, gather, Karras tree, node moments (atomic records),
+  per-particle walk with monopole + quadrupole, KDK. All passes within 8 storage buffers; deterministic.
+- [x] Refit between rebuilds (`rebuild_every` 4), `--theta`, `--walk group|particle`, `--rebuild-every`; headless
+  `gpu_ms_by_stage` (integrate / sort / gather / tree / force).
+- [x] Tests: force vs direct sum (both walks, two thetas), two-body orbit, momentum, energy, seed, box edge.
+- [x] Vulkan preferred on Windows (DX12 + FXC takes ~170 s to compile the shaders; Intel keeps DX12).
+- [x] Measured (see squareverse_v3/README.md): RTX 500k 12.2 ms a step (window 60.0 fps), 1M 23.1 ms; Intel UHD 630
+  100k 36.4 ms. Defaults now 500k discrete, 50k integrated.
+- [ ] **Decide (user):** ship `dxcompiler.dll` + `dxil.dll` (Microsoft's DXC, from github.com/microsoft/
+  DirectXShaderCompiler releases) beside the exe so DX12 starts in seconds instead of ~170 s. Only matters for Intel
+  GPUs (DX12 only) or if Vulkan is missing. Not done: it means running a downloaded binary inside the program.
+- [ ] Laptop: measure self-gravity (`--headless --steps 40 --particles 50000`, and the window) and set the integrated
+  budget from it.
+- [ ] Adaptive (block) time steps: power-of-two bins from each particle's acceleration; only active particles get
+  forces in a sub-step, the tree refitted each sub-step. Expected several x fewer force evaluations in a disc, and it
+  fixes the close-encounter energy error at 0.25 Myr.
+- [ ] Spread a step over several frames when it doesn't fit (force pass in slices), drawing interpolated, so the
+  frame rate holds and only the sim slows (the plan's "sim speed drops before frame rate").
+- [ ] Drawing on integrated GPUs: compute splat for squares <= 1 px.
+- [ ] Phase 1 acceptance: 1M at >= 60 fps on the RTX (now 23 ms a step: needs the two items above); record 4M.

@@ -15,6 +15,8 @@ struct Body {
     com: vec4<u32>,
     m: f32,
     s: vec3<f32>,   // second moments about the centre of mass: xx, xy, yy
+    first: u32,     // its particles: the first one's index and how many
+    count: u32,
     bmin: vec2<u32>,
     bmax: vec2<u32>,
 }
@@ -32,6 +34,8 @@ fn load(r: u32) -> Body {
         b.bmin = rel(b.com);
         b.bmax = b.bmin;
         b.s = vec3<f32>(0.0);
+        b.first = j;
+        b.count = 1u;
         return b;
     }
     let o = NODE_WORDS * r;
@@ -41,6 +45,8 @@ fn load(r: u32) -> Body {
     b.m = bitcast<f32>(atomicLoad(&node[o + 8u]));
     b.s = vec3<f32>(bitcast<f32>(atomicLoad(&node[o + 10u])), bitcast<f32>(atomicLoad(&node[o + 11u])),
                     bitcast<f32>(atomicLoad(&node[o + 12u])));
+    b.first = atomicLoad(&node[o + 13u]);
+    b.count = atomicLoad(&node[o + 14u]);
     return b;
 }
 
@@ -48,6 +54,15 @@ fn load(r: u32) -> Body {
 fn shifted(b: Body, com: vec4<u32>) -> vec3<f32> {
     let d = fx_delta2(b.com, com) * c.unit_pc;
     return b.s + b.m * vec3<f32>(d.x * d.x, d.x * d.y, d.y * d.y);
+}
+
+// before a refit (moments again over the same tree, without Karras, which otherwise zeroes the counters)
+@compute @workgroup_size(256)
+fn reset(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = flat_index(gid, c.row);
+    if (i + 1u < c.n) {
+        atomicStore(&counter[i], 0u);
+    }
 }
 
 @compute @workgroup_size(256)
@@ -96,6 +111,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicStore(&node[o + 10u], bitcast<u32>(sm.x));
         atomicStore(&node[o + 11u], bitcast<u32>(sm.y));
         atomicStore(&node[o + 12u], bitcast<u32>(sm.z));
+        atomicStore(&node[o + 13u], min(a.first, b.first));
+        atomicStore(&node[o + 14u], a.count + b.count);
         k = parents[k];
     }
 }

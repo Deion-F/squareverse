@@ -26,6 +26,8 @@ pub struct Report {
     pub wall_ms_per_step: f64,
     /// GPU ms per step from timestamps (the median batch), if the adapter has them.
     pub gpu_ms_per_step: Option<f64>,
+    /// GPU ms per step by stage (medians over batches).
+    pub gpu_ms_by_stage: std::collections::BTreeMap<String, f64>,
     pub energy_initial: f64,
     pub energy_final: f64,
     pub energy_rel_change: f64,
@@ -40,6 +42,13 @@ pub fn config_from(cli: &Cli, gpu: &Gpu) -> SimConfig {
     };
     if let Some(dt) = cli.dt {
         cfg.dt_myr = dt;
+    }
+    if let Some(t) = cli.theta {
+        cfg.theta = t;
+    }
+    cfg.walk = cli.walk.unwrap_or_else(|| crate::sim::Walk::for_gpu(gpu));
+    if let Some(r) = cli.rebuild_every {
+        cfg.rebuild_every = r;
     }
     cfg
 }
@@ -69,13 +78,23 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
 
     submit(&mut sim, &mut timer, WARMUP_STEPS)?; // pipelines compile and caches warm here
     let mut gpu_ms = Vec::new();
+    let mut stages: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let start = Instant::now();
     let mut left = steps;
     while left > 0 {
         let k = left.min(BATCH);
         submit(&mut sim, &mut timer, k)?;
-        if let Some(ms) = timer.ms("step") {
-            gpu_ms.push(ms / k as f64);
+        // the timer holds the first steps' passes of the batch (each step has one force pass): per step, a stage's
+        // total over them / the steps (a sort every few steps is spread over them)
+        let mut step_ms = 0.0;
+        let timed_steps = timer.last.iter().filter(|(l, _)| *l == "force").count().max(1) as f64;
+        for label in timer.labels() {
+            let per_step = timer.ms(label).unwrap_or(0.0) / timed_steps;
+            stages.entry(label.to_string()).or_default().push(per_step);
+            step_ms += per_step;
+        }
+        if timer.enabled() && !timer.last.is_empty() {
+            gpu_ms.push(step_ms);
         }
         left -= k;
     }
@@ -94,6 +113,13 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
         sim_time_myr: sim.time_myr,
         wall_ms_per_step: if steps > 0 { wall / steps as f64 } else { 0.0 },
         gpu_ms_per_step: gpu_ms.get(gpu_ms.len() / 2).copied(),
+        gpu_ms_by_stage: stages
+            .into_iter()
+            .map(|(k, mut v)| {
+                v.sort_by(f64::total_cmp);
+                (k, v[v.len() / 2])
+            })
+            .collect(),
         energy_initial: e0,
         energy_final: e1,
         energy_rel_change: (e1 - e0) / e0.abs(),
