@@ -302,7 +302,7 @@ Phase 1 (started 2026-11-06):
   them beside the Windows exe and `gpu::instance_descriptor` points DX12 at them. DX12 start-up: Intel UHD 630
   168 -> 6.8 s, RTX 166 -> 3.8 s. Vulkan stays first on non-Intel GPUs (RTX 500k: 12.2 ms a step on Vulkan, 16.1 on
   DX12).
-- [ ] **Laptop check, phase 1** (user, on the laptop; paste the output lines into the table below). In WSL from the
+- [x] **Laptop check, phase 1** (2026-11-06; results below). In WSL from the
   repo root, after `git pull`:
 
   ```
@@ -323,12 +323,18 @@ Phase 1 (started 2026-11-06):
 
 | Date | Command | Adapter / backend | Particles | fps (target) | Worst frame ms | GPU ms a step / by stage |
 |---|---|---|---|---|---|---|
-| | `--headless --steps 40` | | 25,000 | n/a | n/a | |
-| | `--headless --steps 40` | | 50,000 | n/a | n/a | |
-| | `--headless --steps 40` | | 100,000 | n/a | n/a | |
-| | `--exit-after-frames 600` | | (default) | ( 60) | | |
-| | `--fps 30 --exit-after-frames 300` | | (default) | ( 30) | | |
-| | `--particles 100000 --exit-after-frames 600` | | 100,000 | ( 60) | | |
+| 2026-11-06 | `--headless --steps 40` | AMD Radeon (integrated) / Vulkan | 25,000 | n/a | n/a | 4.47 a step |
+| 2026-11-06 | `--headless --steps 40` | AMD Radeon (integrated) / Vulkan | 50,000 | n/a | n/a | 9.29 a step |
+| 2026-11-06 | `--headless --steps 40` | AMD Radeon (integrated) / Vulkan | 100,000 | n/a | n/a | 20.34 a step |
+| 2026-11-06 | `--exit-after-frames 600` | AMD Radeon (integrated) / Vulkan | 50,000 (default) | 59.9 ( 60) | 28.8 | integrate 0.29, tree 0.77, force 7.55, draw 0.26, tonemap 0.73 |
+| 2026-11-06 | `--fps 30 --exit-after-frames 300` | AMD Radeon (integrated) / Vulkan | 50,000 (default) | 30.1 ( 30) | 34.4 | integrate 0.33, tree 0.73, force 7.23, draw 0.28, tonemap 1.09 |
+| 2026-11-06 | `--particles 75000 --exit-after-frames 600` | AMD Radeon (integrated) / Vulkan | 75,000 | 50.8 ( 60) | 43.4 | integrate 0.54, tree 1.33, force 12.88, draw 0.38, tonemap 0.91 |
+| 2026-11-06 | `--particles 100000 --exit-after-frames 600` | AMD Radeon (integrated) / Vulkan | 100,000 | 39.6 ( 60) | 38.5 | integrate 0.74, sort 9.25, gather 0.42, tree 1.69, force 17.55, draw 0.46, tonemap 0.87 |
+
+Result: the 50k integrated default holds 60 fps (worst frame 28.8 ms); 75k and 100k miss 60 (both above 30, not run at the 30 target), so
+the default stays at 50k. The force walk is most of the frame. Vulkan is now picked first (was DX12 in phase 0).
+The Radeon now beats the UHD 630 stand-in at compute (20.3 vs 36 ms a step at 100k). In the 100k run a 9.25 ms
+`sort` stage shows up that the smaller runs don't report: worth a look when tuning.
 
 - [ ] Adaptive (block) time steps: power-of-two bins from each particle's acceleration; only active particles get
   forces in a sub-step, the tree refitted each sub-step. Expected several x fewer force evaluations in a disc, and it
