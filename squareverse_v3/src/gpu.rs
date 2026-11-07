@@ -41,6 +41,29 @@ pub fn prepare_platform() {
     }
 }
 
+/// The instance options: from the environment (WGPU_BACKEND etc.), plus DX12's shader compiler: DXC from
+/// dxcompiler.dll beside the exe when it is there (vendor/dxc, copied by build.rs), instead of the slow FXC.
+pub fn instance_descriptor(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::InstanceDescriptor {
+    let mut desc = match display {
+        Some(d) => wgpu::InstanceDescriptor::new_with_display_handle_from_env(d),
+        None => wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+    };
+    if std::env::var_os("WGPU_DX12_COMPILER").is_none()
+        && let Some(dxc) = dxc_beside_exe()
+    {
+        desc.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc { dxc_path: dxc };
+    }
+    desc
+}
+
+fn dxc_beside_exe() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let path = std::env::current_exe().ok()?.parent()?.join("dxcompiler.dll");
+    path.exists().then(|| path.to_string_lossy().into_owned())
+}
+
 pub fn summary(adapter: &wgpu::Adapter) -> AdapterSummary {
     let i = adapter.get_info();
     AdapterSummary {
@@ -59,8 +82,8 @@ fn rank(adapter: &wgpu::Adapter) -> (u8, u8) {
         wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => 2,
         wgpu::DeviceType::Cpu => 0,
     };
-    // Vulkan first: it compiles our shaders in ~2 s, where DX12 with its built-in compiler (FXC) takes ~170 s
-    // (measured 2026-11-06; DX12 uses the fast DXC instead when dxcompiler.dll sits beside the exe). Except on Intel:
+    // Vulkan first: it compiled our shaders in ~2 s, where DX12 with its built-in compiler (FXC) took ~170 s
+    // (measured 2026-11-06; with DXC beside the exe, `instance_descriptor`, DX12 is fast too). Except on Intel:
     // a UHD 630 (driver 26.20.100.7642) crashes the process on Vulkan and runs fine on DX12.
     // Set WGPU_BACKEND to override.
     let intel = i.vendor == 0x8086;
@@ -132,7 +155,7 @@ impl Gpu {
 
     /// A device with no window (headless runs and tests).
     pub fn headless(name: Option<&str>, allow_cpu: bool) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance = wgpu::Instance::new(instance_descriptor(None));
         let adapter = pick_adapter(&instance, name, allow_cpu, None)?;
         Self::open(instance, adapter)
     }

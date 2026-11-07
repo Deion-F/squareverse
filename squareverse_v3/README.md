@@ -158,8 +158,9 @@ the laptop's integrated Radeon 250,000 at 59.7 (results in `../PLAN_V3.md`).
 
 The best adapter wins: discrete before integrated, then Vulkan before DX12 / Metal before OpenGL, never a software
 one unless `--allow-cpu` (`gpu::pick_adapter`). Vulkan comes first because it compiles our shaders in ~2 s, where
-DX12 with its built-in compiler (FXC) takes ~170 s (DX12 uses the fast DXC instead when `dxcompiler.dll` and
-`dxil.dll` sit beside the exe). Intel GPUs are the exception and get DX12: this desktop's UHD 630 (driver
+DX12 with Windows' built-in compiler (FXC) took ~170 s. So the Windows build carries Microsoft's DXC
+(`vendor/dxc/`: `dxcompiler.dll` and `dxil.dll`, copied beside the exe by `build.rs`), which brings DX12 down to
+4 - 7 s; ship those two DLLs with the exe. Intel GPUs are the exception and get DX12: this desktop's UHD 630 (driver
 26.20.100.7642) crashes the process on Vulkan. `--adapter NAME` keeps only GPUs whose name contains NAME; the
 `WGPU_BACKEND` environment variable (`dx12`, `vulkan`, `metal`, `gl`) limits the backends (from WSL, pass it to the exe
 with `WSLENV=WGPU_BACKEND/w`).

@@ -96,8 +96,7 @@ impl Running {
         }
         let window = Arc::new(event_loop.create_window(attrs).context("opening the window")?);
 
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display.clone())));
+        let instance = wgpu::Instance::new(crate::gpu::instance_descriptor(Some(Box::new(display.clone()))));
         let surface = instance.create_surface(window.clone()).context("making the window's surface")?;
         let adapter = pick_adapter(&instance, cli.adapter.as_deref(), cli.allow_cpu, Some(&surface))?;
         let gpu = Gpu::open(instance, adapter)?;

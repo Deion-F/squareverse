@@ -297,11 +297,39 @@ Phase 1 (started 2026-11-06):
 - [x] Vulkan preferred on Windows (DX12 + FXC takes ~170 s to compile the shaders; Intel keeps DX12).
 - [x] Measured (see squareverse_v3/README.md): RTX 500k 12.2 ms a step (window 60.0 fps), 1M 23.1 ms; Intel UHD 630
   100k 36.4 ms. Defaults now 500k discrete, 50k integrated.
-- [ ] **Decide (user):** ship `dxcompiler.dll` + `dxil.dll` (Microsoft's DXC, from github.com/microsoft/
-  DirectXShaderCompiler releases) beside the exe so DX12 starts in seconds instead of ~170 s. Only matters for Intel
-  GPUs (DX12 only) or if Vulkan is missing. Not done: it means running a downloaded binary inside the program.
-- [ ] Laptop: measure self-gravity (`--headless --steps 40 --particles 50000`, and the window) and set the integrated
-  budget from it.
+- [x] DXC (user approved 2026-11-06): Microsoft's `dxcompiler.dll` + `dxil.dll` v1.9.2609 in
+  `squareverse_v3/vendor/dxc/` (sha256 checked against the release's digest, licences included); `build.rs` copies
+  them beside the Windows exe and `gpu::instance_descriptor` points DX12 at them. DX12 start-up: Intel UHD 630
+  168 -> 6.8 s, RTX 166 -> 3.8 s. Vulkan stays first on non-Intel GPUs (RTX 500k: 12.2 ms a step on Vulkan, 16.1 on
+  DX12).
+- [ ] **Laptop check, phase 1** (user, on the laptop; paste the output lines into the table below). In WSL from the
+  repo root, after `git pull`:
+
+  ```
+  cd squareverse_v3 && cargo build --release --target x86_64-pc-windows-gnu
+  E=target/x86_64-pc-windows-gnu/release/squareverse.exe
+  $E --list-adapters
+  for p in 25000 50000 100000; do $E --headless --steps 40 --particles $p | grep -E '"(name|backend|particles|gpu_ms_per_step)"' | tr -d '\n '; echo; done
+  $E --exit-after-frames 600
+  $E --fps 30 --exit-after-frames 300
+  $E --particles 100000 --exit-after-frames 600
+  ```
+
+  (The first lines are the headless step cost at 25k / 50k / 100k; the last three print one JSON line each: fps,
+  worst frame, GPU ms by stage.) Set the integrated default in `src/budget.rs` to the largest count that holds 60
+  fps, or at least a stable 30.
+
+### Laptop results, phase 1 (self-gravity)
+
+| Date | Command | Adapter / backend | Particles | fps (target) | Worst frame ms | GPU ms a step / by stage |
+|---|---|---|---|---|---|---|
+| | `--headless --steps 40` | | 25,000 | n/a | n/a | |
+| | `--headless --steps 40` | | 50,000 | n/a | n/a | |
+| | `--headless --steps 40` | | 100,000 | n/a | n/a | |
+| | `--exit-after-frames 600` | | (default) | ( 60) | | |
+| | `--fps 30 --exit-after-frames 300` | | (default) | ( 30) | | |
+| | `--particles 100000 --exit-after-frames 600` | | 100,000 | ( 60) | | |
+
 - [ ] Adaptive (block) time steps: power-of-two bins from each particle's acceleration; only active particles get
   forces in a sub-step, the tree refitted each sub-step. Expected several x fewer force evaluations in a disc, and it
   fixes the close-encounter energy error at 0.25 Myr.
