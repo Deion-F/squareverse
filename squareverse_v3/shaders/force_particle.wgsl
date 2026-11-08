@@ -9,7 +9,7 @@
 @group(0) @binding(1) var<storage, read> pos: array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read> body: array<vec2<u32>>;
 @group(0) @binding(3) var<storage, read> child: array<vec2<u32>>;
-@group(0) @binding(4) var<storage, read> node: array<vec4<u32>>;   // NODE_WORDS / 4 = 4 vec4s a node
+@group(0) @binding(4) var<storage, read> node: array<vec4<u32>>;   // NODE_VEC4 vec4s a node
 @group(0) @binding(5) var<storage, read_write> acc: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> todo_list: array<u32>;     // the particles to do (compact.wgsl)
 @group(0) @binding(8) var<storage, read> todo_n: array<u32>;
@@ -51,9 +51,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             eps2 = max(eps2_i, eps2_of(kind_of(bj)));
             d = fx_delta2(pos[j], q) * c.unit_pc;
         } else {
-            let extra = node[4u * r + 2u];  // (mass, opening radius^2, sxx, sxy)
-            let tail = node[4u * r + 3u];   // (syy, first particle, count, largest softening^2)
-            d = fx_delta2(node[4u * r], q) * c.unit_pc;
+            let extra = node[NODE_VEC4 * r + 2u];  // (mass, opening radius^2, sxx, sxy)
+            let tail = node[NODE_VEC4 * r + 3u];   // (syy, first particle, count, largest softening^2)
+            d = fx_delta2(node[NODE_VEC4 * r], q) * c.unit_pc;
             let open2 = bitcast<f32>(extra.y);
             // radius 0: a node under the softening scale, far enough unless it holds this particle
             let far = dot(d, d) > open2 && (open2 > 0.0 || i - tail.y >= tail.z);

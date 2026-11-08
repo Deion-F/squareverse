@@ -1,5 +1,6 @@
-// Once a step of dt, at its start (every particle's step ends there, so velocities are in step): stellar
-// evolution, and super wells swallowing what comes too close. Prepended with fixed.wgsl and common.wgsl.
+// Once a step of dt, at its start (every particle's step ends there, so velocities are in step): star formation,
+// stellar evolution and what stars give back (`emit`, spread to the gas by feedback.wgsl), and super wells
+// swallowing what comes too close. Prepended with fixed.wgsl and common.wgsl.
 //
 // Stellar evolution, from fitting formulas (no star interiors): main-sequence lifetime 10 Gyr x m^-2.5 (at least
 // 3 Myr); the last tenth of it a giant (cooler, much brighter); then a remnant by the star's mass: under 8 Msun a
@@ -17,12 +18,17 @@
 @group(0) @binding(1) var<storage, read> pos: array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read_write> kin: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> body: array<vec2<u32>>;
-@group(0) @binding(4) var<storage, read> about: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read_write> clock: array<u32>;          // [0]: steps of dt begun
-@group(0) @binding(6) var<storage, read_write> wells: array<u32>;          // each well's particle index
-@group(0) @binding(7) var<storage, read_write> sink: array<atomic<u32>>;   // per well: mass, px, py (lo, hi each)
+@group(0) @binding(4) var<storage, read_write> about: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> ctl: array<u32>;            // [3]: steps of dt begun (the clock)
+// each well's particle index at [w], then from MAX_WELLS what it swallowed: mass, px, py (lo, hi each) per well
+@group(0) @binding(6) var<storage, read_write> wsink: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read> gas: array<vec4<f32>>;            // (u, Σ, H, -) at 2i
+// what each star gives back this step: (mass, energy, new He, new C/N/O), (new Mg/Si, new Fe, -, -)
+@group(0) @binding(8) var<storage, read_write> emit: array<vec4<f32>>;
 
+const MAX_WELLS: u32 = 64u;
 const SINK_WORDS: u32 = 6u;
+const PART_NEW: u32 = 5u;   // about.w of stars born in the run
 const SINK_SCALE: f32 = 1024.0;   // fixed-point units per Msun (and per Msun pc / Myr)
 const TWO32: f32 = 4294967296.0;
 
@@ -71,20 +77,86 @@ fn remnant_mass(m: f32) -> f32 {
     return 0.25 * m;
 }
 
+fn hash(x: u32) -> u32 {
+    let v = x * 747796405u + 2891336453u;
+    let w = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+// a uniform number in [0, 1) from a particle's id, the clock and a stream number: the same every run
+fn random01(id: u32, k: u32) -> f32 {
+    return f32(hash(id ^ hash(ctl[3] * 4u + k)) >> 8u) / 16777216.0;
+}
+
+// a star mass from the Kroupa IMF (slope 1.3 from 0.08 to 0.5 Msun, 2.3 to 100), as src/sim/init.rs kroupa_mass
+fn kroupa(u1: f32, u2: f32) -> f32 {
+    var a = 1.3;
+    var lo = 0.08;
+    var hi = 0.5;
+    if (u1 >= 0.7611) {
+        a = 2.3;
+        lo = 0.5;
+        hi = 100.0;
+    }
+    let e = 1.0 - a;
+    return pow(pow(lo, e) + u2 * (pow(hi, e) - pow(lo, e)), 1.0 / e);
+}
+
+// the share of [a0, a1] (Myr) that falls in [lo, hi]
+fn overlap(a0: f32, a1: f32, lo: f32, hi: f32) -> f32 {
+    return max(min(a1, hi) - max(a0, lo), 0.0);
+}
+
+// type Ia supernovae per Msun formed, by age: 1.3e-3 in all, delay time ∝ 1/t from 100 Myr to 13.7 Gyr
+fn ia_count(age: f32) -> f32 {
+    return 1.3e-3 * log(clamp(age, 100.0, 13700.0) / 100.0) / log(137.0);
+}
+
+// Gas that is dense (above gas_b.x Msun/pc^3, Σ over a disc 2 z0 thick) and cool (below gas_b.y K, or within 3x
+// of the dense gas's equation of state, common.wgsl eos_u) turns into a
+// star particle with chance 1 - exp(-eff dt / t_ff), t_ff = sqrt(3 pi / (32 G rho)) (a set efficiency per free-fall
+// time, as Kennicutt-Schmidt). It keeps its mass and elements; its star's mass is drawn from the IMF.
+fn form_star(i: u32, b: vec2<u32>) {
+    let g = gas[2u * i];
+    let rho = g.y / (2.0 * c.gas_b.w);
+    // cool enough: under the set temperature, or on (or near) the dense gas's equation of state
+    if (rho < c.gas_b.x || g.x > max(u_of_temperature(c.gas_b.y), 3.0 * eos_u(g.y))) {
+        return;
+    }
+    let tff = sqrt(3.0 * 3.14159265 / (32.0 * c.g * rho));
+    let id = b.y & ID_MASK;
+    if (random01(id, 0u) >= 1.0 - exp(-c.gas_b.z * c.dt / tff)) {
+        return;
+    }
+    let m = kroupa(random01(id, 1u), random01(id, 2u));
+    body[i] = vec2<u32>(b.x, (K_STAR << KIND_SHIFT) | id);
+    about[i] = vec4<f32>(f32(ctl[3]) * c.dt, m, bitcast<f32>(b.x), bitcast<f32>(PART_NEW));
+    let v = kin[i];
+    kin[i] = vec4<f32>(v.xy, main_sequence(m));
+}
+
 @compute @workgroup_size(256)
 fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = flat_index(gid, c.row);
     if (i >= c.n) {
         return;
     }
+    emit[2u * i] = vec4<f32>(0.0);
+    emit[2u * i + 1u] = vec4<f32>(0.0);
     let mt = about[i];
     let b = body[i];
     let kind = kind_of(b);
+    if (kind == K_GAS) {
+        if (c.gas_d.y > 0.5 && ctl[3] > 0u) {
+            form_star(i, b);
+        }
+        return;
+    }
     if (mt.y <= 0.0 || kind == K_GONE || kind == K_DM || kind == K_WELL) {
         return;
     }
     let m = mt.y;
-    let age = f32(clock[0]) * c.dt - mt.x;
+    let age = f32(ctl[3]) * c.dt - mt.x;
     let life = lifetime(m);
     var k = K_STAR;
     var tl: vec2<f32>;
@@ -113,14 +185,43 @@ fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         mass = mt.z * (1.0 - min(0.046 * log(max(age, 0.0) / 0.276 + 1.0), 0.5));
     }
+    let old_mass = bitcast<f32>(b.x);
     body[i] = vec2<u32>(bitcast<u32>(mass), (k << KIND_SHIFT) | (b.y & ID_MASK));
     let v = kin[i];
     kin[i] = vec4<f32>(v.xy, tl);
+
+    // what goes back to the gas this step (none at the clock's first tick: that is the start state)
+    if (ctl[3] == 0u || c.gas_d.z < 0.5) {
+        return;
+    }
+    let dm = max(old_mass - mass, 0.0);
+    var energy = 0.0;
+    var fe_ia = 0.0;
+    if (c.single_stars == 1u) {
+        if (kind == K_STAR && k != K_STAR && m >= 8.0) {
+            energy = c.gas_d.x;   // its core-collapse supernova
+        }
+    } else {
+        // core-collapse supernovae, 0.0118 per Msun formed (Kroupa, 8 - 100 Msun), spread over ages 3 - 40 Myr
+        energy = mt.z * 0.0118 / 37.0 * overlap(age - c.dt, age, 3.0, 40.0) * c.gas_d.x;
+        let n_ia = mt.z * (ia_count(age) - ia_count(age - c.dt));
+        energy += n_ia * c.gas_d.x;
+        fe_ia = 0.7 * n_ia;
+    }
+    // new elements in what is given back: early (core collapse) rich in O, Mg, Si, some Fe; later (AGB) C, N
+    var fresh: vec4<f32>;
+    if (age < 40.0 || (c.single_stars == 1u && m >= 8.0)) {
+        fresh = vec4<f32>(0.08, 0.0715, 0.0275, 0.011) * dm;
+    } else {
+        fresh = vec4<f32>(0.05, 0.02, 0.0, 0.0) * dm;
+    }
+    emit[2u * i] = vec4<f32>(dm, energy, fresh.x, fresh.y);
+    emit[2u * i + 1u] = vec4<f32>(fresh.z, fresh.w + fe_ia, 0.0, 0.0);
 }
 
 @compute @workgroup_size(1)
 fn tick_clock() {
-    clock[0] += 1u;
+    ctl[3] += 1u;
 }
 
 // each well's index in the (sorted) particle arrays
@@ -132,7 +233,7 @@ fn find_wells(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let w = bitcast<u32>(about[i].w);
     if (w < c.n_wells) {
-        wells[w] = i;
+        atomicStore(&wsink[w], i);
     }
 }
 
@@ -141,14 +242,14 @@ fn add64(at: u32, x: f32) {
     let v = x * SINK_SCALE;
     let hi = floor(v / TWO32);
     let lo = u32(v - hi * TWO32);
-    let old = atomicAdd(&sink[at], lo);
+    let old = atomicAdd(&wsink[MAX_WELLS + at], lo);
     let carry = select(0u, 1u, old + lo < old);
-    atomicAdd(&sink[at + 1u], bitcast<u32>(i32(hi)) + carry);
+    atomicAdd(&wsink[MAX_WELLS + at + 1u], bitcast<u32>(i32(hi)) + carry);
 }
 
 fn read64(at: u32) -> f32 {
-    let lo = atomicLoad(&sink[at]);
-    let hi = bitcast<i32>(atomicLoad(&sink[at + 1u]));
+    let lo = atomicLoad(&wsink[MAX_WELLS + at]);
+    let hi = bitcast<i32>(atomicLoad(&wsink[MAX_WELLS + at + 1u]));
     return (f32(hi) * TWO32 + f32(lo)) / SINK_SCALE;
 }
 
@@ -163,7 +264,7 @@ fn swallow(@builtin(global_invocation_id) gid: vec3<u32>) {
     // a population particle stands for ~10^5 - 10^6 stars spread over the softening length: a well can't take it
     // whole (real stars are torn apart only within ~1e-5 pc of a well). It took ~500 of them in 2 Gyr (100k,
     // 2026-11-08), growing 4e6 -> 5e8 Msun. Single stars only, for now (phase 3 adds gas, phase 4 wells)
-    if (kind == K_WELL || kind == K_GONE || kind == K_DM || c.single_stars == 0u) {
+    if (kind == K_WELL || kind == K_GONE || kind == K_DM || (c.single_stars == 0u && kind != K_GAS)) {
         return;
     }
     let q = pos[i];
@@ -172,7 +273,7 @@ fn swallow(@builtin(global_invocation_id) gid: vec3<u32>) {
     var best = NONE;
     var best_r2 = c.acc_r2;
     for (var w = 0u; w < c.n_wells; w++) {
-        let j = wells[w];
+        let j = atomicLoad(&wsink[w]);
         let d = fx_delta2(pos[j], q) * c.unit_pc;
         let r2 = dot(d, d);
         let dv = v - kin[j].xy;
@@ -203,7 +304,7 @@ fn swallow_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
     let at = w * SINK_WORDS;
     let dm = read64(at);
     if (dm > 0.0) {
-        let j = wells[w];
+        let j = atomicLoad(&wsink[w]);
         let b = body[j];
         let m = bitcast<f32>(b.x);
         let k = kin[j];
@@ -212,6 +313,6 @@ fn swallow_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
         kin[j] = vec4<f32>(v, k.zw);
     }
     for (var x = 0u; x < SINK_WORDS; x++) {
-        atomicStore(&sink[at + x], 0u);
+        atomicStore(&wsink[MAX_WELLS + at + x], 0u);
     }
 }

@@ -17,7 +17,7 @@ struct ViewUniform {
     square_px: f32,
     brightness: f32,
     extrap_myr: f32,
-    show_dm: u32,
+    flags: u32,
 }
 
 #[repr(C)]
@@ -69,6 +69,8 @@ pub struct Look {
     pub exposure: f32,
     /// Draw the dark matter (dim violet), normally unseen.
     pub show_dm: bool,
+    /// Draw the gas (on by default).
+    pub show_gas: bool,
 }
 
 struct Hdr {
@@ -282,7 +284,7 @@ impl Renderer {
             square_px: look.square_px,
             brightness: look.brightness,
             extrap_myr: extrap_myr as f32,
-            show_dm: look.show_dm as u32,
+            flags: look.show_dm as u32 | ((!look.show_gas) as u32) << 1,
         };
         queue.write_buffer(&self.view_buf, 0, bytemuck::bytes_of(&view));
         let tone = ToneUniform { exposure: look.exposure, manual_srgb: self.manual_srgb as u32, _pad: [0; 2] };

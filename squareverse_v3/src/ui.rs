@@ -22,6 +22,7 @@ pub struct UiState {
     pub scene: crate::sim::Scene,
     pub toomre_q: f64,
     pub show_dm: bool,
+    pub show_gas: bool,
     pub reset_requested: bool,
     pub view_reset_requested: bool,
     pub fullscreen_requested: bool,
@@ -43,6 +44,7 @@ impl UiState {
             scene: crate::sim::Scene::Galaxy,
             toomre_q: 1.5,
             show_dm: false,
+            show_gas: true,
             reset_requested: false,
             view_reset_requested: false,
             fullscreen_requested: false,
@@ -89,6 +91,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("[ / ]", "slower / faster (sim time per second)"),
     ("R", "reset the universe"),
     ("D", "show / hide the dark matter"),
+    ("G", "show / hide the gas"),
     ("F", "frame-rate target 60 / 30 fps"),
     ("Home", "reset the view"),
     ("F11", "fullscreen"),
@@ -256,6 +259,12 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut st.show_dm, "Dark matter (D)");
                 info(ui, "Draws the dark matter particles, dim violet. They are normally unseen, as in the real sky.");
+                ui.checkbox(&mut st.show_gas, "Gas (G)");
+                info(
+                    ui,
+                    "Draws the gas, coloured by temperature: cold gas dim blue, gas near 10,000 K the pink of glowing \
+                     hydrogen, hot gas (a million degrees and more, from supernovae) blue-white. Brighter where denser.",
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("Square size");

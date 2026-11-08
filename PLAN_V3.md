@@ -295,6 +295,17 @@ $E --list-adapters
 - **Late frames at 1M in the galaxy window:** 59.7 fps, worst frame 31.7 ms. The late-frame feedback shrank the sim
   budget to 6.4 ms, giving 1.2 Myr/s. Find what the timestamps miss there (many small passes per frame?).
 
+### L4. Gas (phase 3), for the optimizer
+
+- **What:** after L2, the same commands. The galaxy now has gas. Also
+  `$E --headless --steps 10 --particles 50000 | grep -E '"(gpu_ms_per_myr|gas)"'` for the gas passes' share.
+- **Look for:** `myr_per_s` against L2's figures. On the RTX, gas slowed the galaxy 3.8 -> 2.2 Myr/s at 500k (the
+  gas passes are ~30% of the GPU time, and gas adds particles in deep bins).
+- **Then:**
+  - Set the integrated default (`src/budget.rs`) from the galaxy-with-gas figures, not L2's.
+  - If the gas passes dominate on the Radeon, candidates are a group walk for the gas density and force (the gas is
+    spatially sorted), and slicing the gas passes like the force pass (`Work::Gas` is one item).
+
 ## Progress
 
 Phase 0 (started 2026-11-06):
@@ -506,4 +517,43 @@ Phase 2 (started 2026-11-08):
   - The bulge alone loses 1.5 - 5% of its energy in 200 Myr, depending on the step settings. In the full galaxy
     it's 0.35% over 2 Gyr.
 - [ ] **Laptop:** L2 in the laptop backlog.
+
+Phase 3 (started 2026-11-08):
+
+- [x] **Gas particles** (kind 7): a gas record per particle ((u, Σ, H, -), (hydro ax, ay, du/dt, signal speed)) and
+  element mass fractions (He, C/N/O, Mg/Si, Fe) for every particle, gathered with the sort.
+  - The gas gets its own tree class (Morton bits 46 - 47), and nodes get the largest H (20-word nodes).
+  - A shared control buffer holds the list length, the gas run and the clock, to stay within 8 storage buffers.
+- [x] **SPH** (`hydro.wgsl`): Wendland C2, ~24 neighbours, adaptive H (25 pc - 3 kpc), Monaghan viscosity, density
+  and force walks over the gas tree; pairs within max(H_i, H_j).
+- [x] **Cooling and heating:** Koyama & Inutsuka below 10^4 K, CIE above (metallicity-blended), solved implicitly.
+  - **Floors:** 100 K, Jeans, and the effective EOS P ∝ rho^(4/3) above the star formation density.
+  - **Courant** step limit.
+- [x] **Star formation:** 0.1 cm^-3, cool or on the EOS, 1% per free-fall time, stochastic and deterministic (a hash
+  of id and clock); whole gas particle -> star particle.
+- [x] **Stellar feedback:** mass loss, elements (core collapse, AGB, Ia) and supernova energy go to the nearest gas
+  (64-bit atomics). The energy is heat in one particle, capped at what its shortest step can follow.
+- [x] **Galaxy:** a gas disc of 1e10 Msun (2x the stars' scale length) and metallicity gradients (gas and stars,
+  older stars poorer).
+  - Drawn by temperature (G toggles it).
+  - Headless galaxy figures: gas mass, hot gas, metallicity, new stars, Kennicutt-Schmidt rings, gas half-mass
+    radius and temperatures.
+  - Flags: `--no-feedback`, `--no-cooling`, `--no-star-formation`, `--gas-mass`.
+- [x] **Problems found and fixed (2026-11-08):**
+  - Cooling gas collapsed to a ~1 pc kernel reach; the Courant step fell under the shortest one and the disc blew
+    apart within 300 Myr. Fixed with an H floor of half the softening.
+  - Repeated supernova heat in one particle ran away. Fixed with the heat cap at injection.
+  - The cooled gas fragmented into ~40 massive clumps. Fixed with the effective EOS.
+- [x] **Tests (15 pass):** a hot blob keeps its energy (1.5% over 10 Myr) and momentum; hot gas cools; a galaxy's gas
+  forms stars, its metals rise, later stars are richer, no blow-out or collapse.
+- [x] **Acceptance** (100k, 300 Myr):
+  - **Kennicutt-Schmidt:** within 2 - 4x at Σ 5 - 260 Msun/pc².
+  - **Generations:** several, with rising metallicity (gas 1.12 -> 1.54 solar).
+  - **Stability:** no runaway cooling or blow-out (gas half-mass radius 8.0 -> 8.7 kpc).
+- [ ] **Carried to phase 4:** Bondi accretion (Eddington-capped) onto wells and AGN feedback. For now bound gas
+  within 2 pc is swallowed whole.
+- [ ] **Carried to phase 5:** gas merging and splitting (adaptive resolution for the gas between galaxies).
+- **Known:** dense star-forming knots remain (2D, 10% gas). Star formation is ~6 Msun/yr, high for the Milky Way;
+  `sf_efficiency` (0.01) and the gas fraction tune it. Material shed by stars arrives without the star's momentum.
+- [ ] **Laptop:** L4 in the laptop backlog.
 

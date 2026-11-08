@@ -10,6 +10,7 @@
 @group(0) @binding(4) var<storage, read> parents: array<u32>;
 @group(0) @binding(5) var<storage, read_write> counter: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> node: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read> gas: array<vec4<f32>>;   // (u, Σ, H, -) at 2i
 
 struct Body {
     com: vec4<u32>,
@@ -18,6 +19,7 @@ struct Body {
     first: u32,     // its particles: the first one's index and how many
     count: u32,
     eps2: f32,      // the largest softening^2 among them
+    hmax: f32,      // the largest gas kernel reach H among them
     bmin: vec2<u32>,
     bmax: vec2<u32>,
 }
@@ -33,6 +35,7 @@ fn load(r: u32) -> Body {
         b.com = pos[j];
         b.m = bitcast<f32>(body[j].x);
         b.eps2 = eps2_of(kind_of(body[j]));
+        b.hmax = select(0.0, gas[2u * j].z, kind_of(body[j]) == K_GAS);
         b.bmin = rel(b.com);
         b.bmax = b.bmin;
         b.s = vec3<f32>(0.0);
@@ -50,6 +53,7 @@ fn load(r: u32) -> Body {
     b.first = atomicLoad(&node[o + 13u]);
     b.count = atomicLoad(&node[o + 14u]);
     b.eps2 = bitcast<f32>(atomicLoad(&node[o + 15u]));
+    b.hmax = bitcast<f32>(atomicLoad(&node[o + 16u]));
     return b;
 }
 
@@ -122,6 +126,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicStore(&node[o + 13u], min(a.first, b.first));
         atomicStore(&node[o + 14u], a.count + b.count);
         atomicStore(&node[o + 15u], bitcast<u32>(max(a.eps2, b.eps2)));
+        atomicStore(&node[o + 16u], bitcast<u32>(max(a.hmax, b.hmax)));
         k = parents[k];
     }
 }

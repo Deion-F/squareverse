@@ -4,11 +4,15 @@ Galaxies and the universe they live in, simulated on the GPU and drawn as square
 `squareverse_v2` in Rust + wgpu: one native program per OS (Windows: DX12 / Vulkan, Mac: Metal, Linux: Vulkan / GL),
 nothing for users to install. The design, the decisions behind it and progress are in `../PLAN_V3.md`.
 
-**Status: phase 2 (a galaxy, collisionless) done.** The default scene is a Milky-Way-like galaxy in balance: a
-disc of stars, a bulge, a dark matter halo and a super well at the centre. Its stars age, turn into giants and leave
-white dwarfs, neutron stars and black holes. Gravity is a Barnes-Hut tree on the GPU, each particle steps as often as
-it needs (block time steps), and the frame rate holds while the sim slows instead. Next: gas and star formation
-(phase 3).
+**Status: phase 3 (gas and the star cycle) done.** The default scene is a Milky-Way-like galaxy in balance: a disc
+of stars, a gas disc, a bulge, a dark matter halo and a super well at the centre.
+- **Gas:** SPH hydrodynamics. It cools and forms stars (near the Kennicutt-Schmidt law).
+- **Stars:** they age into giants and remnants. They give back mass, elements (He, C/N/O, Mg/Si, Fe) and supernova
+  heat, so each generation forms richer in metals.
+- **Gravity:** a Barnes-Hut tree on the GPU. Each particle steps as often as it needs, and the frame rate holds
+  while the sim slows instead.
+
+Next: binaries and small super wells (phase 4), with gas accretion onto wells and their feedback.
 
 ## Setting up a machine (WSL / Ubuntu), once
 
@@ -34,6 +38,7 @@ cargo run --release -- --headless --theta 0.5 --walk group --rebuild-every 1   #
 cargo run --release -- --headless --dt 2 --levels 7 --eta 0.025 --eta-jerk 0.1    # time-step options
 cargo run --release -- --toomre-q 1.0                 # a cold galaxy disc: a bar and spiral arms
 cargo run --release -- --scene disc                   # the phase-1 test disc
+cargo run --release -- --headless --no-feedback --no-cooling --no-star-formation --gas-mass 0   # gas switches
 cargo test -- --nocapture                             # unit + GPU tests
 cargo build --release --target x86_64-pc-windows-gnu  # the Windows exe, from WSL (needs mingw-w64)
 ```
@@ -130,6 +135,57 @@ black hole, or swallowed. The kind is kept in the top 4 bits of its id word.
 - **Not for populations:** a population particle is never swallowed. One stands for a million stars spread over 50
   pc, and taking them whole grew the central well 4e6 -> 5e8 Msun in 2 Gyr.
 
+## Gas and the star cycle (phase 3)
+
+**SPH** (`shaders/hydro.wgsl`), 2D:
+- **Kernel:** Wendland C2 with ~24 neighbours. The reach H adapts to the density, between half the softening (25 pc)
+  and 3 kpc.
+- **Equations:** pressure P = (γ - 1) Σ u with γ 5/3, Monaghan artificial viscosity, "density - energy" form.
+- **Neighbours:** gas sorts into its own run and its own part of the tree (a class bit in the Morton key, like the
+  dark matter). Each tree node keeps its largest H, so every pair is found from both sides.
+- **Cost:** two walks per step: density, then pressure forces.
+
+**Cooling and heating** (`shaders/integrate.wgsl`), solved implicitly over each gas particle's step:
+- **Below 10^4 K:** Koyama & Inutsuka (2002), with photoelectric heating.
+- **Above:** collisional ionisation equilibrium, blended between primordial and solar by metallicity.
+- **Density:** a surface density Σ stands for a density Σ / 2 z0, with half-thickness z0 = 100 pc.
+- **Floors:**
+  - 100 K;
+  - a Jeans floor (the 2D Jeans length kept above 2 H);
+  - above the star formation density, an effective equation of state, P ∝ rho^(4/3) from 8,000 K (Schaye & Dalla
+    Vecchia 2008). Without it the cooled gas collapsed into ~40 massive clumps.
+- **Courant:** a gas particle's step also stays under 0.3 H / (signal speed).
+
+**Star formation** (`shaders/evolve.wgsl`):
+- **Where:** gas denser than 0.1 hydrogen atoms per cm³ that is cool (under 15,000 K, or on the equation of state).
+- **How fast:** with chance 1 - exp(-0.01 dt / t_ff) a step, the gas particle becomes a star particle. It keeps its
+  mass and elements; its star is drawn from the IMF.
+- **Determinism:** the dice are a hash of the particle id and the clock, so a seed gives the same run.
+
+**What stars give back** (`evolve.wgsl` emit, `feedback.wgsl`, `feedback_apply.wgsl`): each step, every star
+particle's mass loss goes to its nearest gas particle within 500 pc.
+- **Elements:** the star's birth elements plus new ones.
+  - Core-collapse era (under 40 Myr): rich in O, Mg, Si, some Fe.
+  - Later (AGB): C and N.
+  - Type Ia supernovae: Fe, 1.3e-3 per Msun formed, delay time ∝ 1/t from 100 Myr.
+- **Energy:** supernovae give 10^51 erg each, 0.0118 core-collapse per Msun formed over 3 - 40 Myr. All of it heats
+  that one neighbour (as stochastic thermal feedback), at most as hot as its shortest step can follow. A heated
+  particle takes a short step at once.
+- **Determinism:** the sums are 64-bit integer atomics.
+
+**Measured** (100k particles, RTX 2070 Super, 300 Myr, 2026-11-08):
+- **Star formation:** ~6 Msun/yr.
+- **Kennicutt-Schmidt:** within a factor 2 - 4 of the observed law at Σ 5 - 260 Msun/pc².
+- **Metals:** gas metallicity 1.12 -> 1.54 solar; stars born later are richer (1.63 -> 2.01 solar in the test's
+  150 Myr).
+- **Gas:** stays in its disc (half-mass radius 8.0 -> 8.7 kpc), mostly 10^4 K, ~5% above 10^5 K.
+- **Speed at 500k:** the window holds 60 fps at 2.2 Myr/s.
+
+**Not yet:**
+- gas accretion onto the wells (Bondi) and their feedback (phase 4); for now a well swallows bound gas within 2 pc;
+- merging and splitting gas particles;
+- gas momentum from stellar mass loss (the gas keeps its own velocity).
+
 ## The scenes
 
 **Galaxy** (the default, `init::galaxy`, roughly the Milky Way, `GalaxyConfig`):
@@ -139,7 +195,9 @@ black hole, or swallowed. The kind is kept in the top 4 bits of its id word.
 - **Halo:** dark matter, Σ ∝ 1 / sqrt(R² + 3 kpc²) out to 40 kpc, 3.5e11 Msun. In 2D with 1/r² gravity this gives a
   flat rotation curve, as Mestel's disc does, the way an isothermal sphere does in 3D.
 - **Centre:** a super well of 4e6 Msun.
-- **Particles:** 40% dark matter, 10% bulge, the rest disc. Disc stars are spread evenly over ages 0 - 10 Gyr, the
+- **Gas:** 1e10 Msun, exponential with twice the stars' scale length, at 10^4 K. Metallicity is solar at 8 kpc,
+  falling 0.06 dex per kpc.
+- **Particles:** 40% dark matter, 10% bulge, 10% gas, the rest disc. Disc stars are spread evenly over ages 0 - 10 Gyr, the
   bulge's are about 10 Gyr old, so many have already died at the start.
 
 **How the galaxy is put in balance:**
@@ -147,6 +205,7 @@ black hole, or swallowed. The kind is kept in the top 4 bits of its id word.
 2. One force pass on the GPU gives each particle's pull, averaged in rings into the circular speed curve.
 3. The velocities follow (`init::galaxy_velocities`):
    - **Bulge and halo:** no rotation, isotropic dispersion from the Jeans equation, Σσ²(R) = ∫ Σ g dR'.
+   - **Gas:** on circular orbits.
    - **Disc:** σ_R from Q (σ_R = Q 3.36 G Σ / κ), σ_φ = σ_R κ / 2Ω, and rotation from the circular speed less the
      asymmetric drift.
 
@@ -194,7 +253,7 @@ The menu is behind the button in the bottom-right corner (or Tab), with an (i) b
   - the scene (galaxy or test disc) and the galaxy's Toomre Q, for the next reset;
   - particles and seed for the next reset, with a button back to this GPU's default;
   - Reset.
-* **Display:** frame-rate target 60 / 30 fps, dark matter on / off (dim violet), brightness (light each star adds), exposure (the whole picture), square
+* **Display:** frame-rate target 60 / 30 fps, dark matter on / off (dim violet), gas on / off (by temperature), brightness (light each star adds), exposure (the whole picture), square
   size (1 - 6 px), reset view, fullscreen.
 * **Advanced:**
   - the GPU and backend, and the sim's GPU budget a frame;
@@ -212,6 +271,7 @@ the GPU and its total ms a frame.
 | [ / ] | slower / faster (sim time per second) |
 | R | reset the universe |
 | D | show / hide the dark matter |
+| G | show / hide the gas |
 | F | frame-rate target 60 / 30 fps |
 | Home | reset the view |
 | F11 | fullscreen |
@@ -262,6 +322,10 @@ runs them in software):
 - the galaxy has a flat rotation curve (within 10% from 4 to 16 kpc) and keeps its parts' sizes over 100 Myr;
 - stars of known mass and age become the right remnants with the right masses;
 - a well swallows a bound star and keeps mass and momentum, but not a fast one;
+- a hot gas blob expands and keeps its energy (within 2% over 10 Myr) and momentum;
+- gas at 10^6 K cools to ~10^4 K and stays above the floor;
+- the galaxy's gas forms stars, its metallicity rises, later stars are richer, and the gas neither blows out nor
+  collapses;
 - the GPU matches a CPU f64 reference (`src/sim/reference.rs`) with the disc centred on the box's corner, so particles
   cross the wrap and every step carries between the words.
 

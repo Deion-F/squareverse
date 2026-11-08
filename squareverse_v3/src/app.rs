@@ -230,6 +230,7 @@ impl Running {
             Key::Character(c) => match c.to_lowercase().as_str() {
                 "h" => ui.help_open = !ui.help_open,
                 "d" => ui.show_dm = !ui.show_dm,
+                "g" => ui.show_gas = !ui.show_gas,
                 "r" => ui.reset_requested = true,
                 "f" => ui.fps_target = if ui.fps_target == 60 { 30 } else { 60 },
                 "[" => ui.speed = ui.speed.saturating_sub(1),
@@ -339,6 +340,7 @@ impl Running {
             brightness: self.ui.brightness,
             exposure: self.ui.exposure,
             show_dm: self.ui.show_dm,
+            show_gas: self.ui.show_gas,
         };
         self.renderer.draw(
             &self.gpu.device,

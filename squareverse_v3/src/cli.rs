@@ -58,6 +58,16 @@ pub struct Cli {
     pub halo_mass: Option<f64>,
     #[arg(long)]
     pub well_mass: Option<f64>,
+    /// Gas switches: no supernova / mass-return feedback, no cooling, no star formation.
+    #[arg(long)]
+    pub no_feedback: bool,
+    #[arg(long)]
+    pub no_cooling: bool,
+    #[arg(long)]
+    pub no_star_formation: bool,
+    /// The galaxy's gas mass, Msun (default 1e10; 0: no gas).
+    #[arg(long)]
+    pub gas_mass: Option<f64>,
     /// Opening angle of the gravity tree (smaller: more accurate, slower).
     #[arg(long)]
     pub theta: Option<f64>,

@@ -64,6 +64,12 @@ pub fn config_from(cli: &Cli, gpu: &Gpu) -> SimConfig {
             *f = v;
         }
     }
+    cfg.gas.feedback &= !cli.no_feedback;
+    cfg.gas.cooling &= !cli.no_cooling;
+    cfg.gas.star_formation &= !cli.no_star_formation;
+    if let Some(m) = cli.gas_mass {
+        cfg.galaxy.gas_mass = m;
+    }
     if let Some(h) = cli.halo_share {
         cfg.galaxy.halo_share = h;
     }
@@ -104,7 +110,7 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
     let s0 = sim.read_state(gpu)?;
     let e0 = sim.energy(&s0);
     let galaxy = sim.cfg.scene == crate::sim::Scene::Galaxy;
-    let galaxy_start = galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &s0));
+    let galaxy_start = galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &s0, 0.0));
 
     // one step a submit, so the timer sees all of its passes
     let submit = |sim: &mut Sim, timer: &mut GpuTimer| -> Result<()> {
@@ -170,7 +176,7 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
         force_evals_per_myr: sim.evals_per_myr(&bin_counts),
         bin_counts,
         galaxy_start,
-        galaxy_end: galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &state)),
+        galaxy_end: galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &state, sim.time_myr())),
         energy_initial: e0,
         energy_final: e1,
         energy_rel_change: (e1 - e0) / e0.abs(),

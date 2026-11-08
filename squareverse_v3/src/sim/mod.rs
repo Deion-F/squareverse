@@ -35,7 +35,7 @@ use crate::timing::GpuTimer;
 use crate::units::G;
 use init::Initial;
 
-const NODE_WORDS: u64 = 16;
+const NODE_WORDS: u64 = 20;
 /// The force pass can be cut into at most this many slices.
 pub const CHUNKS: u32 = 64;
 /// Most time-step bins (the tick table has 2^(levels - 1) x CHUNKS entries).
@@ -114,6 +114,54 @@ pub struct SimConfig {
     pub well_softening_pc: f64,
     /// A super well swallows particles bound to it within this, pc.
     pub accretion_pc: f64,
+    /// Gas physics (phase 3).
+    pub gas: GasConfig,
+}
+
+/// Gas: SPH, cooling, star formation and feedback (shaders/hydro.wgsl, integrate.wgsl, evolve.wgsl, feedback*.wgsl).
+#[derive(Clone, Debug, Serialize)]
+pub struct GasConfig {
+    /// SPH neighbours wanted within a particle's kernel reach.
+    pub neighbours: f64,
+    /// Artificial viscosity alpha (Monaghan 1997).
+    pub viscosity: f64,
+    /// A gas particle's step stays under courant H / (signal speed).
+    pub courant: f64,
+    pub gamma: f64,
+    /// Cooling and heating (Koyama & Inutsuka below 10^4 K, collisional ionisation equilibrium above).
+    pub cooling: bool,
+    /// Lowest temperature, K (a Jeans floor also applies).
+    pub floor_k: f64,
+    /// The disc's half-thickness, pc: a 2D surface density Σ stands for a density Σ / 2 z0.
+    pub thickness_pc: f64,
+    pub star_formation: bool,
+    /// Star formation: least hydrogen density (cm^-3), most temperature (K), efficiency per free-fall time.
+    pub sf_density_cm3: f64,
+    pub sf_max_k: f64,
+    pub sf_efficiency: f64,
+    /// Stars give back mass, elements and supernova energy (10^51 erg each) to the nearest gas within this, pc.
+    pub feedback: bool,
+    pub feedback_radius_pc: f64,
+}
+
+impl Default for GasConfig {
+    fn default() -> Self {
+        Self {
+            neighbours: 24.0,
+            viscosity: 1.0,
+            courant: 0.3,
+            gamma: 5.0 / 3.0,
+            cooling: true,
+            floor_k: 100.0,
+            thickness_pc: 100.0,
+            star_formation: true,
+            sf_density_cm3: 0.1,
+            sf_max_k: 1.5e4,
+            sf_efficiency: 0.01,
+            feedback: true,
+            feedback_radius_pc: 500.0,
+        }
+    }
 }
 
 /// The starting scene.
@@ -161,6 +209,7 @@ impl Default for SimConfig {
             dm_softening_pc: 1_000.0,
             well_softening_pc: 50.0,
             accretion_pc: 2.0,
+            gas: GasConfig::default(),
         }
     }
 }
@@ -227,6 +276,10 @@ struct Common {
     acc_r2: f32,
     single_stars: u32,
     eps2_kind: [[f32; 4]; 2],
+    gas_a: [f32; 4],
+    gas_b: [f32; 4],
+    gas_c: [f32; 4],
+    gas_d: [f32; 4],
 }
 
 #[repr(C)]
@@ -250,6 +303,9 @@ pub struct State {
     pub kind: Vec<u32>,
     pub star: Vec<[f32; 2]>,
     pub about: Vec<[f32; 4]>,
+    /// Gas (u, Σ, H, -) (zeros for the rest), and element mass fractions (He, C/N/O, Mg/Si, Fe).
+    pub gas: Vec<[f32; 4]>,
+    pub chem: Vec<[f32; 4]>,
 }
 
 /// One piece of a sub-step (see the module comment). Frames can fall between any two.
@@ -262,6 +318,8 @@ pub enum Work {
     Refit,
     /// Stellar evolution and super wells swallowing, at the start of each step of dt (`evolve.wgsl`).
     Evolve,
+    /// Gas: SPH density, then pressure forces, for the listed gas (hydro.wgsl).
+    Gas,
     /// The list of particles whose step ends this sub-step.
     Compact,
     /// Force slices `from .. to` of the list (of up to `CHUNKS`).
@@ -270,7 +328,7 @@ pub enum Work {
 }
 
 /// The stages GPU time is split into (timer labels).
-pub const STAGES: [&str; 7] = ["integrate", "sort", "build", "refit", "compact", "force", "evolve"];
+pub const STAGES: [&str; 8] = ["integrate", "sort", "build", "refit", "compact", "force", "evolve", "gas"];
 const FORCE: usize = 5;
 /// A force dispatch costs at least one tree walk's latency however few particles it has (the GPU isn't full):
 /// measured 2026-11-07 on the RTX 2070 Super, 2.2 of 10.7 ms at 500k, 4.5 of 21.5 at 1M.
@@ -285,6 +343,7 @@ impl Work {
             Work::Refit => "refit",
             Work::Compact => "compact",
             Work::Evolve => "evolve",
+            Work::Gas => "gas",
             Work::Force { .. } => "force",
         }
     }
@@ -307,6 +366,10 @@ struct SetBinds {
     /// this set -> the other one
     gather: wgpu::BindGroup,
     gather_step: wgpu::BindGroup,
+    gather_gas: wgpu::BindGroup,
+    hydro: wgpu::BindGroup,
+    spread: wgpu::BindGroup,
+    apply: wgpu::BindGroup,
     evolve: wgpu::BindGroup,
     compact: wgpu::BindGroup,
     moments: wgpu::BindGroup,
@@ -318,6 +381,10 @@ struct Kernels {
     morton: Kernel,
     gather: Kernel,
     gather_step: Kernel,
+    gather_gas: Kernel,
+    hydro: Kernel,
+    spread: Kernel,
+    apply: Kernel,
     evolve: Kernel,
     compact: Kernel,
     karras: Kernel,
@@ -334,7 +401,11 @@ pub struct Sim {
     acc: [wgpu::Buffer; 2],
     _bins: [wgpu::Buffer; 2],
     about: [wgpu::Buffer; 2],
+    gas: [wgpu::Buffer; 2],
+    chem: [wgpu::Buffer; 2],
     n_wells: u32,
+    /// any gas particles at the start (the gas passes run only then)
+    has_gas: bool,
     /// particles in each bin (u32 x MAX_LEVELS)
     counts: wgpu::Buffer,
     /// which particle set is current
@@ -362,7 +433,7 @@ pub struct Sim {
     pub bin_counts: [u32; MAX_LEVELS as usize],
     counts_read: AsyncRead,
     /// estimated GPU ms per unit of work, by `STAGES` label (force: a full pass)
-    rates: [f64; 7],
+    rates: [f64; 8],
     _buffers: Vec<wgpu::Buffer>,
 }
 
@@ -433,15 +504,20 @@ impl Sim {
         let acc = [storage(d, "acc 0", n as u64 * 16), storage(d, "acc 1", n as u64 * 16)];
         let bins = [storage(d, "bins 0", n as u64 * 16), storage(d, "bins 1", n as u64 * 16)];
         let about = [make("about 0", bytemuck::cast_slice(&init.about), false), make("about 1", bytemuck::cast_slice(&init.about), false)];
-        // stellar evolution's clock, the wells' particle indices and what they swallowed (evolve.wgsl)
-        let clock = storage(d, "clock", 16);
-        let wells = storage(d, "wells", init.wells.max(1) as u64 * 4);
-        let sink = storage(d, "sink", init.wells.max(1) as u64 * 6 * 4);
+        let gas = [make("gas 0", bytemuck::cast_slice(&init.gas), false), make("gas 1", bytemuck::cast_slice(&init.gas), false)];
+        let chem = [make("chem 0", bytemuck::cast_slice(&init.chem), false), make("chem 1", bytemuck::cast_slice(&init.chem), false)];
+        // the wells' particle indices and what they swallowed (evolve.wgsl), what stars give back and where it
+        // goes (feedback.wgsl)
+        anyhow::ensure!(init.wells <= 64, "at most 64 super wells");
+        let wsink = storage(d, "wells and sink", (64 + init.wells.max(1) as u64 * 6) * 4);
+        let emit = storage(d, "emit", n as u64 * 32);
+        let deposit = storage(d, "deposit", n as u64 * 48);
         let counts = storage(d, "bin counts", MAX_LEVELS as u64 * 4);
         // the list of particles whose step ends this sub-step (compact.wgsl)
         let flags = storage(d, "active flags", n as u64 * 4);
         let active = storage(d, "active", n as u64 * 4);
-        let active_n = storage(d, "active count", 16);
+        // [0] the list's length, [1] .. [2] the gas's run of the sorted particles, [3] the clock (steps of dt begun)
+        let active_n = storage(d, "control", 16);
         let flag_scan = Scan::new(d, &flags, n);
         let bbox = storage(d, "bbox", 16);
         let internal = n.saturating_sub(1).max(1) as u64;
@@ -481,6 +557,17 @@ impl Sim {
                 // K_STAR, K_DM, K_WELL, K_WD | K_NS, K_BH, K_GONE, -
                 [[st, dm, w, st], [st, st, st, st]]
             },
+            gas_a: [cfg.gas.neighbours as f32, cfg.gas.viscosity as f32, cfg.gas.courant as f32, cfg.gas.gamma as f32],
+            // 1 hydrogen atom / cm^3 = 1 / 40.7 Msun / pc^3 (X 0.71)
+            gas_b: [
+                (cfg.gas.sf_density_cm3 / 40.7 / 0.71) as f32,
+                cfg.gas.sf_max_k as f32,
+                cfg.gas.sf_efficiency as f32,
+                cfg.gas.thickness_pc as f32,
+            ],
+            gas_c: [cfg.gas.floor_k as f32, cfg.gas.cooling as u32 as f32, cfg.gas.feedback_radius_pc as f32, (0.5 * cfg.softening_pc) as f32],
+            // 10^51 erg = 5.26e7 Msun (pc/Myr)^2
+            gas_d: [5.26e7, cfg.gas.star_formation as u32 as f32, cfg.gas.feedback as u32 as f32, 0.0],
         };
         let common = uniform(d, "common", &common_with_row(groups.x * 256));
         // the force pass's workgroups have their own size, so its rows have their own length
@@ -506,7 +593,7 @@ impl Sim {
                 d,
                 "integrate",
                 &module(include_str!("../../shaders/integrate.wgsl")),
-                &[U, W, W, R, W, W, T],
+                &[U, W, W, R, W, W, T, W, R, R],
                 &["kick_drift", "kick", "init_bins"],
             ),
             morton: Kernel::new(
@@ -528,8 +615,24 @@ impl Sim {
                 d,
                 "evolve",
                 &module(include_str!("../../shaders/evolve.wgsl")),
-                &[U, R, W, W, R, W, W, W],
+                &[U, R, W, W, W, W, W, R, W],
                 &["evolve", "tick_clock", "find_wells", "swallow", "swallow_apply"],
+            ),
+            gather_gas: Kernel::new(d, "gather gas", &module(include_str!("../../shaders/gather_gas.wgsl")), &[U, R, R, R, W, W], &["main"]),
+            hydro: Kernel::new(
+                d,
+                "hydro",
+                &module(include_str!("../../shaders/hydro.wgsl")),
+                &[U, R, R, R, W, R, R, R, W],
+                &["range_reset", "range_find", "density", "force"],
+            ),
+            spread: Kernel::new(d, "feedback", &module(include_str!("../../shaders/feedback.wgsl")), &[U, R, R, R, R, R, R, R, W], &["spread"]),
+            apply: Kernel::new(
+                d,
+                "feedback apply",
+                &module(include_str!("../../shaders/feedback_apply.wgsl")),
+                &[U, W, W, W, W, W, W, W],
+                &["apply"],
             ),
             compact: Kernel::new(d, "compact", &module(include_str!("../../shaders/compact.wgsl")), &[U, R, W, W, W, T], &["flag", "scatter"]),
             karras: Kernel::new(d, "karras", &module(include_str!("../../shaders/karras.wgsl")), &[U, R, W, W, W], &["main"]),
@@ -537,7 +640,7 @@ impl Sim {
                 d,
                 "moments",
                 &module(include_str!("../../shaders/moments.wgsl")),
-                &[U, R, R, R, R, W, W],
+                &[U, R, R, R, R, W, W, R],
                 &["reset", "main"],
             ),
             force: Kernel::new(
@@ -555,7 +658,15 @@ impl Sim {
         let set = |s: usize| {
             let o = 1 - s;
             SetBinds {
-                integrate: k.integrate.bind(d, "integrate", &[&common, &pos[s], &kin[s], &acc[s], &bins[s], &counts, &tick]),
+                integrate: k.integrate.bind(
+                    d,
+                    "integrate",
+                    &[&common, &pos[s], &kin[s], &acc[s], &bins[s], &counts, &tick, &gas[s], &chem[s], &body[s]],
+                ),
+                gather_gas: k.gather_gas.bind(d, "gather gas", &[&common, &sort.vals[0], &gas[s], &chem[s], &gas[o], &chem[o]]),
+                hydro: k.hydro.bind(d, "hydro", &[&common, &pos[s], &kin[s], &body[s], &gas[s], &child, &node, &active, &active_n]),
+                spread: k.spread.bind(d, "feedback", &[&common, &pos[s], &body[s], &chem[s], &emit, &child, &node, &active_n, &deposit]),
+                apply: k.apply.bind(d, "feedback apply", &[&common, &kin[s], &body[s], &gas[s], &chem[s], &deposit, &bins[s], &counts]),
                 morton: k.morton.bind(d, "morton", &[&common, &pos[s], &bbox, &sort.keys[0], &sort.vals[0], &body[s]]),
                 gather: k.gather.bind(d, "gather", &[&common, &sort.vals[0], &pos[s], &kin[s], &body[s], &pos[o], &kin[o], &body[o]]),
                 gather_step: k.gather_step.bind(
@@ -563,9 +674,9 @@ impl Sim {
                     "gather step",
                     &[&common, &sort.vals[0], &acc[s], &bins[s], &acc[o], &bins[o], &about[s], &about[o]],
                 ),
-                evolve: k.evolve.bind(d, "evolve", &[&common, &pos[s], &kin[s], &body[s], &about[s], &clock, &wells, &sink]),
+                evolve: k.evolve.bind(d, "evolve", &[&common, &pos[s], &kin[s], &body[s], &about[s], &active_n, &wsink, &gas[s], &emit]),
                 compact: k.compact.bind(d, "compact", &[&common, &bins[s], &flags, &active, &active_n, &tick]),
-                moments: k.moments.bind(d, "moments", &[&common, &pos[s], &body[s], &child, &parents, &counter, &node]),
+                moments: k.moments.bind(d, "moments", &[&common, &pos[s], &body[s], &child, &parents, &counter, &node, &gas[s]]),
                 force: k.force.bind(d, "force", &[&force_common, &pos[s], &body[s], &child, &node, &acc[s], &active, &tick, &active_n]),
             }
         };
@@ -574,7 +685,7 @@ impl Sim {
 
         // first guesses of GPU ms per unit (a little pessimistic: a laptop's integrated GPU); measurements replace them
         let per = n as f64;
-        let rates = [3e-6 * per, 1.5e-5 * per, 2e-5 * per, 1.5e-5 * per, 1e-5 * per, 2e-4 * per, 1e-5 * per];
+        let rates = [3e-6 * per, 1.5e-5 * per, 2e-5 * per, 1.5e-5 * per, 1e-5 * per, 2e-4 * per, 1e-5 * per, 1e-4 * per];
         let mut sim = Self {
             cfg,
             n,
@@ -604,7 +715,10 @@ impl Sim {
             rates,
             about,
             n_wells: init.wells,
-            _buffers: vec![bbox, child, parents, counter, node, common, force_common, tick, flags, active, active_n, clock, wells, sink],
+            gas,
+            chem,
+            has_gas: init.body.iter().any(|b| b[1] >> init::KIND_SHIFT == init::Kind::Gas as u32),
+            _buffers: vec![bbox, child, parents, counter, node, common, force_common, tick, flags, active, active_n, wsink, emit, deposit],
         };
         // the first forces, for every particle (they all start in bin 0, and at the last sub-step every bin's step
         // ends), then everyone's first bin
@@ -613,7 +727,7 @@ impl Sim {
         // the stars' state at the start (no clock tick: the first step's evolution runs again at the same time)
         sim.encode_evolve(&mut enc, &mut timer, false);
         let last = sim.subs - 1;
-        let first = [Work::Build, Work::Compact, Work::Force { from: 0, to: sim.chunks }];
+        let first = [Work::Build, Work::Compact, Work::Force { from: 0, to: sim.chunks }, Work::Gas];
         for w in [Work::Keys].into_iter().chain((0..PASSES).map(Work::Sort)).chain(first) {
             sim.encode_item(&mut enc, &mut timer, w, last);
         }
@@ -639,6 +753,11 @@ impl Sim {
             self.k.evolve.run(&mut pass, "swallow", b, g);
             self.k.evolve.run(&mut pass, "swallow_apply", b, Groups::for_items(self.n_wells, 64));
         }
+        if self.has_gas && tick {
+            // what stars gave back goes to the nearest gas (the tree is the last sub-step's, the positions unchanged)
+            self.k.spread.run(&mut pass, "spread", &self.sets[self.cur].spread, self.groups);
+            self.k.apply.run(&mut pass, "apply", &self.sets[self.cur].apply, g);
+        }
         if tick {
             self.k.evolve.run(&mut pass, "tick_clock", b, Groups { x: 1, y: 1 });
         }
@@ -659,6 +778,9 @@ impl Sim {
         }
         self.queue.push_back(Work::Compact);
         self.queue.push_back(Work::Force { from: 0, to: self.chunks });
+        if self.has_gas {
+            self.queue.push_back(Work::Gas);
+        }
         self.queue.push_back(Work::Close);
     }
 
@@ -717,9 +839,13 @@ impl Sim {
             Work::Build => {
                 self.k.gather.run(&mut pass, "main", &self.sets[c].gather, g);
                 self.k.gather_step.run(&mut pass, "main", &self.sets[c].gather_step, g);
+                self.k.gather_gas.run(&mut pass, "main", &self.sets[c].gather_gas, g);
                 self.k.karras.run(&mut pass, "main", &self.karras, g);
                 self.cur = 1 - c;
                 self.k.moments.run(&mut pass, "main", &self.sets[self.cur].moments, g);
+                // where the gas's run of the sorted particles now is
+                self.k.hydro.run(&mut pass, "range_reset", &self.sets[self.cur].hydro, Groups { x: 1, y: 1 });
+                self.k.hydro.run(&mut pass, "range_find", &self.sets[self.cur].hydro, g);
             }
             Work::Refit => {
                 self.k.moments.run(&mut pass, "reset", &self.sets[c].moments, g);
@@ -737,6 +863,11 @@ impl Sim {
             Work::Evolve => {
                 drop(pass);
                 self.encode_evolve(encoder, timer, true);
+            }
+            Work::Gas => {
+                let hg = g;
+                self.k.hydro.run(&mut pass, "density", &self.sets[c].hydro, hg);
+                self.k.hydro.run(&mut pass, "force", &self.sets[c].hydro, hg);
             }
         }
     }
@@ -902,6 +1033,8 @@ impl Sim {
         let kin: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.kin[self.cur])?).to_vec();
         let body: Vec<[u32; 2]> = bytemuck::cast_slice(&gpu.read_buffer(&self.body[self.cur])?).to_vec();
         let about: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(self.about_buffer())?).to_vec();
+        let gas: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.gas[self.cur])?).to_vec();
+        let chem: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.chem[self.cur])?).to_vec();
         let acc: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.acc[self.cur])?).to_vec();
         let n = self.n as usize;
         let mut s = State {
@@ -912,6 +1045,8 @@ impl Sim {
             kind: vec![0; n],
             star: vec![[0.0; 2]; n],
             about: vec![[0.0; 4]; n],
+            gas: vec![[0.0; 4]; n],
+            chem: vec![[0.0; 4]; n],
         };
         for i in 0..n {
             let id = (body[i][1] & init::ID_MASK) as usize;
@@ -922,20 +1057,21 @@ impl Sim {
             s.kind[id] = body[i][1] >> init::KIND_SHIFT;
             s.star[id] = [kin[i][2], kin[i][3]];
             s.about[id] = about[i];
+            s.gas[id] = gas[2 * i];
+            s.chem[id] = chem[i];
         }
         Ok(s)
     }
 
-    /// Total energy: kinetic + the central mass's potential + half the self-gravity potential (from the tree, at
-    /// each particle's last force pass, so exact between steps of dt), Msun pc^2 / Myr^2.
+    /// Total energy: kinetic + the gas's internal energy + the central mass's potential + half the self-gravity
+    /// potential (from the tree, at each particle's last force pass, so exact between steps of dt), Msun pc^2 / Myr^2.
     pub fn energy(&self, s: &State) -> f64 {
-        s.vel
-            .iter()
-            .zip(&s.mass)
-            .zip(&s.acc)
-            .map(|((v, &m), a)| {
+        (0..s.vel.len())
+            .map(|i| {
+                let (v, m, a) = (s.vel[i], s.mass[i] as f64, s.acc[i]);
                 let v2 = (v[0] as f64).powi(2) + (v[1] as f64).powi(2);
-                m as f64 * (0.5 * v2 + a[3] as f64 + 0.5 * a[2] as f64)
+                let u = if s.kind[i] == init::Kind::Gas as u32 { s.gas[i][0] as f64 } else { 0.0 };
+                m * (0.5 * v2 + u + a[3] as f64 + 0.5 * a[2] as f64)
             })
             .sum()
     }

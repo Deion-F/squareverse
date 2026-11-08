@@ -1,8 +1,8 @@
-// The particles' bounding box (relative to the tree origin, hi words) and their Morton keys over it: 23 bits a
-// side (46 bits), so a galaxy 80 kpc across is cut into cells ~0.01 pc wide, and above them bit 47 set for dark
-// matter. Sorted, the dark matter comes after everything else, so the tree's root splits into a tree of the stars
-// (and wells) and a tree of the dark matter: every node holds one softening class, and every pair is softened the
-// same both ways. Keys are (lo 32 bits, hi 16 bits); values are the particle's index before sorting.
+// The particles' bounding box (relative to the tree origin, hi words) and their Morton keys over it: 22 bits a
+// side (44 bits), so a galaxy 80 kpc across is cut into cells ~0.02 pc wide, and above them, in bits 46 - 47, the
+// softening class (common.wgsl class_of: stars and the rest, gas, dark matter). Sorted, each class is one run, so
+// the tree's top splits into a tree per class: every node holds one softening class, every pair is softened the
+// same both ways, and the gas walks (hydro.wgsl) stay in the gas's own tree. Keys are (lo 32 bits, hi 16 bits); values are the particle's index before sorting.
 
 @group(0) @binding(0) var<uniform> c: Common;
 @group(0) @binding(1) var<storage, read> pos: array<vec4<u32>>;
@@ -86,11 +86,10 @@ fn keys_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bits = 32u - countLeadingZeros(ext);  // ext < 2^bits
     let q = pos[i];
     let r = rel(q);
-    let qx = quantise(r.x, q.y, mn.x, bits) >> 1u;
-    let qy = quantise(r.y, q.w, mn.y, bits) >> 1u;
+    let qx = quantise(r.x, q.y, mn.x, bits) >> 2u;
+    let qy = quantise(r.y, q.w, mn.y, bits) >> 2u;
     let lo = spread(qx) | (spread(qy) << 1u);
-    let dm = select(0u, 1u, kind_of(body[i]) == K_DM);
-    let hi = spread(qx >> 16u) | (spread(qy >> 16u) << 1u) | (dm << 15u);
+    let hi = spread(qx >> 16u) | (spread(qy >> 16u) << 1u) | (class_of(kind_of(body[i])) << 14u);
     keys[i] = vec2<u32>(lo, hi);
     vals[i] = i;
 }

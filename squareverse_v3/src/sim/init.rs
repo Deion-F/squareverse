@@ -24,6 +24,24 @@ pub enum Kind {
     NeutronStar = 4,
     BlackHole = 5,
     Gone = 6,
+    Gas = 7,
+}
+
+/// Mass fractions (He, C/N/O, Mg/Si, Fe) of solar and primordial matter; hydrogen is the rest. Solar after Asplund
+/// et al. (2009), the elements this sim doesn't follow (Ne, S, ...) counted with C/N/O.
+pub const SOLAR: [f32; 4] = [0.27, 0.0105, 0.0015, 0.0013];
+pub const SOLAR_Z: f64 = 0.0133;
+pub const PRIMORDIAL: [f32; 4] = [0.245, 0.0, 0.0, 0.0];
+
+/// Elements at metallicity z (in units of solar): helium rises 1.5x as fast as the metals (ΔY / ΔZ).
+pub fn elements(z: f64) -> [f32; 4] {
+    let zz = z.max(0.0);
+    [
+        (PRIMORDIAL[0] as f64 + 1.5 * SOLAR_Z * zz).min(0.4) as f32,
+        (SOLAR[1] as f64 * zz) as f32,
+        (SOLAR[2] as f64 * zz) as f32,
+        (SOLAR[3] as f64 * zz) as f32,
+    ]
 }
 
 /// Particle data as uploaded to the GPU (layouts in shaders/common.wgsl).
@@ -36,6 +54,10 @@ pub struct Initial {
     pub body: Vec<[u32; 2]>,
     /// (birth time Myr, the star's mass Msun (0: no stellar evolution), mass at birth, well number as f32 bits)
     pub about: Vec<[f32; 4]>,
+    /// Gas: (u, Σ, H, -), (hydro ax, ay, du/dt, signal speed); zeros for the rest.
+    pub gas: Vec<[f32; 8]>,
+    /// Element mass fractions (He, C/N/O, Mg/Si, Fe).
+    pub chem: Vec<[f32; 4]>,
     /// Super wells (numbered 0 .. wells - 1).
     pub wells: u32,
     /// Each star particle is one star (true) or a population.
@@ -49,6 +71,8 @@ impl Initial {
             kin: Vec::with_capacity(n),
             body: Vec::with_capacity(n),
             about: Vec::with_capacity(n),
+            gas: Vec::with_capacity(n),
+            chem: Vec::with_capacity(n),
             wells: 0,
             single_stars: true,
         }
@@ -66,6 +90,21 @@ impl Initial {
         self.kin.push([v[0] as f32, v[1] as f32, star.0 as f32, star.1 as f32]);
         self.body.push([(mass as f32).to_bits(), (kind as u32) << KIND_SHIFT | id]);
         self.about.push(about);
+        self.gas.push([0.0; 8]);
+        self.chem.push(SOLAR);
+    }
+
+    /// Sets the elements of the particle just added.
+    pub fn set_chem(&mut self, chem: [f32; 4]) {
+        *self.chem.last_mut().expect("a particle") = chem;
+    }
+
+    /// A gas particle at temperature `t_k` (K), its kernel reach first guessed as `h` pc.
+    pub fn push_gas(&mut self, p: Fixed2, v: [f64; 2], mass: f64, t_k: f64, h: f64, chem: [f32; 4]) {
+        let u = if t_k >= 1e4 { t_k / 46.3 } else { t_k / 98.0 };
+        self.push_kind(p, v, mass, (t_k, 0.0), Kind::Gas, [0.0, 0.0, mass as f32, f32::from_bits(PART_GAS as u32)]);
+        *self.gas.last_mut().expect("just pushed") = [u as f32, 0.0, h as f32, 0.0, 0.0, 0.0, 0.0, 0.0];
+        self.set_chem(chem);
     }
 
     /// A super well; numbered in the order added.
@@ -156,9 +195,19 @@ pub struct GalaxyConfig {
     pub halo_radius_pc: f64,
     /// The central super well.
     pub well_mass: f64,
+    /// Gas disc (exponential): mass, scale length, cut at this many scale lengths, starting temperature (K).
+    pub gas_mass: f64,
+    pub gas_scale_pc: f64,
+    pub gas_cut: f64,
+    pub gas_temperature_k: f64,
+    /// Metallicity (solar = 1) at 8 kpc, falling by `metal_gradient` dex per kpc outwards; stars were born with
+    /// 0.04 dex less for each Gyr of their age.
+    pub metallicity: f64,
+    pub metal_gradient: f64,
     /// Shares of the particles (the rest are disc stars).
     pub halo_share: f64,
     pub bulge_share: f64,
+    pub gas_share: f64,
     /// Star ages: the disc's spread evenly over 0 .. `disc_age_myr`, the bulge's around `bulge_age_myr` (± 10%).
     pub disc_age_myr: f64,
     pub bulge_age_myr: f64,
@@ -179,8 +228,15 @@ impl Default for GalaxyConfig {
             halo_core_pc: 3_000.0,
             halo_radius_pc: 40_000.0,
             well_mass: 4e6,
+            gas_mass: 1e10,
+            gas_scale_pc: 5_200.0,
+            gas_cut: 4.0,
+            gas_temperature_k: 1e4,
+            metallicity: 1.0,
+            metal_gradient: 0.06,
             halo_share: 0.4,
             bulge_share: 0.1,
+            gas_share: 0.1,
             disc_age_myr: 10_000.0,
             bulge_age_myr: 10_000.0,
         }
@@ -193,6 +249,14 @@ pub const PART_DISC: u8 = 0;
 pub const PART_BULGE: u8 = 1;
 pub const PART_HALO: u8 = 2;
 pub const PART_WELL: u8 = 3;
+pub const PART_GAS: u8 = 4;
+/// Stars born during the run (evolve.wgsl PART_NEW).
+pub const PART_NEW: u8 = 5;
+
+/// Metallicity (solar = 1) of the galaxy's gas at radius r pc.
+fn metallicity_at(g: &GalaxyConfig, r: f64) -> f64 {
+    g.metallicity * 10f64.powf(-g.metal_gradient * (r / 1_000.0 - 8.0))
+}
 
 /// The share of a Kroupa population's mass its dead stars have given back by `age` Myr (Jungwiert et al. 2001),
 /// as shaders/evolve.wgsl.
@@ -214,7 +278,8 @@ pub fn galaxy(cfg: &SimConfig) -> (Initial, Vec<u8>) {
     let center = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
     let n_halo = (n as f64 * g.halo_share).round() as usize;
     let n_bulge = (n as f64 * g.bulge_share).round() as usize;
-    let n_disc = n - 1 - n_halo - n_bulge;
+    let n_gas = if g.gas_mass > 0.0 { (n as f64 * g.gas_share).round() as usize } else { 0 };
+    let n_disc = n - 1 - n_halo - n_bulge - n_gas;
     let star_mass = (g.disc_mass + g.bulge_mass) / (n_disc + n_bulge) as f64;
     let mean_star = kroupa_mean(&mut rng);
     let mut out = Initial::with_capacity(n);
@@ -260,11 +325,27 @@ pub fn galaxy(cfg: &SimConfig) -> (Initial, Vec<u8>) {
             };
             let about = [-age as f32, m_star as f32, birth_mass as f32, f32::from_bits(part as u32)];
             out.push_kind(place(rng, r), [0.0, 0.0], mass, main_sequence(m_star), Kind::Star, about);
+            out.set_chem(elements(metallicity_at(g, r) * 10f64.powf(-0.04 * age / 1_000.0)));
             parts.push(part);
         }
     };
     stars(&mut out, &mut parts, &mut rng, n_disc, g.disc_mass / n_disc.max(1) as f64, PART_DISC);
     stars(&mut out, &mut parts, &mut rng, n_bulge, g.bulge_mass / n_bulge.max(1) as f64, PART_BULGE);
+
+    // the gas disc, its kernel reach first guessed from its surface density
+    let m_gas = g.gas_mass / n_gas.max(1) as f64;
+    for _ in 0..n_gas {
+        let r = loop {
+            let r = -g.gas_scale_pc * (rng.f64().max(1e-300) * rng.f64().max(1e-300)).ln();
+            if r < g.gas_cut * g.gas_scale_pc {
+                break r;
+            }
+        };
+        let sd = surface_density(g, PART_GAS, r).max(1e-3);
+        let h = (24.0 * m_gas / (std::f64::consts::PI * sd)).sqrt().clamp(10.0, 3_000.0);
+        out.push_gas(place(&mut rng, r), [0.0, 0.0], m_gas, g.gas_temperature_k, h, elements(metallicity_at(g, r)));
+    }
+    parts.resize(parts.len() + n_gas, PART_GAS);
 
     let (rc, rh) = (g.halo_core_pc, g.halo_radius_pc);
     let span = (rh * rh + rc * rc).sqrt() - rc;
@@ -289,6 +370,12 @@ fn surface_density(g: &GalaxyConfig, part: u8, r: f64) -> f64 {
             let x = g.disc_cut;
             let norm = 1.0 - (1.0 + x) * (-x).exp(); // the share of an untruncated disc inside the cut
             if r < x * h { g.disc_mass / (2.0 * PI * h * h * norm) * (-r / h).exp() } else { 0.0 }
+        }
+        PART_GAS => {
+            let h = g.gas_scale_pc;
+            let x = g.gas_cut;
+            let norm = 1.0 - (1.0 + x) * (-x).exp();
+            if r < x * h { g.gas_mass / (2.0 * PI * h * h * norm) * (-r / h).exp() } else { 0.0 }
         }
         PART_BULGE => {
             let a = g.bulge_scale_pc;
@@ -438,6 +525,8 @@ pub fn galaxy_velocities(cfg: &SimConfig, init: &Initial, parts: &[u8], s: &supe
                 let sg = at(&sig2_halo, r).sqrt();
                 (rng.normal() * sg, rng.normal() * sg)
             }
+            // gas: cold, on circular orbits (its pressure support is a few km/s against ~230)
+            PART_GAS => (0.0, at(&vc, r)),
             _ => (0.0, 0.0),
         };
         // counter-clockwise
@@ -496,13 +585,27 @@ pub struct GalaxyStats {
     pub disc_sigma_r: [f64; 3],
     /// The circular speed v_c = sqrt(R g), pc / Myr, at these radii (pc).
     pub rotation_curve: Vec<(f64, f64)>,
-    /// Particles by kind (star, dark matter, well, white dwarf, neutron star, black hole, swallowed).
-    pub kinds: [u32; 7],
+    /// Particles by kind (star, dark matter, well, white dwarf, neutron star, black hole, swallowed, gas).
+    pub kinds: [u32; 8],
     /// The central well's mass, Msun.
     pub well_mass: f64,
+    /// Gas: mass, mass above 10^5 K, and its metallicity (mass-weighted, solar = 1).
+    pub gas_mass: f64,
+    pub hot_gas_mass: f64,
+    pub gas_metallicity: f64,
+    /// Stars born in the run: how many, their mass, and their metallicity (solar = 1).
+    pub new_stars: u32,
+    pub new_star_mass: f64,
+    pub new_star_metallicity: f64,
+    /// Kennicutt-Schmidt: per 1 kpc ring out to 16 kpc, (gas Σ Msun/pc², star formation Msun/yr/kpc² from the stars
+    /// born in the last 50 Myr). Observed: 2.5e-4 (Σ / 1 Msun pc⁻²)^1.4 (Kennicutt 1998).
+    pub kennicutt_schmidt: Vec<(f64, f64)>,
+    /// The gas's half-mass radius (pc), and its temperature (K) at the 10th, 50th and 90th percentile by mass.
+    pub gas_half_mass_pc: f64,
+    pub gas_temperature_k: [f64; 3],
 }
 
-pub fn galaxy_stats(cfg: &SimConfig, s: &super::State) -> GalaxyStats {
+pub fn galaxy_stats(cfg: &SimConfig, s: &super::State, now_myr: f64) -> GalaxyStats {
     let center = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
     let part = |i: usize| if s.kind[i] == Kind::Well as u32 { PART_WELL } else { s.about[i][3].to_bits() as u8 };
     let mut half = [0.0; 3];
@@ -547,10 +650,87 @@ pub fn galaxy_stats(cfg: &SimConfig, s: &super::State) -> GalaxyStats {
         .iter()
         .map(|&r| (r, (r * interp(&pull, r)).max(0.0).sqrt()))
         .collect();
-    let mut kinds = [0u32; 7];
+    let mut kinds = [0u32; 8];
     for &k in &s.kind {
-        kinds[(k as usize).min(6)] += 1;
+        kinds[(k as usize).min(7)] += 1;
     }
     let well_mass = (0..s.pos.len()).filter(|&i| s.kind[i] == Kind::Well as u32).map(|i| s.mass[i] as f64).sum();
-    GalaxyStats { half_mass_pc: half, disc_sigma_r: sig, rotation_curve, kinds, well_mass }
+    let z_of = |i: usize| (s.chem[i][1] + s.chem[i][2] + s.chem[i][3]) as f64 / SOLAR_Z;
+    let (mut gas_mass, mut hot, mut gz) = (0.0, 0.0, 0.0);
+    let (mut new_stars, mut new_mass, mut nz) = (0u32, 0.0, 0.0);
+    for i in 0..s.pos.len() {
+        let m = s.mass[i] as f64;
+        if s.kind[i] == Kind::Gas as u32 {
+            gas_mass += m;
+            gz += m * z_of(i);
+            if s.star[i][0] > 1e5 {
+                hot += m;
+            }
+        } else if s.about[i][3].to_bits() == PART_NEW as u32 && s.kind[i] != Kind::Well as u32 {
+            new_stars += 1;
+            new_mass += m;
+            nz += m * z_of(i);
+        }
+    }
+    let mut rings = vec![(0.0f64, 0.0f64); 16];
+    for i in 0..s.pos.len() {
+        let (dx, dy) = s.pos[i].delta_pc(center, cfg.box_pc);
+        let k = (dx.hypot(dy) / 1_000.0) as usize;
+        if k >= rings.len() {
+            continue;
+        }
+        if s.kind[i] == Kind::Gas as u32 {
+            rings[k].0 += s.mass[i] as f64;
+        } else if s.about[i][3].to_bits() == PART_NEW as u32 && (now_myr - s.about[i][0] as f64) < 50.0 {
+            rings[k].1 += s.about[i][2] as f64; // the mass it was born with
+        }
+    }
+    let kennicutt_schmidt = rings
+        .iter()
+        .enumerate()
+        .map(|(k, &(gas, born))| {
+            let area_pc2 = std::f64::consts::PI * (((k + 1) * 1_000) as f64).powi(2) - std::f64::consts::PI * ((k * 1_000) as f64).powi(2);
+            // Msun per 50 Myr per pc² -> Msun / yr / kpc²: x 1e6 pc²/kpc² / 5e7 yr
+            (gas / area_pc2, born / area_pc2 * 1e6 / 5e7)
+        })
+        .collect();
+    let mut gr: Vec<(f64, f64)> = Vec::new();
+    let mut gt: Vec<(f64, f64)> = Vec::new();
+    for i in 0..s.pos.len() {
+        if s.kind[i] == Kind::Gas as u32 {
+            let (dx, dy) = s.pos[i].delta_pc(center, cfg.box_pc);
+            gr.push((dx.hypot(dy), s.mass[i] as f64));
+            gt.push((s.star[i][0] as f64, s.mass[i] as f64));
+        }
+    }
+    let quantile = |v: &mut Vec<(f64, f64)>, q: f64| -> f64 {
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let total: f64 = v.iter().map(|x| x.1).sum();
+        let mut acc = 0.0;
+        for &(x, m) in v.iter() {
+            acc += m;
+            if acc >= q * total {
+                return x;
+            }
+        }
+        0.0
+    };
+    let gas_half_mass_pc = quantile(&mut gr, 0.5);
+    let gas_temperature_k = [quantile(&mut gt, 0.1), quantile(&mut gt, 0.5), quantile(&mut gt, 0.9)];
+    GalaxyStats {
+        gas_half_mass_pc,
+        gas_temperature_k,
+        kennicutt_schmidt,
+        half_mass_pc: half,
+        disc_sigma_r: sig,
+        rotation_curve,
+        kinds,
+        well_mass,
+        gas_mass,
+        hot_gas_mass: hot,
+        gas_metallicity: if gas_mass > 0.0 { gz / gas_mass } else { 0.0 },
+        new_stars,
+        new_star_mass: new_mass,
+        new_star_metallicity: if new_mass > 0.0 { nz / new_mass } else { 0.0 },
+    }
 }

@@ -270,6 +270,8 @@ fn hash_sees_one_changed_word() {
         kind: vec![0],
         star: vec![[5772.0, 1.0]],
         about: vec![[0.0; 4]],
+        gas: vec![[0.0; 4]],
+        chem: vec![[0.0; 4]],
     };
     assert_ne!(state_hash(&s(1)), state_hash(&s(2)));
 }
@@ -415,7 +417,7 @@ fn galaxy_has_a_flat_rotation_curve_and_holds_together() {
     let cfg = SimConfig { particles: 30_000, seed: 2, ..Default::default() };
     let mut sim = Sim::new(&g, cfg.clone()).unwrap();
     let s0 = sim.read_state(&g).unwrap();
-    let a = init::galaxy_stats(&cfg, &s0);
+    let a = init::galaxy_stats(&cfg, &s0, 0.0);
     // flat from 4 to 16 kpc: within 10% of the mean (measured 2026-11-08: 221 - 229 pc/Myr at 100k)
     let vs: Vec<f64> = a.rotation_curve.iter().filter(|(r, _)| (4_000.0..=16_000.0).contains(r)).map(|p| p.1).collect();
     let mean = vs.iter().sum::<f64>() / vs.len() as f64;
@@ -425,7 +427,7 @@ fn galaxy_has_a_flat_rotation_curve_and_holds_together() {
     let e0 = sim.energy(&s0);
     run(&g, &mut sim, 50);
     let s1 = sim.read_state(&g).unwrap();
-    let b = init::galaxy_stats(&cfg, &s1);
+    let b = init::galaxy_stats(&cfg, &s1, sim.time_myr());
     let de = (sim.energy(&s1) - e0) / e0.abs();
     eprintln!("half-mass radii {:?} -> {:?}, energy change {de:.2e}, kinds {:?}", a.half_mass_pc, b.half_mass_pc, b.kinds);
     for k in 0..3 {
@@ -494,4 +496,103 @@ fn a_well_swallows_what_comes_close_and_keeps_the_momentum() {
     assert_eq!(s.kind, vec![Kind::Well as u32, Kind::Gone as u32, Kind::Star as u32, Kind::Star as u32]);
     assert!((s.mass[0] - 1e6 - 1.0).abs() < 0.01 && s.mass[1] == 0.0);
     assert!((p1[0] - p0[0]).abs() < 1e-2 * p0[0].abs() && (p1[1] - p0[1]).abs() < 1e-3 * 3_000.0, "{p0:?} {p1:?}");
+}
+
+/// A Gaussian blob (sigma 300 pc) of gas at `t_k`, 1e6 Msun in all, no central mass.
+fn gas_blob(cfg: &SimConfig, n: usize, t_k: f64) -> squareverse::sim::init::Initial {
+    use squareverse::sim::init::{Initial, SOLAR};
+    let mut rng = squareverse::rng::Rng::new(11);
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut init = Initial::with_capacity(n);
+    init.single_stars = false;
+    for _ in 0..n {
+        let (x, y) = (rng.normal() * 300.0, rng.normal() * 300.0);
+        init.push_gas(c.offset_pc(x, y, cfg.box_pc), [0.0, 0.0], 1e6 / n as f64, t_k, 60.0, SOLAR);
+    }
+    init
+}
+
+#[test]
+fn hot_gas_expands_and_keeps_its_energy() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let lv: u32 = std::env::var("SV_LEVELS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let dt: f64 = std::env::var("SV_DT").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+    let mut cfg = SimConfig { central_mass: 0.0, levels: lv, dt_myr: dt, ..SimConfig::test_disc() };
+    cfg.gas.cooling = false;
+    cfg.gas.star_formation = false;
+    cfg.gas.feedback = false;
+    let mut sim = Sim::from_initial(&g, cfg.clone(), &gas_blob(&cfg, 4_000, 1e5)).unwrap();
+    let s0 = sim.read_state(&g).unwrap();
+    let (e0, p0) = (sim.energy(&s0), Sim::momentum(&s0));
+    let r = |s: &State| -> f64 {
+        let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+        s.pos.iter().map(|p| {
+            let (dx, dy) = p.delta_pc(c, cfg.box_pc);
+            dx.hypot(dy)
+        }).sum::<f64>() / s.pos.len() as f64
+    };
+    run(&g, &mut sim, 5);
+    let s1 = sim.read_state(&g).unwrap();
+    let (e1, p1) = (sim.energy(&s1), Sim::momentum(&s1));
+    let de = (e1 - e0) / e0.abs();
+    let scale: f64 = s1.vel.iter().zip(&s1.mass).map(|(v, &m)| m as f64 * (v[0] as f64).hypot(v[1] as f64)).sum();
+    let dp = (p1[0] - p0[0]).hypot(p1[1] - p0[1]) / scale.max(1e-9);
+    eprintln!("gas blob over 10 Myr: mean radius {:.0} -> {:.0} pc, energy change {de:.2e}, momentum {dp:.2e} of the total |p|", r(&s0), r(&s1));
+    // the pressure pushes it apart
+    assert!(r(&s1) > 1.05 * r(&s0));
+    assert!(de.abs() < 0.02, "{de}");
+    assert!(dp < 1e-3, "{dp}");
+}
+
+#[test]
+fn hot_gas_cools() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    // 8 levels (down to 1/64 Myr): 1e6 K gas wants steps of ~0.03 Myr
+    let mut cfg = SimConfig { central_mass: 0.0, levels: 8, ..SimConfig::test_disc() };
+    cfg.gas.star_formation = false;
+    cfg.gas.feedback = false;
+    // 1e6 K gas at ~1 Msun/pc^2 (n ~ 0.2 cm^-3): cooling time ~1 Myr
+    let mut sim = Sim::from_initial(&g, cfg.clone(), &gas_blob(&cfg, 4_000, 1e6)).unwrap();
+    run(&g, &mut sim, 10);
+    let s = sim.read_state(&g).unwrap();
+    let mut t: Vec<f64> = s.star.iter().map(|x| x[0] as f64).collect();
+    let median = percentile(&mut t, 0.5);
+    eprintln!("gas blob at 1e6 K after 20 Myr of cooling: median {median:.0} K, coolest {:.0} K", t[0]);
+    assert!(median < 2e4, "{median}");
+    assert!(t[0] >= 99.0, "below the floor: {}", t[0]);
+}
+
+#[test]
+fn gas_forms_stars_that_grow_richer_in_metals() {
+    use squareverse::sim::init;
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { particles: 30_000, seed: 3, ..Default::default() };
+    let mut sim = Sim::new(&g, cfg.clone()).unwrap();
+    let a = init::galaxy_stats(&cfg, &sim.read_state(&g).unwrap(), 0.0);
+    run(&g, &mut sim, 75);
+    let s = sim.read_state(&g).unwrap();
+    let b = init::galaxy_stats(&cfg, &s, sim.time_myr());
+    // stars born in the first and second half of the run: the later ones richer in metals
+    let z_of = |i: usize| (s.chem[i][1] + s.chem[i][2] + s.chem[i][3]) as f64 / init::SOLAR_Z;
+    let born: Vec<usize> = (0..s.pos.len()).filter(|&i| s.about[i][3].to_bits() == init::PART_NEW as u32).collect();
+    let half = sim.time_myr() / 2.0;
+    let mean = |early: bool| {
+        let v: Vec<f64> = born.iter().filter(|&&i| ((s.about[i][0] as f64) < half) == early).map(|&i| z_of(i)).collect();
+        v.iter().sum::<f64>() / v.len().max(1) as f64
+    };
+    let (z_early, z_late) = (mean(true), mean(false));
+    eprintln!(
+        "150 Myr: {} stars born ({:.2e} Msun), gas metallicity {:.3} -> {:.3}, new stars {z_early:.3} (first half) -> {z_late:.3} (second), \
+         gas half-mass radius {:.0} -> {:.0} pc, temperatures {:?} K",
+        b.new_stars, b.new_star_mass, a.gas_metallicity, b.gas_metallicity, a.gas_half_mass_pc, b.gas_half_mass_pc, b.gas_temperature_k
+    );
+    assert!(b.new_stars > 20, "{}", b.new_stars);
+    assert!(b.gas_metallicity > a.gas_metallicity * 1.02);
+    assert!(z_late > z_early, "{z_early} {z_late}");
+    // no blow-out, no collapse
+    assert!((b.gas_half_mass_pc / a.gas_half_mass_pc - 1.0).abs() < 0.3, "{} {}", a.gas_half_mass_pc, b.gas_half_mass_pc);
+    assert!(b.gas_temperature_k[2] < 1e7);
 }

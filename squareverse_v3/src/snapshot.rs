@@ -14,7 +14,7 @@ pub const SIZE: (u32, u32) = (1280, 800);
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 pub fn default_look() -> Look {
-    Look { square_px: 1.0, brightness: 0.5, exposure: 1.0, show_dm: false }
+    Look { square_px: 1.0, brightness: 0.5, exposure: 1.0, show_dm: false, show_gas: true }
 }
 
 pub fn save(gpu: &Gpu, sim: &Sim, path: &Path) -> Result<()> {

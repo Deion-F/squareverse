@@ -9,7 +9,7 @@ struct View {
     square_px: f32,
     brightness: f32,
     extrap_myr: f32,     // draw each particle this far along its velocity
-    show_dm: u32,
+    flags: u32,          // 1: draw the dark matter, 2: hide the gas
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -59,7 +59,18 @@ fn vs(
     var color: vec3<f32>;
     if (kind == 1u) {
         // dark matter: unseen unless asked for
-        color = vec3<f32>(0.35, 0.2, 0.6) * view.brightness * f32(view.show_dm);
+        color = vec3<f32>(0.35, 0.2, 0.6) * view.brightness * f32(view.flags & 1u);
+    } else if (kind == 7u) {
+        // gas by temperature (star.x) and surface density (star.y): cold neutral dim blue, ~10^4 K the pink of
+        // hydrogen-alpha, hot (10^6 K and up) blue-white
+        let lt = log(max(star.x, 10.0)) / log(10.0);
+        let cold = vec3<f32>(0.12, 0.16, 0.4);
+        let warm = vec3<f32>(1.0, 0.22, 0.4);
+        let hot = vec3<f32>(0.45, 0.65, 1.0);
+        var tint = mix(cold, warm, smoothstep(3.3, 4.0, lt));
+        tint = mix(tint, hot, smoothstep(5.0, 6.5, lt));
+        let glow = 0.25 * sqrt(clamp(star.y, 0.0, 400.0));
+        color = tint * glow * view.brightness * f32((view.flags & 2u) == 0u);
     } else if (kind == 2u) {
         // a super well: a white marker, a few pixels across at any zoom
         size = max(3.0 * view.square_px, 5.0);
