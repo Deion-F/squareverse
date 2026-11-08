@@ -8,7 +8,8 @@ struct View {
     viewport: vec2<f32>, // pixels
     square_px: f32,
     brightness: f32,
-    _pad: vec2<f32>,
+    extrap_myr: f32,     // draw each particle this far along its velocity
+    _pad: f32,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -43,12 +44,13 @@ fn vs(
     @builtin(vertex_index) vi: u32,
     @location(0) q: vec4<u32>,
     @location(1) star: vec2<f32>,  // (surface temperature K, luminosity Lsun)
+    @location(2) vel: vec2<f32>,   // pc / Myr
 ) -> VOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
     );
-    let d = fx_delta2(q, view.center) * (view.unit_pc * view.px_per_pc);
+    let d = (fx_delta2(q, view.center) * view.unit_pc + vel * view.extrap_myr) * view.px_per_pc;
     // world y points up, screen y down
     let base = floor(vec2<f32>(view.viewport.x * 0.5 + d.x, view.viewport.y * 0.5 - d.y));
     let px = base + corners[vi] * view.square_px;

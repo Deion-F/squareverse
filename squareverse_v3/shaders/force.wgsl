@@ -13,6 +13,9 @@
 @group(0) @binding(3) var<storage, read> child: array<vec2<u32>>;
 @group(0) @binding(4) var<storage, read> node: array<vec4<u32>>;   // NODE_WORDS / 4 = 4 vec4s a node
 @group(0) @binding(5) var<storage, read_write> acc: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> todo_list: array<u32>;     // the particles to do (compact.wgsl)
+@group(0) @binding(8) var<storage, read> todo_n: array<u32>;
+@group(0) @binding(7) var<uniform> t: Tick;
 
 const GROUP: u32 = 64u;
 const LIST: u32 = 64u;
@@ -27,6 +30,7 @@ var<workgroup> l_j: array<u32, LIST>;         // the particle's index, NONE for 
 var<workgroup> scan: array<u32, GROUP>;       // accepts in the low 16 bits, pushes in the high 16
 var<workgroup> bmin: array<vec2<f32>, GROUP>;
 var<workgroup> bmax: array<vec2<f32>, GROUP>;
+var<workgroup> live: u32;
 
 struct Sums {
     a: vec2<f32>,
@@ -79,11 +83,25 @@ fn scan_group(li: u32) {
 
 @compute @workgroup_size(64)
 fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: vec3<u32>) {
+    // a slice of the list of particles whose step ends this sub-step, from t.start
     let group = wid.x + wid.y * (c.row / GROUP);
-    let first = group * GROUP;
-    let i = first + li;
-    let real = i < c.n;
-    let qref = pos[min(first, c.n - 1u)];
+    let first = t.start + group * GROUP;
+    let todo = todo_n[0];
+    if (li == 0u) {
+        live = select(0u, 1u, first < todo);
+    }
+    if (workgroupUniformLoad(&live) == 0u) {
+        return;
+    }
+    let real = first + li < todo;
+    var i = NONE;
+    if (real) {
+        i = todo_list[first + li];
+    }
+    // the group's particles' sorted indices run from gimin to gimax (the list keeps their order)
+    let gimin = todo_list[first];
+    let gimax = todo_list[min(first + GROUP, todo) - 1u];
+    let qref = pos[gimin];
     var q = qref;
     if (real) {
         q = pos[i];
@@ -138,11 +156,15 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
                 accept = 1u;
             } else {
                 let extra = node[4u * r + 2u];  // (mass, opening radius^2, sxx, sxy)
+                let tail = node[4u * r + 3u];   // (syy, first particle, count, -)
                 let cr = fx_delta2(node[4u * r], qref) * c.unit_pc;
                 let gap = max(max(gmin - cr, cr - gmax), vec2<f32>(0.0));
-                if (dot(gap, gap) > bitcast<f32>(extra.y)) {
+                let open2 = bitcast<f32>(extra.y);
+                // radius 0: a node under the softening scale, far enough unless it may hold one of the group
+                let holds = tail.y <= gimax && gimin < tail.y + tail.z;
+                if (dot(gap, gap) > open2 && (open2 > 0.0 || !holds)) {
                     ea = vec4<f32>(cr, bitcast<f32>(extra.x), bitcast<f32>(extra.z));
-                    eb = vec2<f32>(bitcast<f32>(extra.w), bitcast<f32>(node[4u * r + 3u].x));
+                    eb = vec2<f32>(bitcast<f32>(extra.w), bitcast<f32>(tail.x));
                     accept = 1u;
                 } else {
                     ch = child[r];

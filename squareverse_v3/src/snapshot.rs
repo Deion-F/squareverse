@@ -42,7 +42,7 @@ pub fn save(gpu: &Gpu, sim: &Sim, path: &Path) -> Result<()> {
     let camera = Camera { center_pc: sim.cfg.center_pc, px_per_pc: w.min(h) as f64 / (2.3 * sim.cfg.r_out_pc) };
     let mut timer = GpuTimer::new(d, &gpu.queue, false);
     let mut enc = d.create_command_encoder(&Default::default());
-    renderer.draw(d, &gpu.queue, &mut enc, &view, SIZE, sim, &camera, &default_look(), &mut timer);
+    renderer.draw(d, &gpu.queue, &mut enc, &view, SIZE, sim, &camera, &default_look(), 0.0, &mut timer);
     enc.copy_texture_to_buffer(
         tex.as_image_copy(),
         wgpu::TexelCopyBufferInfo {

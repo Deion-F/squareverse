@@ -7,7 +7,7 @@ use squareverse::fixed::Fixed2;
 use squareverse::gpu::Gpu;
 use squareverse::headless;
 use squareverse::sim::init::Initial;
-use squareverse::sim::{Sim, SimConfig, State, Walk, reference, state_hash};
+use squareverse::sim::{Limit, Sim, SimConfig, State, Walk, reference, state_hash};
 use squareverse::timing::GpuTimer;
 use squareverse::units::G;
 
@@ -56,9 +56,9 @@ fn percentile(v: &mut [f64], p: f64) -> f64 {
 fn same_seed_gives_the_same_universe() {
     let Some(g) = gpu() else { return };
     let g = g.lock().unwrap_or_else(|e| e.into_inner());
-    let a = headless::run(&g, small(20_000, 7), 200).unwrap();
-    let b = headless::run(&g, small(20_000, 7), 200).unwrap();
-    let c = headless::run(&g, small(20_000, 8), 200).unwrap();
+    let a = headless::run(&g, small(20_000, 7), 20).unwrap();
+    let b = headless::run(&g, small(20_000, 7), 20).unwrap();
+    let c = headless::run(&g, small(20_000, 8), 20).unwrap();
     assert_eq!(a.state_hash, b.state_hash);
     assert_ne!(a.state_hash, c.state_hash);
 }
@@ -67,13 +67,16 @@ fn same_seed_gives_the_same_universe() {
 fn energy_holds_with_self_gravity() {
     let Some(g) = gpu() else { return };
     let g = g.lock().unwrap_or_else(|e| e.into_inner());
-    // 250 Myr: the inner orbits go round ~8 times. The cold disc fragments into clumps; at 0.25 Myr steps their close
-    // encounters cost 1e-4 - 4e-4 of the energy by 500 Myr (it varies by seed), at 0.125 Myr ~3e-6: adaptive steps
-    // will handle it (PLAN_V3.md phase 1)
-    let cfg = SimConfig { dt_myr: 0.125, ..small(20_000, 1) };
-    let r = headless::run(&g, cfg, 2_000).unwrap();
-    eprintln!("energy change over 2,000 steps with self-gravity: {:.2e}", r.energy_rel_change);
-    assert!(r.energy_rel_change.abs() < 5e-5, "{}", r.energy_rel_change);
+    // 250 Myr with block steps (2 Myr down to 0.125): the inner orbits go round ~8 times and the cold disc fragments
+    // into clumps, whose close encounters cost energy. Measured 2026-11-07 over 250 Myr, seeds 1 / 2 / 3: block
+    // steps (eta 0.025, eta_jerk 0.05; 2.55 force evaluations per particle per Myr) -1.3e-4 / -6.4e-5 / -4.5e-5;
+    // the old fixed 0.25 Myr step (4 a Myr) 9e-6 / -3.6e-4 / 6.7e-5; fixed 0.125 (8 a Myr) ~1e-5
+    let r = headless::run(&g, small(20_000, 1), 125).unwrap();
+    eprintln!(
+        "energy change over 250 Myr with self-gravity, block steps: {:.2e} (bins {:?}, {:.2} force evaluations per particle per Myr)",
+        r.energy_rel_change, r.bin_counts, r.force_evals_per_myr
+    );
+    assert!(r.energy_rel_change.abs() < 3e-4, "{}", r.energy_rel_change);
 }
 
 /// A Gaussian cluster (sigma 1 kpc) of equal masses: its field doesn't cancel the way a uniform disc's does.
@@ -123,7 +126,7 @@ fn two_bodies_keep_their_orbit() {
     let (m, d) = (1e6, 100.0); // two 1e6 Msun bodies 100 pc apart
     let v = (G * 2.0 * m / d).sqrt() / 2.0; // each moves at half the relative circular speed
     let period = std::f64::consts::TAU * d / (2.0 * v);
-    let cfg = SimConfig { central_mass: 0.0, softening_pc: 0.01, dt_myr: period / 2_000.0, ..Default::default() };
+    let cfg = SimConfig { central_mass: 0.0, softening_pc: 0.01, dt_myr: period / 2_000.0, levels: 1, ..Default::default() };
     let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
     let mut init = Initial::with_capacity(2);
     init.push(c.offset_pc(-d / 2.0, 0.0, cfg.box_pc), [0.0, -v], m, (5772.0, 1.0));
@@ -150,10 +153,10 @@ fn momentum_holds_without_the_central_mass() {
     let s0 = sim.read_state(&g).unwrap();
     let scale: f64 = s0.vel.iter().zip(&s0.mass).map(|(v, &m)| m as f64 * (v[0] as f64).hypot(v[1] as f64)).sum();
     let p0 = Sim::momentum(&s0);
-    run(&g, &mut sim, 400);
+    run(&g, &mut sim, 50);
     let p1 = Sim::momentum(&sim.read_state(&g).unwrap());
     let drift = (p1[0] - p0[0]).hypot(p1[1] - p0[1]) / scale;
-    eprintln!("momentum change over 400 steps: {drift:.2e} of the total |p|");
+    eprintln!("momentum change over 100 Myr: {drift:.2e} of the total |p|");
     assert!(drift < 1e-3, "{drift}");
 }
 
@@ -164,7 +167,15 @@ fn gpu_matches_the_cpu_reference_across_the_box_edge() {
     // centred on the box's corner, so the disc straddles the wrap on both axes, and every step carries between
     // the lo and hi words (a hi unit is 0.0047 pc here). The disc is all but massless, so the central mass alone
     // moves it, as in the CPU reference.
-    let cfg = SimConfig { particles: 5_000, seed: 3, center_pc: (0.0, 0.0), disc_mass: 1e-3, ..Default::default() };
+    let cfg = SimConfig {
+        particles: 5_000,
+        seed: 3,
+        center_pc: (0.0, 0.0),
+        disc_mass: 1e-3,
+        dt_myr: 0.25,
+        levels: 1,
+        ..Default::default()
+    };
     let steps = 20;
     let mut sim = Sim::new(&g, cfg.clone()).unwrap();
     let start = sim.read_state(&g).unwrap();
@@ -191,9 +202,108 @@ fn gpu_matches_the_cpu_reference_across_the_box_edge() {
 }
 
 #[test]
+fn block_steps_follow_a_fine_fixed_step() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    // the central mass alone (the disc all but massless): block steps of 2 Myr down to 0.125 against the CPU
+    // reference stepping everyone at 0.125 Myr, over 40 Myr (the inner edge goes round more than once)
+    let cfg = SimConfig { particles: 5_000, seed: 4, disc_mass: 1e-3, ..Default::default() };
+    let mut sim = Sim::new(&g, cfg.clone()).unwrap();
+    let start = sim.read_state(&g).unwrap();
+    let mut pos = start.pos.clone();
+    let mut vel: Vec<[f64; 2]> = start.vel.iter().map(|v| [v[0] as f64, v[1] as f64]).collect();
+    let counts = sim.read_counts(&g).unwrap();
+    run(&g, &mut sim, 20);
+    let end = sim.read_state(&g).unwrap();
+    let fine = SimConfig { dt_myr: cfg.dt_min(), levels: 1, ..cfg.clone() };
+    reference::steps(&fine, &mut pos, &mut vel, 20 * sim.sub_steps());
+    let mut errs: Vec<f64> = end
+        .pos
+        .iter()
+        .zip(&pos)
+        .map(|(a, b)| {
+            let (dx, dy) = a.delta_pc(*b, cfg.box_pc);
+            dx.hypot(dy)
+        })
+        .collect();
+    let (median, worst) = (percentile(&mut errs, 0.5), percentile(&mut errs, 1.0));
+    eprintln!("block steps vs a fixed 0.125 Myr step after 40 Myr: median {median:.2e} pc, worst {worst:.2e} pc (bins at start {counts:?})");
+    assert!(counts.iter().filter(|&&c| c > 0).count() >= 3, "the disc should spread over several bins: {counts:?}");
+    assert_eq!(counts.iter().map(|&c| c as u64).sum::<u64>(), 5_000);
+    assert!(worst < 5.0 && median < 0.5, "median {median}, worst {worst}");
+}
+
+#[test]
+fn frames_falling_anywhere_change_nothing() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    // the same 3 steps run whole, and as the window would with a tiny budget: one item (or one force slice) a frame
+    let cfg = SimConfig { rebuild_every: 3, ..small(20_000, 9) };
+    let mut whole = Sim::new(&g, cfg.clone()).unwrap();
+    run(&g, &mut whole, 3);
+    let mut sliced = Sim::new(&g, cfg).unwrap();
+    let mut timer = GpuTimer::new(&g.device, &g.queue, false);
+    let mut frames = 0;
+    while sliced.steps < 3 {
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        sliced.advance(&mut enc, &mut timer, Limit { budget_ms: 1e-9, new_sub_steps: 1 });
+        g.queue.submit([enc.finish()]);
+        sliced.after_submit();
+        g.wait().unwrap();
+        sliced.collect(None);
+        frames += 1;
+    }
+    let (a, b) = (whole.read_state(&g).unwrap(), sliced.read_state(&g).unwrap());
+    eprintln!("3 steps whole and over {frames} frames");
+    assert!(frames > 3 * 16 * 4, "{frames}");
+    assert_eq!(state_hash(&a), state_hash(&b));
+}
+
+#[test]
 fn hash_sees_one_changed_word() {
     let s = |x: u64| State { pos: vec![Fixed2 { x, y: 5 }], vel: vec![[1.0, 2.0]], mass: vec![1.0], acc: vec![[0.0; 4]] };
     assert_ne!(state_hash(&s(1)), state_hash(&s(2)));
+}
+
+/// Diagnostic, run on demand: `cargo test --release --test gpu -- --ignored --nocapture clump_force_table`.
+/// Self-gravity force error against direct summation in the disc after 100 Myr (clumps formed), for the small-node
+/// rule (`open_small`), with the force pass's GPU time.
+#[test]
+#[ignore]
+fn clump_force_table() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    for open_small in [0.0, 0.25, 0.5, 1.0] {
+        let cfg = SimConfig { open_small, ..small(20_000, 1) };
+        let mut sim = Sim::new(&g, cfg.clone()).unwrap();
+        run(&g, &mut sim, 50);
+        let s = sim.read_state(&g).unwrap();
+        let mut errs = Vec::new();
+        let mut errs_dense = Vec::new();
+        for i in 0..s.pos.len() {
+            let tree = [s.acc[i][0] as f64, s.acc[i][1] as f64];
+            let c = reference::central_accel(&cfg, s.pos[i]);
+            let selfg = [tree[0] - c[0], tree[1] - c[1]];
+            if i % 37 != 0 && selfg[0].hypot(selfg[1]) < 0.5 {
+                continue;
+            }
+            let direct = reference::direct_accel(&cfg, &s.pos, &s.mass, i);
+            let e = (selfg[0] - direct[0]).hypot(selfg[1] - direct[1]) / direct[0].hypot(direct[1]);
+            if i % 37 == 0 {
+                errs.push(e);
+            }
+            if direct[0].hypot(direct[1]) >= 0.5 {
+                errs_dense.push(e);
+            }
+        }
+        let (m, p) = (percentile(&mut errs, 0.5), percentile(&mut errs, 0.99));
+        let (md, pd) = (percentile(&mut errs_dense, 0.5), percentile(&mut errs_dense, 0.99));
+        eprintln!(
+            "open_small {open_small}: all median {m:.2e} p99 {p:.2e} ({}); strong self-gravity (clumps) median {md:.2e} p99 {pd:.2e} ({})",
+            errs.len(),
+            errs_dense.len()
+        );
+    }
 }
 
 /// Diagnostic, run on demand: `cargo test --release --test gpu -- --ignored --nocapture force_accuracy_table`.

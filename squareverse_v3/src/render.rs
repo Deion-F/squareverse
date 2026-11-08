@@ -16,7 +16,8 @@ struct ViewUniform {
     viewport: [f32; 2],
     square_px: f32,
     brightness: f32,
-    _pad: [f32; 2],
+    extrap_myr: f32,
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -122,15 +123,14 @@ impl Renderer {
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![0 => Uint32x4],
                     }),
-                    // (vx, vy, temperature, luminosity): the last two
+                    // (vx, vy, temperature, luminosity)
                     Some(wgpu::VertexBufferLayout {
                         array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        }],
+                        attributes: &[
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 2 },
+                        ],
                     }),
                 ],
             },
@@ -249,6 +249,8 @@ impl Renderer {
         self.hdr = Some(Hdr { view, bind, size });
     }
 
+    /// Draws the particles, each moved on by `extrap_myr` at its velocity (the window's display clock runs smoothly
+    /// while the sim advances in uneven bites; the gap is a fraction of a Myr).
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -260,6 +262,7 @@ impl Renderer {
         sim: &Sim,
         camera: &Camera,
         look: &Look,
+        extrap_myr: f64,
         timer: &mut GpuTimer,
     ) {
         self.ensure_hdr(device, size);
@@ -270,7 +273,8 @@ impl Renderer {
             viewport: [size.0 as f32, size.1 as f32],
             square_px: look.square_px,
             brightness: look.brightness,
-            _pad: [0.0; 2],
+            extrap_myr: extrap_myr as f32,
+            _pad: 0.0,
         };
         queue.write_buffer(&self.view_buf, 0, bytemuck::bytes_of(&view));
         let tone = ToneUniform { exposure: look.exposure, manual_srgb: self.manual_srgb as u32, _pad: [0; 2] };

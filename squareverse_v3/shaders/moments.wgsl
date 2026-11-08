@@ -96,7 +96,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let size = f32(max(ext.x, ext.y)) + 1.0;
         let cr = rel(com);
         let off = vec2<f32>(f32(cr.x - bmin.x), f32(cr.y - bmin.y)) - 0.5 * vec2<f32>(ext);
-        let open = (size / c.theta + length(off)) * c.unit_pc;
+        var open = (size / c.theta + length(off)) * c.unit_pc;
+        // well under the softening, a node's inner structure hardly changes its pull: it acts as one mass (+
+        // quadrupole) however near, unless it holds the particle itself (the walks check; radius 0 marks it)
+        if (size * c.unit_pc < c.open_small) {
+            open = 0.0;
+        }
         let o = NODE_WORDS * k;
         atomicStore(&node[o], com.x);
         atomicStore(&node[o + 1u], com.y);

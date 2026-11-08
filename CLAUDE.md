@@ -14,7 +14,7 @@ Two versions live here:
   `target/x86_64-pc-windows-gnu/release/squareverse.exe` from WSL; it uses the GPU natively (DX12 / Vulkan). Inside
   WSL the Linux build reaches the GPU only through Mesa's OpenGL over D3D12 (set up automatically by
   `gpu::prepare_platform`).
-- Headless: `squareverse --headless --steps N --particles P --seed S [--report r.json] [--snapshot s.png]`; the
+- Headless: `squareverse --headless --steps N` (steps of dt, 2 Myr, each 16 block sub-steps) `--particles P --seed S [--report r.json] [--snapshot s.png]`; the
   snapshot is the final frame as a PNG, which you can look at with Read.
 - If `cc` is missing (no `build-essential`), cargo can't link. Ask the user to run `sudo apt install -y
   build-essential mingw-w64`; until then a Zig linker can stand in (see PLAN_V3.md Progress).

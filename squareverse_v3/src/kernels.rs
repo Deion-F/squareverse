@@ -7,6 +7,8 @@ use std::collections::HashMap;
 #[derive(Clone, Copy)]
 pub enum Bind {
     Uniform,
+    /// A uniform bound at an offset chosen per dispatch (`Kernel::run_at`), `DYN_SIZE` bytes of it.
+    DynUniform,
     Read,
     Write,
 }
@@ -14,7 +16,13 @@ pub enum Bind {
 pub struct Kernel {
     pub layout: wgpu::BindGroupLayout,
     pipelines: HashMap<&'static str, wgpu::ComputePipeline>,
+    /// which bindings are `DynUniform`
+    dynamic: Vec<bool>,
 }
+
+/// How many bytes of a `DynUniform` buffer one dispatch sees, and the stride between its entries.
+pub const DYN_SIZE: u64 = 16;
+pub const DYN_STRIDE: u64 = 256;
 
 /// The WGSL every compute module starts with.
 pub fn prelude() -> String {
@@ -31,16 +39,17 @@ impl Kernel {
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: match b {
-                        Bind::Uniform => wgpu::BufferBindingType::Uniform,
+                        Bind::Uniform | Bind::DynUniform => wgpu::BufferBindingType::Uniform,
                         Bind::Read => wgpu::BufferBindingType::Storage { read_only: true },
                         Bind::Write => wgpu::BufferBindingType::Storage { read_only: false },
                     },
-                    has_dynamic_offset: false,
+                    has_dynamic_offset: matches!(b, Bind::DynUniform),
                     min_binding_size: None,
                 },
                 count: None,
             })
             .collect();
+        let dynamic: Vec<bool> = binds.iter().map(|b| matches!(b, Bind::DynUniform)).collect();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(label),
             entries: &layout_entries,
@@ -68,7 +77,7 @@ impl Kernel {
                 (e, p)
             })
             .collect();
-        Self { layout, pipelines }
+        Self { layout, pipelines, dynamic }
     }
 
     /// A bind group with `buffers[i]` at binding i.
@@ -76,14 +85,26 @@ impl Kernel {
         let entries: Vec<wgpu::BindGroupEntry> = buffers
             .iter()
             .enumerate()
-            .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() })
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if self.dynamic[i] {
+                    wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: b, offset: 0, size: wgpu::BufferSize::new(DYN_SIZE) })
+                } else {
+                    b.as_entire_binding()
+                },
+            })
             .collect();
         device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout: &self.layout, entries: &entries })
     }
 
     pub fn run(&self, pass: &mut wgpu::ComputePass, entry: &str, bind: &wgpu::BindGroup, groups: Groups) {
+        self.run_at(pass, entry, bind, &[], groups);
+    }
+
+    /// As `run`, with the offsets (bytes, multiples of `DYN_STRIDE`) of the `DynUniform` bindings.
+    pub fn run_at(&self, pass: &mut wgpu::ComputePass, entry: &str, bind: &wgpu::BindGroup, offsets: &[u32], groups: Groups) {
         pass.set_pipeline(&self.pipelines[entry]);
-        pass.set_bind_group(0, bind, &[]);
+        pass.set_bind_group(0, bind, offsets);
         pass.dispatch_workgroups(groups.x, groups.y, 1);
     }
 }

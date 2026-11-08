@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-const MAX_PASSES: u32 = 64;
+const MAX_PASSES: u32 = 256;
 
 // read-back states
 const IDLE: u8 = 0;
@@ -16,6 +16,8 @@ pub struct GpuTimer {
     inner: Option<Inner>,
     /// The last times read, (pass name, milliseconds), in the order the passes ran.
     pub last: Vec<(&'static str, f64)>,
+    /// The amount of work each of those passes was tagged with (`compute_units`; 1 by default).
+    pub last_units: Vec<f64>,
 }
 
 struct Inner {
@@ -24,7 +26,9 @@ struct Inner {
     read: wgpu::Buffer,
     period_ns: f32,
     labels: Vec<&'static str>,
+    units: Vec<f64>,
     read_labels: Vec<&'static str>,
+    read_units: Vec<f64>,
     state: Arc<AtomicU8>,
     resolved: bool,
 }
@@ -53,12 +57,14 @@ impl GpuTimer {
                 }),
                 period_ns: queue.get_timestamp_period(),
                 labels: Vec::new(),
+                units: Vec::new(),
                 read_labels: Vec::new(),
+                read_units: Vec::new(),
                 state: Arc::new(AtomicU8::new(IDLE)),
                 resolved: false,
             }
         });
-        Self { inner, last: Vec::new() }
+        Self { inner, last: Vec::new(), last_units: Vec::new() }
     }
 
     pub fn enabled(&self) -> bool {
@@ -69,22 +75,29 @@ impl GpuTimer {
     pub fn begin(&mut self) {
         if let Some(t) = &mut self.inner {
             t.labels.clear();
+            t.units.clear();
             t.resolved = false;
         }
     }
 
-    fn slot(&mut self, label: &'static str) -> Option<(&wgpu::QuerySet, u32)> {
+    fn slot(&mut self, label: &'static str, units: f64) -> Option<(&wgpu::QuerySet, u32)> {
         let t = self.inner.as_mut()?;
         if t.state.load(Ordering::Acquire) != IDLE || t.labels.len() as u32 >= MAX_PASSES {
             return None;
         }
         let i = t.labels.len() as u32;
         t.labels.push(label);
+        t.units.push(units);
         Some((&t.set, i * 2))
     }
 
     pub fn compute(&mut self, label: &'static str) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
-        self.slot(label).map(|(set, i)| wgpu::ComputePassTimestampWrites {
+        self.compute_units(label, 1.0)
+    }
+
+    /// As `compute`, tagging the pass with how much work it does (for cost-per-unit estimates, `rate`).
+    pub fn compute_units(&mut self, label: &'static str, units: f64) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        self.slot(label, units).map(|(set, i)| wgpu::ComputePassTimestampWrites {
             query_set: set,
             beginning_of_pass_write_index: Some(i),
             end_of_pass_write_index: Some(i + 1),
@@ -92,7 +105,7 @@ impl GpuTimer {
     }
 
     pub fn render(&mut self, label: &'static str) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
-        self.slot(label).map(|(set, i)| wgpu::RenderPassTimestampWrites {
+        self.slot(label, 1.0).map(|(set, i)| wgpu::RenderPassTimestampWrites {
             query_set: set,
             beginning_of_pass_write_index: Some(i),
             end_of_pass_write_index: Some(i + 1),
@@ -119,6 +132,7 @@ impl GpuTimer {
         }
         t.resolved = false;
         t.read_labels = std::mem::take(&mut t.labels);
+        t.read_units = std::mem::take(&mut t.units);
         t.state.store(MAPPING, Ordering::Release);
         let state = t.state.clone();
         t.read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -144,6 +158,7 @@ impl GpuTimer {
                 .enumerate()
                 .map(|(i, &l)| (l, ticks[2 * i + 1].wrapping_sub(ticks[2 * i]) as f64 * t.period_ns as f64 * 1e-6))
                 .collect();
+            self.last_units = t.read_units.clone();
         }
         t.read.unmap();
         t.state.store(IDLE, Ordering::Release);
@@ -162,6 +177,18 @@ impl GpuTimer {
         for (l, _) in &self.last {
             if !out.contains(l) {
                 out.push(l);
+            }
+        }
+        out
+    }
+
+    /// (total ms, total units) of the last times for passes with this name.
+    pub fn rate(&self, label: &str) -> Option<(f64, f64)> {
+        let mut out = None;
+        for ((l, ms), u) in self.last.iter().zip(&self.last_units) {
+            if *l == label {
+                let (a, b) = out.unwrap_or((0.0, 0.0));
+                out = Some((a + ms, b + u));
             }
         }
         out

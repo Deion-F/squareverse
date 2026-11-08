@@ -7,7 +7,8 @@ use egui::{Align2, Color32, RichText, Ui};
 /// What the menu changes. The app reads it every frame and acts on the `*_requested` flags.
 pub struct UiState {
     pub paused: bool,
-    pub steps_per_frame: u32,
+    /// Index into `SPEEDS`.
+    pub speed: usize,
     pub fps_target: u32,
     pub brightness: f32,
     pub exposure: f32,
@@ -26,7 +27,7 @@ impl UiState {
     pub fn new(particles: u32, seed: u64, fps_target: u32) -> Self {
         Self {
             paused: false,
-            steps_per_frame: 1,
+            speed: SPEEDS.len() - 1,
             fps_target,
             brightness: crate::snapshot::default_look().brightness,
             exposure: crate::snapshot::default_look().exposure,
@@ -42,12 +43,30 @@ impl UiState {
     }
 }
 
+/// Sim speeds to choose from, Myr of sim time per second; `None` (the last): as fast as the frame budget allows.
+pub const SPEEDS: [Option<f64>; 10] =
+    [Some(0.5), Some(1.0), Some(2.0), Some(5.0), Some(10.0), Some(20.0), Some(50.0), Some(100.0), Some(200.0), None];
+
+pub fn speed_name(speed: Option<f64>) -> String {
+    match speed {
+        Some(v) => format!("{v} Myr/s"),
+        None => "max".into(),
+    }
+}
+
 /// Figures shown in the corners and under Advanced.
 pub struct Hud {
     pub particles: u32,
     pub sim_time_myr: f64,
     pub dt_myr: f64,
-    pub steps_per_s: f64,
+    pub dt_min_myr: f64,
+    /// Sim time per second achieved.
+    pub myr_per_s: f64,
+    /// Particles in each time-step bin (bin b steps dt / 2^b).
+    pub bin_counts: Vec<u32>,
+    pub evals_per_myr: f64,
+    /// The sim's GPU budget a frame, ms (None: no timestamps, one sub-step a frame).
+    pub budget_ms: Option<f64>,
     pub fps: f64,
     pub adapter: String,
     pub backend: String,
@@ -60,7 +79,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Tab", "open / close the menu"),
     ("H", "this list of keys"),
     ("Space", "pause / run"),
-    ("[ / ]", "slower / faster (steps per frame)"),
+    ("[ / ]", "slower / faster (sim time per second)"),
     ("R", "reset the universe"),
     ("F", "frame-rate target 60 / 30 fps"),
     ("Home", "reset the view"),
@@ -74,27 +93,15 @@ fn info(ui: &mut Ui, text: &str) {
     ui.label(RichText::new("(i)").weak()).on_hover_text(text);
 }
 
-/// ⏴ value ⏵ with a slider; the arrows step by `step`. (Repeat while held, as in v2: phase 8 menu polish.)
-fn stepper(ui: &mut Ui, value: &mut u32, range: std::ops::RangeInclusive<u32>, step: u32) {
-    let (lo, hi) = (*range.start(), *range.end());
-    if ui.add(egui::Button::new("⏴").small()).clicked() {
-        *value = value.saturating_sub(step).max(lo);
-    }
-    ui.add(egui::Slider::new(value, range).logarithmic(true));
-    if ui.add(egui::Button::new("⏵").small()).clicked() {
-        *value = (*value + step).min(hi);
-    }
-}
-
 fn corners(ui: &Ui, hud: &Hud, fps_target: u32) {
     let ctx = ui.ctx();
     let mono = |s: String| RichText::new(s).monospace().color(Color32::from_gray(210));
     egui::Area::new(egui::Id::unique("status")).anchor(Align2::LEFT_TOP, [8.0, 6.0]).interactable(false).show(ctx, |ui| {
         ui.label(mono(format!(
-            "{} particles   t = {:.1} Myr   {:.0} steps/s   {:.0} / {} fps",
+            "{} particles   t = {:.1} Myr   {:.1} Myr/s   {:.0} / {} fps",
             group(hud.particles as u64),
             hud.sim_time_myr,
-            hud.steps_per_s,
+            hud.myr_per_s,
             hud.fps,
             fps_target
         )));
@@ -161,17 +168,23 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
             });
             ui.horizontal(|ui| {
                 ui.label("Speed");
-                stepper(ui, &mut st.steps_per_frame, 1..=64, 1);
-                info(ui, "Steps the simulation takes each frame ([ and ]). More steps: time runs faster, each frame costs more.");
+                let mut i = st.speed as u32;
+                if ui.add(egui::Button::new("⏴").small()).clicked() {
+                    i = i.saturating_sub(1);
+                }
+                ui.add(egui::Slider::new(&mut i, 0..=(SPEEDS.len() - 1) as u32).show_value(false));
+                if ui.add(egui::Button::new("⏵").small()).clicked() {
+                    i = (i + 1).min(SPEEDS.len() as u32 - 1);
+                }
+                st.speed = i as usize;
+                ui.label(speed_name(SPEEDS[st.speed]));
+                info(
+                    ui,
+                    "Sim time per second of real time ([ and ]). \"max\" runs as much as each frame's GPU budget allows: \
+                     the frame rate holds and the sim slows instead when there is a lot to do.",
+                );
             });
-            ui.label(
-                RichText::new(format!(
-                    "{:.2} Myr a step, {:.2} Myr a frame",
-                    hud.dt_myr,
-                    hud.dt_myr * st.steps_per_frame as f64
-                ))
-                .weak(),
-            );
+            ui.label(RichText::new(format!("now {:.1} Myr/s", hud.myr_per_s)).weak());
             ui.horizontal(|ui| {
                 ui.label("Particles");
                 ui.add(egui::DragValue::new(&mut st.particles).range(1_000..=16_000_000).speed(1_000));
@@ -228,6 +241,22 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
             ui.separator();
             egui::CollapsingHeader::new("Advanced").default_open(false).show(ui, |ui| {
                 ui.label(format!("GPU: {} ({})", hud.adapter, hud.backend));
+                ui.label(match hud.budget_ms {
+                    Some(b) => format!("Sim GPU budget {b:.1} ms a frame"),
+                    None => "No GPU timestamps: one sub-step a frame".into(),
+                });
+                ui.label(format!(
+                    "Time steps {:.3} - {:.2} Myr, {:.2} force evaluations per particle per Myr",
+                    hud.dt_min_myr, hud.dt_myr, hud.evals_per_myr
+                ));
+                let total: u64 = hud.bin_counts.iter().map(|&c| c as u64).sum::<u64>().max(1);
+                egui::Grid::new("bins").num_columns(2).show(ui, |ui| {
+                    for (b, &c) in hud.bin_counts.iter().enumerate() {
+                        ui.label(format!("step {:.3} Myr", hud.dt_myr / (1u64 << b) as f64));
+                        ui.label(format!("{:.1}%", 100.0 * c as f64 / total as f64));
+                        ui.end_row();
+                    }
+                });
                 if hud.timestamps {
                     egui::Grid::new("gpu ms").num_columns(2).show(ui, |ui| {
                         for (pass, ms) in &hud.gpu_ms {

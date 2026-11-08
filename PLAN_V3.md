@@ -336,10 +336,75 @@ the default stays at 50k. The force walk is most of the frame. Vulkan is now pic
 The Radeon now beats the UHD 630 stand-in at compute (20.3 vs 36 ms a step at 100k). In the 100k run a 9.25 ms
 `sort` stage shows up that the smaller runs don't report: worth a look when tuning.
 
-- [ ] Adaptive (block) time steps: power-of-two bins from each particle's acceleration; only active particles get
-  forces in a sub-step, the tree refitted each sub-step. Expected several x fewer force evaluations in a disc, and it
-  fixes the close-encounter energy error at 0.25 Myr.
-- [ ] Spread a step over several frames when it doesn't fit (force pass in slices), drawing interpolated, so the
-  frame rate holds and only the sim slows (the plan's "sim speed drops before frame rate").
-- [ ] Drawing on integrated GPUs: compute splat for squares <= 1 px.
-- [ ] Phase 1 acceptance: 1M at >= 60 fps on the RTX (now 23 ms a step: needs the two items above); record 4M.
+- [x] Adaptive (block) time steps (2026-11-07):
+  - **Steps:** dt 2 Myr, bins 0 - 4 (`levels` 5, down to 0.125 Myr), 16 sub-steps a step.
+  - **Step rules:** each particle steps at most sqrt(2 eta eps / |a|) (eta 0.025) and at most eta_jerk |a| / |da/dt|
+    (eta_jerk 0.05; the galaxy's pull dominates |a|, so only the change sees encounters).
+  - **Per sub-step:** every particle drifts; the tree is refitted (rebuilt every 8 sub-steps); the particles whose
+    step ends get listed (compact) and get forces.
+  - **Energy over 250 Myr, 20k particles, seeds 1 / 2 / 3:** -1.3e-4 / -6.4e-5 / -4.5e-5 at 2.55 force evaluations
+    per particle per Myr. The old fixed 0.25 Myr step gave 9e-6 / -3.6e-4 / 6.7e-5 at 4.
+  - **Speed at 1M on the RTX:** 91 GPU ms per Myr against 105 for the fixed 0.25 step. The fixed 0.125 step, the
+    same inner resolution, would take ~210.
+  - **Why only modest:** a force pass over a few particles costs about one walk's latency, ~20% of a full pass,
+    however few particles it has. So the sub-steps for the deepest bin are dear. `--levels 4` gives 71 ms per Myr
+    at coarser inner steps.
+  - **Tried and dropped:**
+    - the group walk on short lists (2.5x slower);
+    - listing the active particles was kept for the slicing, but it did not change the force time;
+    - letting nodes under the softening act whole (`--open-small`; no faster, since the clumps weren't the cost).
+  - **Next for speed:** split one particle's walk over several threads on short lists (/optimize).
+- [x] Spread a step over several frames (2026-11-07), `Sim::advance`:
+  - **How it works:** each sub-step is `Work` items. The window gives the sim a GPU budget each frame (85% of the
+    period, less the drawing), and the sim runs the items that fit, slicing a force pass into up to 64 pieces.
+  - **Cost model:** costs per item are learned from timestamps, and a force dispatch costs at least 20% of a full
+    pass.
+  - **Overruns:** an item may start when 4/5 of it fits; the overrun comes off the next frame. Frames that arrive late
+    shrink the budget.
+  - **Drawing:** particles are drawn moved along their velocity to a smooth display clock.
+  - **Determinism:** the test `frames_falling_anywhere_change_nothing` runs ~2,800 tiny frames and gets the same
+    hash as a whole run.
+  - **Speed setting:** the menu's speed is now Myr/s (0.5 - 200 or max).
+- [x] Drawing on integrated GPUs, compute splat: **not needed for now.**
+  - Drawing measured 0.26 ms a frame at 50k on the laptop, and on the RTX 0.7 ms at 1M and 2.6 at 4M. Gravity is
+    the cost.
+  - Revisit in phase 6 (level of detail) if drawing grows.
+- [x] Phase 1 acceptance (2026-11-07, RTX 2070 Super, Vulkan, window, speed max):
+
+  | Particles | fps | Worst frame | Sim speed |
+  |---|---|---|---|
+  | 1M | 60.0 | 17.3 ms | 7.4 Myr/s |
+  | 4M | 60.0 | 17.3 ms | 1.8 Myr/s |
+  | 500k | 59.9 | 18.7 ms | 15.3 Myr/s |
+
+  On the Intel UHD 630, 50k gives 58.9 fps (its frames are copied to the RTX, which drives the monitors).
+- [ ] **Laptop check, phase 1b** (block steps and frame budget). In WSL from the repo root, after `git pull`:
+
+  ```
+  cd squareverse_v3 && cargo build --release --target x86_64-pc-windows-gnu
+  E=target/x86_64-pc-windows-gnu/release/squareverse.exe
+  for p in 25000 50000 100000; do $E --headless --steps 10 --particles $p | grep -E '"(name|backend|particles|gpu_ms_per_myr|force_evals_per_myr)"' | tr -d '\n '; echo; done
+  $E --exit-after-frames 600
+  $E --fps 30 --exit-after-frames 300
+  $E --particles 100000 --exit-after-frames 600
+  $E --particles 250000 --exit-after-frames 600
+  ```
+
+  - **The first three lines:** GPU ms per Myr of sim time at 25k / 50k / 100k.
+  - **The window runs:** each prints one JSON line with fps, worst frame, Myr/s, mean GPU ms by pass and the sim
+    budget.
+  - **What changed:** the frame rate should now hold at any count (the sim slows instead). The figure to choose the
+    integrated default by is Myr/s.
+  - **What to look for:** fps at the target and a worst frame under ~20 ms (60 fps) or ~37 ms (30 fps).
+
+### Laptop results, phase 1b (block steps, frame budget)
+
+| Date | Command | Adapter / backend | Particles | fps (target) | Worst frame ms | Myr/s | GPU ms per Myr (headless) / by pass |
+|---|---|---|---|---|---|---|---|
+| | `--headless --steps 10` | | 25,000 | n/a | n/a | n/a | |
+| | `--headless --steps 10` | | 50,000 | n/a | n/a | n/a | |
+| | `--headless --steps 10` | | 100,000 | n/a | n/a | n/a | |
+| | `--exit-after-frames 600` | | (default) | ( 60) | | | |
+| | `--fps 30 --exit-after-frames 300` | | (default) | ( 30) | | | |
+| | `--particles 100000 --exit-after-frames 600` | | 100,000 | ( 60) | | | |
+| | `--particles 250000 --exit-after-frames 600` | | 250,000 | ( 60) | | | |

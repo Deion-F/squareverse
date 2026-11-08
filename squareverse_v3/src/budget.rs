@@ -4,8 +4,11 @@
 //! Phase 1 (self-gravity, 2026-11-06, per-particle walk, theta 0.6, a full step a frame): RTX 2070 Super on Vulkan
 //! 12.2 ms a step at 500k (23 ms at 1M); Intel UHD 630 on DX12 36 ms at 100k. The laptop's integrated Radeon on
 //! Vulkan: 20.3 ms a step headless at 100k; in the window 50k holds 60 fps, 75k gives 50.8, 100k 39.6, so integrated
-//! GPUs stay at 50k (measured 2026-11-06, PLAN_V3.md laptop results, phase 1). Adaptive
-//! steps and spreading a step over several frames (PLAN_V3.md phase 1) are what will raise these.
+//! GPUs stay at 50k (measured 2026-11-06, PLAN_V3.md laptop results, phase 1).
+//!
+//! Since 2026-11-07 the window's frame budget (`Sim::advance`) holds the frame rate at any count, so the sim slows
+//! instead; these defaults are now about sim speed. RTX 2070 Super, 60 fps: 500k at 15 Myr/s, 1M at 7.4, 4M at 1.8.
+//! The integrated default waits for the laptop's phase 1b check (PLAN_V3.md).
 
 use crate::gpu::Gpu;
 

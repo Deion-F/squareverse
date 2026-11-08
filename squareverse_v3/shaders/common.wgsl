@@ -1,4 +1,4 @@
-// Parameters shared by the particle and tree passes (src/gravity.rs `Common`). Prepended after fixed.wgsl.
+// Parameters shared by the particle and tree passes (src/sim/mod.rs `Common`). Prepended after fixed.wgsl.
 
 struct Common {
     center: vec4<u32>,   // the central point mass, fixed point
@@ -11,9 +11,41 @@ struct Common {
     g: f32,              // G, pc^3 / (Msun Myr^2)
     unit_pc: f32,        // parsecs per hi unit
     inv_unit_pc: f32,
-    dt: f32,             // Myr
+    dt: f32,             // the longest step (bin 0), Myr
     gm_c: f32,           // G x the central mass
     eps2_c: f32,         // the central mass's softening^2
+    levels: u32,         // time-step bins: bin b steps dt / 2^b, b < levels
+    dt_min: f32,         // the sub-step: dt / 2^(levels - 1)
+    eta_eps: f32,        // 2 eta softening: a particle wants steps of at most sqrt(eta_eps / |a|)
+    eta_jerk: f32,       // and at most eta_jerk |a| / |da/dt| (0: off)
+    open_small: f32,     // nodes smaller than this (pc) act as one mass at any distance, unless they hold the particle
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+}
+
+// Per dispatch (a dynamic-offset uniform): which sub-step of the longest step this is, and where a force-pass
+// slice starts.
+struct Tick {
+    s: u32,       // 0 .. 2^(levels - 1) - 1
+    start: u32,   // the slice's first particle
+    _a: u32,
+    _b: u32,
+}
+
+// Block time steps: a particle in bin b takes steps of 2^(levels - 1 - b) sub-steps, aligned to multiples of that.
+fn bin_period(levels: u32, b: u32) -> u32 {
+    return 1u << (levels - 1u - b);
+}
+
+// does a step of bin b begin at the start of sub-step s?
+fn bin_starts(levels: u32, b: u32, s: u32) -> bool {
+    return (s & (bin_period(levels, b) - 1u)) == 0u;
+}
+
+// does a step of bin b end at the end of sub-step s?
+fn bin_ends(levels: u32, b: u32, s: u32) -> bool {
+    return ((s + 1u) & (bin_period(levels, b) - 1u)) == 0u;
 }
 
 // Particle arrays: pos vec4<u32> (fixed point), kin vec4<f32> (vx, vy, temperature K, luminosity Lsun),

@@ -1,5 +1,8 @@
 //! The window: winit event loop, wgpu surface, the frame (sim steps, squares, tonemap, egui) and input.
-//! Frames are paced to the 60 / 30 fps target; the sim takes the menu's steps per frame.
+//! Frames are paced to the 60 / 30 fps target. Each frame the sim gets a GPU time budget (the frame period less
+//! the drawing, from the GPU timestamps) and runs as much of its work as fits (`Sim::advance`), capped by the menu's
+//! speed; the particles are drawn moved on along their velocities to a smoothly running display clock, so motion
+//! stays even while the sim advances in uneven bites.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +19,7 @@ use crate::cli::Cli;
 use crate::gpu::{Gpu, pick_adapter};
 use crate::headless::config_from;
 use crate::render::{Camera, Look, Renderer};
-use crate::sim::{Sim, SimConfig};
+use crate::sim::{Limit, Sim, SimConfig};
 use crate::timing::GpuTimer;
 use crate::ui::{self, Hud, UiState};
 
@@ -53,7 +56,22 @@ struct Running {
     next_frame: Instant,
     redraw_pending: bool,
     fps: Rate,
-    steps_rate: Rate,
+    myr_rate: Rate,
+    /// Sim time the speed cap still allows (Myr), the display clock, its rate (Myr a frame), and the drawing's GPU
+    /// ms a frame (smoothed).
+    allowance: f64,
+    display_myr: f64,
+    display_rate: f64,
+    render_ms: f64,
+    budget_ms: Option<f64>,
+    /// Estimated GPU ms the sim overran its budget by last frame, taken off this frame's.
+    overrun_ms: f64,
+    /// 1 while frames arrive on time; shrinks when they come late (see `frame`).
+    budget_scale: f64,
+    /// For --exit-after-frames: GPU ms by pass summed over the timed frames, how many, and the longest one.
+    gpu_totals: Vec<(&'static str, f64)>,
+    timed_frames: u64,
+    worst_gpu_ms: f64,
     /// Frames drawn, when they started, and the longest frame interval (for --exit-after-frames).
     frames: u64,
     started: Instant,
@@ -152,7 +170,17 @@ impl Running {
             next_frame: Instant::now(),
             redraw_pending: false,
             fps: Rate::new(),
-            steps_rate: Rate::new(),
+            myr_rate: Rate::new(),
+            allowance: 0.0,
+            display_myr: 0.0,
+            display_rate: 0.0,
+            render_ms: 0.0,
+            budget_ms: None,
+            overrun_ms: 0.0,
+            budget_scale: 1.0,
+            gpu_totals: Vec::new(),
+            timed_frames: 0,
+            worst_gpu_ms: 0.0,
             frames: 0,
             started: Instant::now(),
             last_frame: None,
@@ -175,6 +203,9 @@ impl Running {
     fn reset(&mut self) -> Result<()> {
         let cfg = SimConfig { particles: self.ui.particles, seed: self.ui.seed, ..self.sim.cfg.clone() };
         self.sim = Sim::new(&self.gpu, cfg)?;
+        self.display_myr = 0.0;
+        self.display_rate = 0.0;
+        self.allowance = 0.0;
         Ok(())
     }
 
@@ -196,8 +227,8 @@ impl Running {
                 "h" => ui.help_open = !ui.help_open,
                 "r" => ui.reset_requested = true,
                 "f" => ui.fps_target = if ui.fps_target == 60 { 30 } else { 60 },
-                "[" => ui.steps_per_frame = ui.steps_per_frame.saturating_sub(1).max(1),
-                "]" => ui.steps_per_frame = (ui.steps_per_frame + 1).min(64),
+                "[" => ui.speed = ui.speed.saturating_sub(1),
+                "]" => ui.speed = (ui.speed + 1).min(ui::SPEEDS.len() - 1),
                 _ => {}
             },
             _ => {}
@@ -238,9 +269,16 @@ impl Running {
         };
         let target = frame.texture.create_view(&Default::default());
         let size = self.size();
-        let steps = if self.ui.paused { 0 } else { self.ui.steps_per_frame };
         self.fps.tick(now, 1.0);
         if let Some(last) = self.last_frame {
+            // frames arriving late (work the timestamps don't see, such as the gaps between passes): shrink the
+            // sim's budget quickly; on time: let it grow back slowly
+            let interval = (now - last).as_secs_f64();
+            if !self.ui.paused && interval > 1.08 / self.ui.fps_target as f64 {
+                self.budget_scale = (self.budget_scale * 0.85).max(0.1);
+            } else {
+                self.budget_scale = (self.budget_scale + 0.005).min(1.0);
+            }
             // the first second is start-up (shader compiles, window mapping): leave it out of the worst frame
             if (now - self.started).as_secs_f64() > 1.0 {
                 self.worst_ms = self.worst_ms.max((now - last).as_secs_f64() * 1e3);
@@ -250,11 +288,47 @@ impl Running {
         }
         self.last_frame = Some(now);
         self.frames += 1;
-        self.steps_rate.tick(now, steps as f64);
 
         self.timer.begin();
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        self.sim.encode_steps(&mut enc, steps, &mut self.timer);
+        let before = self.sim.pos_time_myr();
+        if !self.ui.paused {
+            let fps = self.ui.fps_target as f64;
+            let dt_min = self.sim.cfg.dt_min();
+            let new_sub_steps = match ui::SPEEDS[self.ui.speed] {
+                Some(speed) => {
+                    self.allowance = (self.allowance + speed / fps).min(4.0 * speed / fps + dt_min);
+                    (self.allowance / dt_min).floor() as u32
+                }
+                None => u32::MAX,
+            };
+            // the sim's share of the frame: what the drawing leaves of 85% of the period
+            self.budget_ms = self.timer.enabled().then(|| (self.budget_scale * (850.0 / fps - self.render_ms)).max(1.0));
+            // what the frame may spend: the budget less last frame's overrun (frames queue two deep, so one long
+            // GPU frame followed by a short one still presents on time)
+            let base = self.budget_ms;
+            self.budget_ms = base.map(|b| (b - self.overrun_ms).max(0.25 * b));
+            let limit = match self.budget_ms {
+                Some(b) => Limit { budget_ms: b, new_sub_steps },
+                None => Limit { budget_ms: f64::INFINITY, new_sub_steps: new_sub_steps.min(1) },
+            };
+            let spent = self.sim.advance(&mut enc, &mut self.timer, limit);
+            self.overrun_ms = match self.budget_ms {
+                Some(b) => (spent - b).max(0.0),
+                None => 0.0,
+            };
+            self.budget_ms = base;
+        }
+        let advanced = self.sim.pos_time_myr() - before;
+        self.allowance = (self.allowance - advanced).max(0.0);
+        self.myr_rate.tick(now, advanced);
+        // the display clock: runs at the sim's average pace, pulled gently towards the sim's time
+        let sim_t = self.sim.pos_time_myr();
+        self.display_rate += 0.1 * (advanced - self.display_rate);
+        self.display_myr += self.display_rate + 0.1 * (sim_t - self.display_myr);
+        let reach = (4.0 * self.display_rate).max(self.sim.cfg.dt_min());
+        self.display_myr = self.display_myr.clamp(sim_t - reach, sim_t + reach);
+        let extrap = self.display_myr - sim_t;
         let look = Look { square_px: self.ui.square_px, brightness: self.ui.brightness, exposure: self.ui.exposure };
         self.renderer.draw(
             &self.gpu.device,
@@ -265,14 +339,19 @@ impl Running {
             &self.sim,
             &self.camera,
             &look,
+            extrap,
             &mut self.timer,
         );
 
         let hud = Hud {
             particles: self.sim.n,
-            sim_time_myr: self.sim.time_myr,
+            sim_time_myr: self.display_myr.max(0.0),
             dt_myr: self.sim.cfg.dt_myr,
-            steps_per_s: self.steps_rate.value,
+            dt_min_myr: self.sim.cfg.dt_min(),
+            myr_per_s: self.myr_rate.value,
+            bin_counts: self.sim.bin_counts[..self.sim.cfg.levels as usize].to_vec(),
+            evals_per_myr: self.sim.evals_per_myr(&self.sim.bin_counts),
+            budget_ms: self.budget_ms,
             fps: self.fps.value,
             adapter: self.gpu.summary.name.clone(),
             backend: self.gpu.summary.backend.clone(),
@@ -316,10 +395,28 @@ impl Running {
         self.timer.resolve(&mut enc);
         self.gpu.queue.submit(extra.into_iter().chain([enc.finish()]));
         self.timer.after_submit();
+        self.sim.after_submit();
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
         let _ = self.gpu.device.poll(wgpu::PollType::Poll);
-        self.timer.collect();
+        let timed = self.timer.collect();
+        self.sim.collect(timed.then_some(&self.timer));
+        if timed {
+            let render: f64 = ["draw", "tonemap", "ui"].iter().filter_map(|l| self.timer.ms(l)).sum();
+            self.render_ms += 0.2 * (render - self.render_ms);
+            let mut total = 0.0;
+            for &(label, ms) in &self.timer.last {
+                total += ms;
+                match self.gpu_totals.iter_mut().find(|(l, _)| *l == label) {
+                    Some(e) => e.1 += ms,
+                    None => self.gpu_totals.push((label, ms)),
+                }
+            }
+            self.timed_frames += 1;
+            if (now - self.started).as_secs_f64() > 1.0 {
+                self.worst_gpu_ms = self.worst_gpu_ms.max(total);
+            }
+        }
         Ok(())
     }
 }
@@ -350,8 +447,14 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 } else if self.cli.exit_after_frames.is_some_and(|n| r.frames >= n) {
                     let secs = r.last_frame.map_or(0.0, |l| (l - r.started).as_secs_f64());
+                    // GPU ms a frame by pass: the mean over every timed frame
+                    let per_frame: Vec<String> = r
+                        .gpu_totals
+                        .iter()
+                        .map(|(l, ms)| format!("\"{l}\": {:.2}", ms / r.timed_frames.max(1) as f64))
+                        .collect();
                     println!(
-                        "{{\"adapter\": \"{}\", \"backend\": \"{}\", \"particles\": {}, \"frames\": {}, \"fps\": {:.1}, \"fps_target\": {}, \"worst_frame_ms\": {:.1}, \"gpu_ms\": {:?}}}",
+                        "{{\"adapter\": \"{}\", \"backend\": \"{}\", \"particles\": {}, \"frames\": {}, \"fps\": {:.1}, \"fps_target\": {}, \"worst_frame_ms\": {:.1}, \"sim_myr\": {:.1}, \"myr_per_s\": {:.2}, \"gpu_ms_mean\": {{{}}}, \"gpu_ms_worst_frame\": {:.1}, \"bin_counts\": {:?}, \"sim_budget_ms\": {:.1}}}",
                         r.gpu.summary.name,
                         r.gpu.summary.backend,
                         r.sim.n,
@@ -359,7 +462,12 @@ impl ApplicationHandler for App {
                         (r.frames - 1) as f64 / secs.max(1e-9),
                         r.ui.fps_target,
                         r.worst_ms,
-                        r.timer.labels().into_iter().map(|l| (l, r.timer.ms(l).unwrap_or(0.0))).collect::<Vec<_>>()
+                        r.sim.pos_time_myr(),
+                        r.sim.pos_time_myr() / secs.max(1e-9),
+                        per_frame.join(", "),
+                        r.worst_gpu_ms,
+                        &r.sim.bin_counts[..r.sim.cfg.levels as usize],
+                        r.budget_ms.unwrap_or(0.0)
                     );
                     event_loop.exit();
                 }

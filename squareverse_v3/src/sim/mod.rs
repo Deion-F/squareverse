@@ -1,29 +1,46 @@
-//! The simulation on the GPU. Phase 1: self-gravity by a Barnes-Hut tree rebuilt every step, plus a central
-//! point mass (phase 2 makes it a super well). A step:
+//! The simulation on the GPU. Phase 1: self-gravity by a Barnes-Hut tree, plus a central point mass (phase 2
+//! makes it a super well), with block time steps.
 //!
-//! 1. `kick_drift` (half kick with last step's acceleration, drift) on particle set A;
-//! 2. bounding box and 48-bit Morton keys, radix sort (`src/sort.rs`), gather A into set B in key order;
-//! 3. the Karras radix tree over the sorted keys, node moments from the leaves up, forces by walking the tree;
-//! 4. `kick` (second half kick) on B, which becomes the current set.
+//! Time steps: the longest step is `dt_myr`; each particle takes dt / 2^bin (bin < `levels`), picked from its
+//! acceleration, so the inner disc and close encounters take short steps and the slow outer disc long ones. A
+//! step of dt is cut into 2^(levels - 1) sub-steps. Each sub-step:
 //!
-//! Every pass is deterministic (integer atomics only), so a seed gives the same state on the same GPU and backend.
+//! 1. `Open`: the opening half kick for particles whose step begins now; every particle drifts one sub-step;
+//! 2. the tree: every `rebuild_every` sub-steps rebuilt (`Keys`, six `Sort` passes, `Build`: bounding box and
+//!    48-bit Morton keys, radix sort, reorder into the other particle set, Karras radix tree, node moments), else
+//!    `Refit` (the same tree, its moments recomputed for the new positions);
+//! 3. `Force`: the tree walk for the particles whose step ends now, in up to `CHUNKS` slices;
+//! 4. `Close`: their closing half kick, and each picks its next bin.
+//!
+//! Those are `Work` items. `encode_steps` runs whole steps (headless runs, tests); the window calls `advance`
+//! each frame with a GPU time budget, which runs as many items as fit, so the frame rate holds and only the sim
+//! slows (frames can fall between any two items, even between slices of one force pass). Every pass is
+//! deterministic (integer atomics only) and where frames fall doesn't change the result: a seed gives the same
+//! state on the same GPU and backend.
 
 pub mod init;
 pub mod reference;
+
+use std::collections::VecDeque;
 
 use anyhow::Result;
 use serde::Serialize;
 use wgpu::util::DeviceExt;
 
 use crate::fixed::{Fixed2, TWO_32};
-use crate::gpu::Gpu;
-use crate::kernels::{Bind, Groups, Kernel, prelude, storage, uniform};
-use crate::sort::RadixSort;
+use crate::gpu::{AsyncRead, Gpu};
+use crate::kernels::{Bind, DYN_STRIDE, Groups, Kernel, prelude, storage, uniform};
+use crate::sort::{PASSES, RadixSort, Scan};
 use crate::timing::GpuTimer;
 use crate::units::G;
 use init::Initial;
 
 const NODE_WORDS: u64 = 16;
+/// The force pass can be cut into at most this many slices.
+pub const CHUNKS: u32 = 64;
+/// Most time-step bins (the tick table has 2^(levels - 1) x CHUNKS entries).
+pub const MAX_LEVELS: u32 = 8;
+
 /// How the force pass walks the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, clap::ValueEnum)]
 pub enum Walk {
@@ -43,7 +60,7 @@ impl Walk {
 
     fn workgroup(self) -> u32 {
         match self {
-            Walk::Group => 64,    // force.wgsl GROUP
+            Walk::Group => 64,     // force.wgsl GROUP
             Walk::Particle => 128, // force_particle.wgsl workgroup_size
         }
     }
@@ -64,15 +81,26 @@ pub struct SimConfig {
     pub disc_mass: f64,
     pub r_in_pc: f64,
     pub r_out_pc: f64,
-    /// Myr per step.
+    /// The longest time step (bin 0), Myr. A "step" (headless `--steps`, `encode_steps`) is one of these.
     pub dt_myr: f64,
+    /// Time-step bins: bin b steps dt / 2^b, b < levels, so the shortest step is dt / 2^(levels - 1). 1: every
+    /// particle steps dt (a plain leapfrog).
+    pub levels: u32,
+    /// Time-step accuracy: a particle steps at most sqrt(2 eta softening / |a|) ...
+    pub eta: f64,
+    /// ... and at most eta_jerk |a| / |da/dt| (da/dt over its last step; 0: off). The galaxy's pull dominates |a|,
+    /// so this is what sees close encounters coming.
+    pub eta_jerk: f64,
     /// The particles' softening (Plummer), pc.
     pub softening_pc: f64,
     /// Opening angle: a tree node acts as one mass (+ quadrupole) when its size / distance is below this.
     pub theta: f64,
+    /// Nodes smaller than this many softening lengths act as one mass at any distance (unless they hold the
+    /// particle): inside a dense clump that replaces most pairs with a few nodes. 0: off.
+    pub open_small: f64,
     pub walk: Walk,
-    /// Steps between full tree rebuilds (sort + build); between them the tree is only refitted to the new
-    /// positions. 1: rebuild every step.
+    /// Sub-steps between full tree rebuilds (sort + build); between them the tree is only refitted to the new
+    /// positions. 1: rebuild every sub-step.
     pub rebuild_every: u32,
     /// Random speed spread, as a fraction of the circular speed.
     pub dispersion: f64,
@@ -91,13 +119,25 @@ impl Default for SimConfig {
             disc_mass: 2e9,
             r_in_pc: 1_000.0,
             r_out_pc: 15_000.0,
-            dt_myr: 0.25,
+            // 2 Myr down to 0.125: the inner edge (1 kpc, a 30 Myr orbit) wants ~0.15, the outer disc ~2
+            dt_myr: 2.0,
+            levels: 5,
+            eta: 0.025,
+            eta_jerk: 0.05,
             softening_pc: 20.0,
             theta: 0.6,
-            rebuild_every: 4,
+            open_small: 0.0,
+            rebuild_every: 8,
             walk: Walk::Particle,
             dispersion: 0.1,
         }
+    }
+}
+
+impl SimConfig {
+    /// The sub-step (the shortest time step), Myr.
+    pub fn dt_min(&self) -> f64 {
+        self.dt_myr / (1u64 << (self.levels.clamp(1, MAX_LEVELS) - 1)) as f64
     }
 }
 
@@ -117,6 +157,21 @@ struct Common {
     dt: f32,
     gm_c: f32,
     eps2_c: f32,
+    levels: u32,
+    dt_min: f32,
+    eta_eps: f32,
+    eta_jerk: f32,
+    open_small: f32,
+    _p: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Tick {
+    s: u32,
+    start: u32,
+    _a: u32,
+    _b: u32,
 }
 
 /// Particle state read back from the GPU, in id order.
@@ -124,8 +179,53 @@ pub struct State {
     pub pos: Vec<Fixed2>,
     pub vel: Vec<[f32; 2]>,
     pub mass: Vec<f32>,
-    /// (ax, ay, phi_self, phi_central) from the last force pass.
+    /// (ax, ay, phi_self, phi_central) from each particle's last force pass.
     pub acc: Vec<[f32; 4]>,
+}
+
+/// One piece of a sub-step (see the module comment). Frames can fall between any two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Work {
+    Open,
+    Keys,
+    Sort(u32),
+    Build,
+    Refit,
+    /// The list of particles whose step ends this sub-step.
+    Compact,
+    /// Force slices `from .. to` of the list (of up to `CHUNKS`).
+    Force { from: u32, to: u32 },
+    Close,
+}
+
+/// The stages GPU time is split into (timer labels).
+pub const STAGES: [&str; 6] = ["integrate", "sort", "build", "refit", "compact", "force"];
+const FORCE: usize = 5;
+/// A force dispatch costs at least one tree walk's latency however few particles it has (the GPU isn't full):
+/// measured 2026-11-07 on the RTX 2070 Super, 2.2 of 10.7 ms at 500k, 4.5 of 21.5 at 1M.
+const FORCE_FLOOR: f64 = 0.2;
+
+impl Work {
+    fn label(self) -> &'static str {
+        match self {
+            Work::Open | Work::Close => "integrate",
+            Work::Keys | Work::Sort(_) => "sort",
+            Work::Build => "build",
+            Work::Refit => "refit",
+            Work::Compact => "compact",
+            Work::Force { .. } => "force",
+        }
+    }
+}
+
+/// How much a frame may do (`Sim::advance`).
+#[derive(Clone, Copy, Debug)]
+pub struct Limit {
+    /// Estimated GPU ms; the first item always runs, so the sim always moves, and an item starts when four fifths
+    /// of it fit, so a frame can overrun by up to a quarter of an item (`advance` returns the estimate actually spent).
+    pub budget_ms: f64,
+    /// How many new sub-steps may be started.
+    pub new_sub_steps: u32,
 }
 
 /// The bind groups that read or write one particle set.
@@ -134,6 +234,8 @@ struct SetBinds {
     morton: wgpu::BindGroup,
     /// this set -> the other one
     gather: wgpu::BindGroup,
+    gather_step: wgpu::BindGroup,
+    compact: wgpu::BindGroup,
     moments: wgpu::BindGroup,
     force: wgpu::BindGroup,
 }
@@ -142,6 +244,8 @@ struct Kernels {
     integrate: Kernel,
     morton: Kernel,
     gather: Kernel,
+    gather_step: Kernel,
+    compact: Kernel,
     karras: Kernel,
     moments: Kernel,
     force: Kernel,
@@ -153,26 +257,42 @@ pub struct Sim {
     pos: [wgpu::Buffer; 2],
     kin: [wgpu::Buffer; 2],
     body: [wgpu::Buffer; 2],
-    acc: wgpu::Buffer,
+    acc: [wgpu::Buffer; 2],
+    _bins: [wgpu::Buffer; 2],
+    /// particles in each bin (u32 x MAX_LEVELS)
+    counts: wgpu::Buffer,
     /// which particle set is current
     cur: usize,
     sort: RadixSort,
+    flag_scan: Scan,
     k: Kernels,
     sets: [SetBinds; 2],
     karras: wgpu::BindGroup,
     groups: Groups,
-    force_groups: Groups,
-    _buffers: Vec<wgpu::Buffer>,
-    pub time_myr: f64,
+    /// workgroups in a force slice, and how many slices
+    chunk_groups: u32,
+    chunks: u32,
+    /// sub-steps in a step: 2^(levels - 1)
+    subs: u32,
+    /// the sub-step under way (0 .. subs) and what is left of it
+    sub: u32,
+    queue: VecDeque<Work>,
+    /// sub-steps finished, and drifted (one ahead while a sub-step is under way)
+    sub_done: u64,
+    sub_drifted: u64,
+    /// steps (of dt) finished
     pub steps: u64,
+    /// the bin counts as last read back (for the cost estimates and the HUD)
+    pub bin_counts: [u32; MAX_LEVELS as usize],
+    counts_read: AsyncRead,
+    /// estimated GPU ms per unit of work, by `STAGES` label (force: a full pass)
+    rates: [f64; 6],
+    _buffers: Vec<wgpu::Buffer>,
 }
 
-fn begin<'e>(encoder: &'e mut wgpu::CommandEncoder, timer: &mut GpuTimer, label: &'static str) -> wgpu::ComputePass<'e> {
-    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: timer.compute(label) })
+fn begin<'e>(encoder: &'e mut wgpu::CommandEncoder, timer: &mut GpuTimer, label: &'static str, units: f64) -> wgpu::ComputePass<'e> {
+    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: timer.compute_units(label, units) })
 }
-
-/// The stages a step's GPU time is split into (timer labels).
-pub const STAGES: [&str; 5] = ["integrate", "sort", "gather", "tree", "force"];
 
 fn module(body: &str) -> String {
     format!("{}{}", prelude(), body)
@@ -189,10 +309,18 @@ impl Sim {
         let d = &gpu.device;
         let n = init.len() as u32;
         anyhow::ensure!(n >= 1, "a universe needs at least one particle");
+        anyhow::ensure!((1..=MAX_LEVELS).contains(&cfg.levels), "time-step levels must be 1 to {MAX_LEVELS}");
         cfg.particles = n;
+        let levels = cfg.levels;
+        let subs = 1u32 << (levels - 1);
         let groups = Groups::for_items(n, 256);
-        let force_groups = Groups::for_items(n, cfg.walk.workgroup());
-        let force_row = force_groups.x * cfg.walk.workgroup();
+        let wg = cfg.walk.workgroup();
+        let force_groups = Groups::for_items(n, wg);
+        // a slice of k chunks dispatches Groups::count(k * chunk_groups): its rows are as long as the full pass's
+        // whenever it has more than one, so one `row` serves every slice
+        let force_row = force_groups.x * wg;
+        let chunk = n.div_ceil(CHUNKS).div_ceil(wg) * wg;
+        let chunks = n.div_ceil(chunk);
 
         let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
         let make = |label: &str, bytes: &[u8], vertex: bool| {
@@ -205,7 +333,14 @@ impl Sim {
         let pos = [make("pos 0", bytemuck::cast_slice(&init.pos), true), make("pos 1", bytemuck::cast_slice(&init.pos), true)];
         let kin = [make("kin 0", bytemuck::cast_slice(&init.kin), true), make("kin 1", bytemuck::cast_slice(&init.kin), true)];
         let body = [make("body 0", bytemuck::cast_slice(&init.body), false), make("body 1", bytemuck::cast_slice(&init.body), false)];
-        let acc = storage(d, "acc", n as u64 * 16);
+        let acc = [storage(d, "acc 0", n as u64 * 16), storage(d, "acc 1", n as u64 * 16)];
+        let bins = [storage(d, "bins 0", n as u64 * 16), storage(d, "bins 1", n as u64 * 16)];
+        let counts = storage(d, "bin counts", MAX_LEVELS as u64 * 4);
+        // the list of particles whose step ends this sub-step (compact.wgsl)
+        let flags = storage(d, "active flags", n as u64 * 4);
+        let active = storage(d, "active", n as u64 * 4);
+        let active_n = storage(d, "active count", 16);
+        let flag_scan = Scan::new(d, &flags, n);
         let bbox = storage(d, "bbox", 16);
         let internal = n.saturating_sub(1).max(1) as u64;
         let child = storage(d, "child", internal * 8);
@@ -217,49 +352,54 @@ impl Sim {
         let center = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
         // the tree's origin: half a box from the centre, so the particles' region doesn't straddle the wrap
         let origin = center.offset_pc(-cfg.box_pc / 2.0, -cfg.box_pc / 2.0, cfg.box_pc).words();
-        let common = uniform(
-            d,
-            "common",
-            &Common {
-                center: center.words(),
-                n,
-                row: groups.x * 256,
-                origin_x: origin[0],
-                origin_y: origin[2],
-                theta: cfg.theta as f32,
-                eps2: cfg.softening_pc.powi(2) as f32,
-                g: G as f32,
-                unit_pc: unit_pc as f32,
-                inv_unit_pc: (1.0 / unit_pc) as f32,
-                dt: cfg.dt_myr as f32,
-                gm_c: (G * cfg.central_mass) as f32,
-                eps2_c: cfg.central_softening_pc.powi(2) as f32,
-            },
-        );
+        let common_with_row = |row: u32| Common {
+            center: center.words(),
+            n,
+            row,
+            origin_x: origin[0],
+            origin_y: origin[2],
+            theta: cfg.theta as f32,
+            eps2: cfg.softening_pc.powi(2) as f32,
+            g: G as f32,
+            unit_pc: unit_pc as f32,
+            inv_unit_pc: (1.0 / unit_pc) as f32,
+            dt: cfg.dt_myr as f32,
+            gm_c: (G * cfg.central_mass) as f32,
+            eps2_c: cfg.central_softening_pc.powi(2) as f32,
+            levels,
+            dt_min: cfg.dt_min() as f32,
+            eta_eps: (2.0 * cfg.eta * cfg.softening_pc) as f32,
+            eta_jerk: cfg.eta_jerk as f32,
+            open_small: (cfg.open_small * cfg.softening_pc) as f32,
+            _p: [0; 3],
+        };
+        let common = uniform(d, "common", &common_with_row(groups.x * 256));
         // the force pass's workgroups have their own size, so its rows have their own length
-        let force_common = uniform(
-            d,
-            "common (force)",
-            &Common {
-                center: center.words(),
-                n,
-                row: force_row,
-                origin_x: origin[0],
-                origin_y: origin[2],
-                theta: cfg.theta as f32,
-                eps2: cfg.softening_pc.powi(2) as f32,
-                g: G as f32,
-                unit_pc: unit_pc as f32,
-                inv_unit_pc: (1.0 / unit_pc) as f32,
-                dt: cfg.dt_myr as f32,
-                gm_c: (G * cfg.central_mass) as f32,
-                eps2_c: cfg.central_softening_pc.powi(2) as f32,
-            },
-        );
+        let force_common = uniform(d, "common (force)", &common_with_row(force_row));
+        // the tick table: entry s * CHUNKS + j is sub-step s, force slice from chunk j
+        let mut ticks = vec![0u8; (subs * CHUNKS) as usize * DYN_STRIDE as usize];
+        for s in 0..subs {
+            for j in 0..CHUNKS {
+                let at = (s * CHUNKS + j) as usize * DYN_STRIDE as usize;
+                let t = Tick { s, start: j * chunk, _a: 0, _b: 0 };
+                ticks[at..at + 16].copy_from_slice(bytemuck::bytes_of(&t));
+            }
+        }
+        let tick = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ticks"),
+            contents: &ticks,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
-        use Bind::{Read as R, Uniform as U, Write as W};
+        use Bind::{DynUniform as T, Read as R, Uniform as U, Write as W};
         let k = Kernels {
-            integrate: Kernel::new(d, "integrate", &module(include_str!("../../shaders/integrate.wgsl")), &[U, W, W, R], &["kick_drift", "kick"]),
+            integrate: Kernel::new(
+                d,
+                "integrate",
+                &module(include_str!("../../shaders/integrate.wgsl")),
+                &[U, W, W, R, W, W, T],
+                &["kick_drift", "kick", "init_bins"],
+            ),
             morton: Kernel::new(
                 d,
                 "morton",
@@ -268,6 +408,14 @@ impl Sim {
                 &["bbox_reset", "bbox_reduce", "keys_main"],
             ),
             gather: Kernel::new(d, "gather", &module(include_str!("../../shaders/gather.wgsl")), &[U, R, R, R, R, W, W, W], &["main"]),
+            gather_step: Kernel::new(
+                d,
+                "gather step",
+                &module(include_str!("../../shaders/gather_step.wgsl")),
+                &[U, R, R, R, W, W],
+                &["main"],
+            ),
+            compact: Kernel::new(d, "compact", &module(include_str!("../../shaders/compact.wgsl")), &[U, R, W, W, W, T], &["flag", "scatter"]),
             karras: Kernel::new(d, "karras", &module(include_str!("../../shaders/karras.wgsl")), &[U, R, W, W, W], &["main"]),
             moments: Kernel::new(
                 d,
@@ -283,7 +431,7 @@ impl Sim {
                     Walk::Group => include_str!("../../shaders/force.wgsl"),
                     Walk::Particle => include_str!("../../shaders/force_particle.wgsl"),
                 }),
-                &[U, R, R, R, R, W],
+                &[U, R, R, R, R, W, R, T, R],
                 &["main"],
             ),
         };
@@ -291,16 +439,21 @@ impl Sim {
         let set = |s: usize| {
             let o = 1 - s;
             SetBinds {
-                integrate: k.integrate.bind(d, "integrate", &[&common, &pos[s], &kin[s], &acc]),
+                integrate: k.integrate.bind(d, "integrate", &[&common, &pos[s], &kin[s], &acc[s], &bins[s], &counts, &tick]),
                 morton: k.morton.bind(d, "morton", &[&common, &pos[s], &bbox, &sort.keys[0], &sort.vals[0]]),
                 gather: k.gather.bind(d, "gather", &[&common, &sort.vals[0], &pos[s], &kin[s], &body[s], &pos[o], &kin[o], &body[o]]),
+                gather_step: k.gather_step.bind(d, "gather step", &[&common, &sort.vals[0], &acc[s], &bins[s], &acc[o], &bins[o]]),
+                compact: k.compact.bind(d, "compact", &[&common, &bins[s], &flags, &active, &active_n, &tick]),
                 moments: k.moments.bind(d, "moments", &[&common, &pos[s], &body[s], &child, &parents, &counter, &node]),
-                force: k.force.bind(d, "force", &[&force_common, &pos[s], &body[s], &child, &node, &acc]),
+                force: k.force.bind(d, "force", &[&force_common, &pos[s], &body[s], &child, &node, &acc[s], &active, &tick, &active_n]),
             }
         };
         let sets = [set(0), set(1)];
         let karras = k.karras.bind(d, "karras", &[&common, &sort.keys[0], &child, &parents, &counter]);
 
+        // first guesses of GPU ms per unit (a little pessimistic: a laptop's integrated GPU); measurements replace them
+        let per = n as f64;
+        let rates = [3e-6 * per, 1.5e-5 * per, 2e-5 * per, 1.5e-5 * per, 1e-5 * per, 2e-4 * per];
         let mut sim = Self {
             cfg,
             n,
@@ -308,81 +461,267 @@ impl Sim {
             kin,
             body,
             acc,
+            _bins: bins,
+            counts,
             cur: 0,
             sort,
+            flag_scan,
             k,
             sets,
             karras,
             groups,
-            force_groups,
-            _buffers: vec![bbox, child, parents, counter, node, common, force_common],
-            time_myr: 0.0,
+            chunk_groups: chunk / wg,
+            chunks,
+            subs,
+            sub: 0,
+            queue: VecDeque::new(),
+            sub_done: 0,
+            sub_drifted: 0,
             steps: 0,
+            bin_counts: [0; MAX_LEVELS as usize],
+            counts_read: AsyncRead::new(d, "bin counts read", MAX_LEVELS as u64 * 4),
+            rates,
+            _buffers: vec![bbox, child, parents, counter, node, common, force_common, tick, flags, active, active_n],
         };
-        // the first step's half kick needs forces
+        // the first forces, for every particle (they all start in bin 0, and at the last sub-step every bin's step
+        // ends), then everyone's first bin
         let mut enc = d.create_command_encoder(&Default::default());
-        sim.encode_forces(&mut enc, &mut GpuTimer::new(d, &gpu.queue, false));
+        let mut timer = GpuTimer::new(d, &gpu.queue, false);
+        let last = sim.subs - 1;
+        let first = [Work::Build, Work::Compact, Work::Force { from: 0, to: sim.chunks }];
+        for w in [Work::Keys].into_iter().chain((0..PASSES).map(Work::Sort)).chain(first) {
+            sim.encode_item(&mut enc, &mut timer, w, last);
+        }
+        {
+            let mut pass = begin(&mut enc, &mut timer, "integrate", 1.0);
+            sim.k.integrate.run_at(&mut pass, "init_bins", &sim.sets[sim.cur].integrate, &[0], sim.groups);
+        }
         gpu.queue.submit([enc.finish()]);
         Ok(sim)
     }
 
-    /// Sort the current set into the other one, build the tree and find the forces; the other set becomes current.
-    /// Each stage is its own compute pass so the timer can time it (labels "sort", "gather", "tree", "force").
-    fn encode_forces(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer) {
-        let (s, o) = (self.cur, 1 - self.cur);
-        let g = self.groups;
-        {
-            let mut pass = begin(encoder, timer, "sort");
-            self.k.morton.run(&mut pass, "bbox_reset", &self.sets[s].morton, Groups { x: 1, y: 1 });
-            self.k.morton.run(&mut pass, "bbox_reduce", &self.sets[s].morton, g);
-            self.k.morton.run(&mut pass, "keys_main", &self.sets[s].morton, g);
-            self.sort.encode(&mut pass);
-        }
-        {
-            let mut pass = begin(encoder, timer, "gather");
-            self.k.gather.run(&mut pass, "main", &self.sets[s].gather, g);
-        }
-        {
-            let mut pass = begin(encoder, timer, "tree");
-            self.k.karras.run(&mut pass, "main", &self.karras, g);
-            self.k.moments.run(&mut pass, "main", &self.sets[o].moments, g);
-        }
-        self.cur = o;
-        self.encode_force_pass(encoder, timer);
+    fn tick_offset(&self, s: u32, chunk: u32) -> u32 {
+        ((s * CHUNKS + chunk) as u64 * DYN_STRIDE) as u32
     }
 
-    /// The same tree, its moments recomputed for the particles' new positions ("refit"), then the forces.
-    fn encode_refit(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer) {
-        {
-            let mut pass = begin(encoder, timer, "tree");
-            self.k.moments.run(&mut pass, "reset", &self.sets[self.cur].moments, self.groups);
-            self.k.moments.run(&mut pass, "main", &self.sets[self.cur].moments, self.groups);
+    /// The work of the next sub-step.
+    fn plan(&mut self) {
+        self.queue.push_back(Work::Open);
+        if (self.sub_done + 1).is_multiple_of(self.cfg.rebuild_every.max(1) as u64) {
+            self.queue.push_back(Work::Keys);
+            self.queue.extend((0..PASSES).map(Work::Sort));
+            self.queue.push_back(Work::Build);
+        } else {
+            self.queue.push_back(Work::Refit);
         }
-        self.encode_force_pass(encoder, timer);
+        self.queue.push_back(Work::Compact);
+        self.queue.push_back(Work::Force { from: 0, to: self.chunks });
+        self.queue.push_back(Work::Close);
     }
 
-    fn encode_force_pass(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer) {
-        let mut pass = begin(encoder, timer, "force");
-        self.k.force.run(&mut pass, "main", &self.sets[self.cur].force, self.force_groups);
+    /// The share of the particles whose step ends at sub-step s (from the last bin counts read; 1 until there are some).
+    fn ending_share(&self, s: u32) -> f64 {
+        let total: u64 = self.bin_counts.iter().map(|&c| c as u64).sum();
+        if total == 0 {
+            return 1.0;
+        }
+        let ending: u64 = (0..self.cfg.levels)
+            .filter(|&b| (s + 1).is_multiple_of(1 << (self.cfg.levels - 1 - b)))
+            .map(|b| self.bin_counts[b as usize] as u64)
+            .sum();
+        ending as f64 / total as f64
     }
 
-    /// Records `k` steps into the encoder; passes are timed under "integrate", "sort", "gather", "tree", "force".
-    pub fn encode_steps(&mut self, encoder: &mut wgpu::CommandEncoder, k: u32, timer: &mut GpuTimer) {
-        for _ in 0..k {
-            {
-                let mut pass = begin(encoder, timer, "integrate");
-                self.k.integrate.run(&mut pass, "kick_drift", &self.sets[self.cur].integrate, self.groups);
+    /// The share of the force list's slots `from .. to` that hold particles (estimated from the bin counts).
+    fn busy(&self, from: u32, to: u32) -> f64 {
+        let listed = self.ending_share(self.sub) * self.chunks as f64;
+        (listed.min(to as f64) - from as f64).clamp(0.0, (to - from) as f64) / self.chunks as f64
+    }
+
+    /// Work units of an item, for the timer (a force slice: its busy share of a full pass).
+    fn units(&self, w: Work) -> f64 {
+        match w {
+            Work::Force { from, to } => self.busy(from, to),
+            _ => 1.0,
+        }
+    }
+
+    /// Estimated GPU ms (a force slice: at least `FORCE_FLOOR` of a full pass, unless it holds no particles).
+    fn estimate(&self, w: Work) -> f64 {
+        match w {
+            Work::Force { from, to } => {
+                let busy = self.busy(from, to);
+                if busy <= 0.0 { 0.02 } else { self.rates[FORCE] * busy.max(FORCE_FLOOR) }
             }
-            if (self.steps + 1).is_multiple_of(self.cfg.rebuild_every.max(1) as u64) {
-                self.encode_forces(encoder, timer);
+            _ => self.rates[STAGES.iter().position(|&l| l == w.label()).expect("a stage label")],
+        }
+    }
+
+    fn encode_item(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer, w: Work, s: u32) {
+        let units = self.units(w);
+        let mut pass = begin(encoder, timer, w.label(), units);
+        let (c, g) = (self.cur, self.groups);
+        let tick = self.tick_offset(s, 0);
+        match w {
+            Work::Open => self.k.integrate.run_at(&mut pass, "kick_drift", &self.sets[c].integrate, &[tick], g),
+            Work::Close => self.k.integrate.run_at(&mut pass, "kick", &self.sets[c].integrate, &[tick], g),
+            Work::Keys => {
+                self.k.morton.run(&mut pass, "bbox_reset", &self.sets[c].morton, Groups { x: 1, y: 1 });
+                self.k.morton.run(&mut pass, "bbox_reduce", &self.sets[c].morton, g);
+                self.k.morton.run(&mut pass, "keys_main", &self.sets[c].morton, g);
+            }
+            Work::Sort(p) => self.sort.encode_pass(&mut pass, p),
+            Work::Build => {
+                self.k.gather.run(&mut pass, "main", &self.sets[c].gather, g);
+                self.k.gather_step.run(&mut pass, "main", &self.sets[c].gather_step, g);
+                self.k.karras.run(&mut pass, "main", &self.karras, g);
+                self.cur = 1 - c;
+                self.k.moments.run(&mut pass, "main", &self.sets[self.cur].moments, g);
+            }
+            Work::Refit => {
+                self.k.moments.run(&mut pass, "reset", &self.sets[c].moments, g);
+                self.k.moments.run(&mut pass, "main", &self.sets[c].moments, g);
+            }
+            Work::Compact => {
+                self.k.compact.run_at(&mut pass, "flag", &self.sets[c].compact, &[tick], g);
+                self.flag_scan.encode(&mut pass);
+                self.k.compact.run_at(&mut pass, "scatter", &self.sets[c].compact, &[tick], g);
+            }
+            Work::Force { from, to } => {
+                let groups = Groups::count((to - from) * self.chunk_groups);
+                self.k.force.run_at(&mut pass, "main", &self.sets[c].force, &[self.tick_offset(s, from)], groups);
+            }
+        }
+    }
+
+    /// Runs one item of the current sub-step (planning the next sub-step first if none is under way).
+    fn step_item(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer, w: Work) {
+        self.encode_item(encoder, timer, w, self.sub);
+        match w {
+            Work::Open => self.sub_drifted += 1,
+            Work::Close => {
+                self.sub_done += 1;
+                self.sub += 1;
+                if self.sub == self.subs {
+                    self.sub = 0;
+                    self.steps += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Records as much work as fits the limit (always at least one item); returns the estimated GPU ms. Also
+    /// records a read-back of the bin counts (call `after_submit` and `collect` around the submit).
+    pub fn advance(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer, limit: Limit) -> f64 {
+        let mut spent = 0.0;
+        let mut new_subs = limit.new_sub_steps;
+        loop {
+            if self.queue.is_empty() {
+                if new_subs == 0 {
+                    break;
+                }
+                new_subs -= 1;
+                self.plan();
+            }
+            let w = self.queue[0];
+            let est = self.estimate(w);
+            if let Work::Force { from, to } = w {
+                // the longest slice that fits; with nothing spent yet, at least what costs no more than the floor
+                let floor = self.rates[FORCE] * FORCE_FLOOR;
+                // an item may start when four fifths of it fit (the window takes any overrun off the next frame)
+                let room = if spent == 0.0 { (1.25 * limit.budget_ms).max(floor) } else { 1.25 * (limit.budget_ms - spent) };
+                let k = (1..=to - from).rev().find(|&k| self.estimate(Work::Force { from, to: from + k }) <= room).unwrap_or(0);
+                let k = if spent == 0.0 { k.max(1) } else { k };
+                if k == 0 {
+                    break;
+                }
+                let part = Work::Force { from, to: from + k };
+                spent += self.estimate(part);
+                self.step_item(encoder, timer, part);
+                if from + k < to {
+                    self.queue[0] = Work::Force { from: from + k, to };
+                    break;
+                }
+                self.queue.pop_front();
             } else {
-                self.encode_refit(encoder, timer);
+                if spent > 0.0 && est > 1.25 * (limit.budget_ms - spent) {
+                    break;
+                }
+                self.queue.pop_front();
+                self.step_item(encoder, timer, w);
+                spent += est;
             }
-            self.steps += 1;
-            let mut pass = begin(encoder, timer, "integrate");
-            self.k.integrate.run(&mut pass, "kick", &self.sets[self.cur].integrate, self.groups);
         }
-        self.time_myr += k as f64 * self.cfg.dt_myr;
+        self.counts_read.copy(encoder, &self.counts);
+        spent
+    }
+
+    pub fn after_submit(&mut self) {
+        self.counts_read.after_submit();
+    }
+
+    /// Picks up the bin counts once read back, and the GPU times of the last timed frame (call after polling).
+    pub fn collect(&mut self, timer: Option<&GpuTimer>) {
+        if let Some(data) = self.counts_read.take() {
+            let c: &[u32] = bytemuck::cast_slice(&data);
+            self.bin_counts.copy_from_slice(c);
+        }
+        if let Some(t) = timer {
+            for (i, label) in STAGES.iter().enumerate().filter(|&(i, _)| i != FORCE) {
+                if let Some((ms, units)) = t.rate(label)
+                    && units > 1e-6
+                {
+                    self.rates[i] += 0.3 * (ms / units - self.rates[i]);
+                }
+            }
+            // force passes: a full pass costs ms / max(busy, floor share)
+            let (mut ms_sum, mut units) = (0.0, 0.0);
+            for ((label, ms), &busy) in t.last.iter().zip(&t.last_units) {
+                if *label == "force" && busy > 0.0 {
+                    ms_sum += ms;
+                    units += busy.max(FORCE_FLOOR);
+                }
+            }
+            if units > 0.0 {
+                self.rates[FORCE] += 0.3 * (ms_sum / units - self.rates[FORCE]);
+            }
+        }
+    }
+
+    /// Records `k` whole steps (of dt) into the encoder, finishing a step under way first.
+    pub fn encode_steps(&mut self, encoder: &mut wgpu::CommandEncoder, k: u32, timer: &mut GpuTimer) {
+        // a step under way counts as the first of the k
+        let target = self.steps + k as u64;
+        while self.steps < target {
+            if self.queue.is_empty() {
+                self.plan();
+            }
+            let w = self.queue.pop_front().expect("planned");
+            self.step_item(encoder, timer, w);
+        }
+    }
+
+    /// Sim time of the finished sub-steps, Myr.
+    pub fn time_myr(&self) -> f64 {
+        self.sub_done as f64 * self.cfg.dt_min()
+    }
+
+    /// Sim time of the positions as they are now (a sub-step ahead of `time_myr` while one is under way), Myr.
+    pub fn pos_time_myr(&self) -> f64 {
+        self.sub_drifted as f64 * self.cfg.dt_min()
+    }
+
+    /// Sub-steps in a step of dt.
+    pub fn sub_steps(&self) -> u32 {
+        self.subs
+    }
+
+    /// Force evaluations per particle per Myr with the given bin counts (bin b steps 2^b times per dt).
+    pub fn evals_per_myr(&self, counts: &[u32]) -> f64 {
+        let total: f64 = counts.iter().map(|&c| c as f64).sum();
+        let evals: f64 = counts.iter().enumerate().map(|(b, &c)| c as f64 * (1u64 << b) as f64).sum();
+        if total > 0.0 { evals / total / self.cfg.dt_myr } else { 0.0 }
     }
 
     /// The current positions (vertex buffer: vec4<u32> each).
@@ -395,11 +734,18 @@ impl Sim {
         &self.kin[self.cur]
     }
 
+    /// The bin counts, waiting for the GPU.
+    pub fn read_counts(&self, gpu: &Gpu) -> Result<Vec<u32>> {
+        Ok(bytemuck::cast_slice(&gpu.read_buffer(&self.counts)?)[..self.cfg.levels as usize].to_vec())
+    }
+
+    /// The state, in id order. Velocities are synchronised (every particle's step ended at the same time) only
+    /// between steps of dt, which is where `encode_steps` leaves the sim.
     pub fn read_state(&self, gpu: &Gpu) -> Result<State> {
         let pos: Vec<[u32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.pos[self.cur])?).to_vec();
         let kin: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.kin[self.cur])?).to_vec();
         let body: Vec<[u32; 2]> = bytemuck::cast_slice(&gpu.read_buffer(&self.body[self.cur])?).to_vec();
-        let acc: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.acc)?).to_vec();
+        let acc: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.acc[self.cur])?).to_vec();
         let n = self.n as usize;
         let mut s = State {
             pos: vec![Fixed2 { x: 0, y: 0 }; n],
@@ -418,7 +764,7 @@ impl Sim {
     }
 
     /// Total energy: kinetic + the central mass's potential + half the self-gravity potential (from the tree, at
-    /// the positions of the last force pass), Msun pc^2 / Myr^2.
+    /// each particle's last force pass, so exact between steps of dt), Msun pc^2 / Myr^2.
     pub fn energy(&self, s: &State) -> f64 {
         s.vel
             .iter()

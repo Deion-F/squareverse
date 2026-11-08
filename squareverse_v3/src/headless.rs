@@ -11,8 +11,7 @@ use crate::gpu::{AdapterSummary, Gpu};
 use crate::sim::{Sim, SimConfig, state_hash};
 use crate::timing::GpuTimer;
 
-const WARMUP_STEPS: u32 = 10;
-const BATCH: u32 = 50;
+const WARMUP_STEPS: u32 = 2;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -20,14 +19,21 @@ pub struct Report {
     pub adapter: AdapterSummary,
     pub gpu_timestamps: bool,
     pub config: SimConfig,
+    /// Steps of dt (each 2^(levels - 1) sub-steps).
     pub steps: u64,
     pub sim_time_myr: f64,
-    /// Wall-clock ms per step, waiting for the GPU after every batch of `BATCH` steps.
+    /// Wall-clock ms per step, waiting for the GPU after each one.
     pub wall_ms_per_step: f64,
-    /// GPU ms per step from timestamps (the median batch), if the adapter has them.
+    /// GPU ms per step from timestamps (the median step), if the adapter has them.
     pub gpu_ms_per_step: Option<f64>,
-    /// GPU ms per step by stage (medians over batches).
+    /// The same per Myr of sim time: what the frame budget buys.
+    pub gpu_ms_per_myr: Option<f64>,
+    /// GPU ms per step by stage (medians over steps).
     pub gpu_ms_by_stage: std::collections::BTreeMap<String, f64>,
+    /// Particles in each time-step bin at the end (bin b steps dt / 2^b).
+    pub bin_counts: Vec<u32>,
+    /// Force evaluations per particle per Myr with those bins (a fixed step of dt_min would be 1 / dt_min).
+    pub force_evals_per_myr: f64,
     pub energy_initial: f64,
     pub energy_final: f64,
     pub energy_rel_change: f64,
@@ -46,9 +52,21 @@ pub fn config_from(cli: &Cli, gpu: &Gpu) -> SimConfig {
     if let Some(t) = cli.theta {
         cfg.theta = t;
     }
+    if let Some(o) = cli.open_small {
+        cfg.open_small = o;
+    }
     cfg.walk = cli.walk.unwrap_or_else(|| crate::sim::Walk::for_gpu(gpu));
     if let Some(r) = cli.rebuild_every {
         cfg.rebuild_every = r;
+    }
+    if let Some(l) = cli.levels {
+        cfg.levels = l;
+    }
+    if let Some(e) = cli.eta {
+        cfg.eta = e;
+    }
+    if let Some(e) = cli.eta_jerk {
+        cfg.eta_jerk = e;
     }
     cfg
 }
@@ -64,10 +82,11 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
     let mut timer = GpuTimer::new(&gpu.device, &gpu.queue, gpu.timestamps);
     let e0 = sim.energy(&sim.read_state(gpu)?);
 
-    let submit = |sim: &mut Sim, timer: &mut GpuTimer, k: u32| -> Result<()> {
+    // one step a submit, so the timer sees all of its passes
+    let submit = |sim: &mut Sim, timer: &mut GpuTimer| -> Result<()> {
         timer.begin();
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        sim.encode_steps(&mut enc, k, timer);
+        sim.encode_steps(&mut enc, 1, timer);
         timer.resolve(&mut enc);
         gpu.queue.submit([enc.finish()]);
         timer.after_submit();
@@ -76,43 +95,47 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
         Ok(())
     };
 
-    submit(&mut sim, &mut timer, WARMUP_STEPS)?; // pipelines compile and caches warm here
+    for _ in 0..WARMUP_STEPS {
+        submit(&mut sim, &mut timer)?; // pipelines compile and caches warm here
+    }
     let mut gpu_ms = Vec::new();
     let mut stages: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let start = Instant::now();
-    let mut left = steps;
-    while left > 0 {
-        let k = left.min(BATCH);
-        submit(&mut sim, &mut timer, k)?;
-        // the timer holds the first steps' passes of the batch (each step has one force pass): per step, a stage's
-        // total over them / the steps (a sort every few steps is spread over them)
-        let mut step_ms = 0.0;
-        let timed_steps = timer.last.iter().filter(|(l, _)| *l == "force").count().max(1) as f64;
-        for label in timer.labels() {
-            let per_step = timer.ms(label).unwrap_or(0.0) / timed_steps;
-            stages.entry(label.to_string()).or_default().push(per_step);
-            step_ms += per_step;
-        }
+    for _ in 0..steps {
+        submit(&mut sim, &mut timer)?;
         if timer.enabled() && !timer.last.is_empty() {
-            gpu_ms.push(step_ms);
+            let mut total = 0.0;
+            for label in timer.labels() {
+                let ms = timer.ms(label).unwrap_or(0.0);
+                stages.entry(label.to_string()).or_default().push(ms);
+                total += ms;
+            }
+            gpu_ms.push(total);
         }
-        left -= k;
     }
     let wall = start.elapsed().as_secs_f64() * 1e3;
+    if std::env::var_os("SV_DEBUG_PASSES").is_some() {
+        for ((l, ms), u) in timer.last.iter().zip(&timer.last_units) {
+            eprintln!("{l:10} {ms:8.3} ms  units {u:.4}");
+        }
+    }
     let state = sim.read_state(gpu)?;
     let e1 = sim.energy(&state);
+    let bin_counts = sim.read_counts(gpu)?;
     gpu_ms.sort_by(f64::total_cmp);
     if let Some(path) = snapshot {
         crate::snapshot::save(gpu, &sim, path)?;
     }
+    let per_step = gpu_ms.get(gpu_ms.len() / 2).copied();
     Ok(Report {
         version: env!("CARGO_PKG_VERSION"),
         adapter: gpu.summary.clone(),
         gpu_timestamps: timer.enabled(),
         steps: sim.steps,
-        sim_time_myr: sim.time_myr,
+        sim_time_myr: sim.time_myr(),
         wall_ms_per_step: if steps > 0 { wall / steps as f64 } else { 0.0 },
-        gpu_ms_per_step: gpu_ms.get(gpu_ms.len() / 2).copied(),
+        gpu_ms_per_step: per_step,
+        gpu_ms_per_myr: per_step.map(|ms| ms / sim.cfg.dt_myr),
         gpu_ms_by_stage: stages
             .into_iter()
             .map(|(k, mut v)| {
@@ -120,6 +143,8 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
                 (k, v[v.len() / 2])
             })
             .collect(),
+        force_evals_per_myr: sim.evals_per_myr(&bin_counts),
+        bin_counts,
         energy_initial: e0,
         energy_final: e1,
         energy_rel_change: (e1 - e0) / e0.abs(),

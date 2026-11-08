@@ -1,6 +1,9 @@
 //! Opening the GPU: pick the best adapter (discrete before integrated, never a software one unless asked), open a
 //! device with timestamp queries where the adapter has them, and small helpers for reading buffers back.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
@@ -192,5 +195,57 @@ impl Gpu {
         let data = staging.slice(..).get_mapped_range().map_err(|e| anyhow!("{e:?}"))?.to_vec();
         staging.unmap();
         Ok(data)
+    }
+}
+
+/// Reads a small buffer back without stalling: `copy` records the copy (skipped while the last read is still
+/// in flight), `after_submit` starts the mapping, `take` returns the bytes once they are there (a frame or so later).
+pub struct AsyncRead {
+    buf: wgpu::Buffer,
+    state: Arc<AtomicU8>,
+    copied: bool,
+}
+
+const READ_IDLE: u8 = 0;
+const READ_MAPPING: u8 = 1;
+const READ_MAPPED: u8 = 2;
+
+impl AsyncRead {
+    pub fn new(device: &wgpu::Device, label: &str, size: u64) -> Self {
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { buf, state: Arc::new(AtomicU8::new(READ_IDLE)), copied: false }
+    }
+
+    pub fn copy(&mut self, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Buffer) {
+        if !self.copied && self.state.load(Ordering::Acquire) == READ_IDLE {
+            encoder.copy_buffer_to_buffer(src, 0, &self.buf, 0, self.buf.size());
+            self.copied = true;
+        }
+    }
+
+    pub fn after_submit(&mut self) {
+        if !std::mem::take(&mut self.copied) {
+            return;
+        }
+        self.state.store(READ_MAPPING, Ordering::Release);
+        let state = self.state.clone();
+        self.buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            state.store(if r.is_ok() { READ_MAPPED } else { READ_IDLE }, Ordering::Release);
+        });
+    }
+
+    pub fn take(&mut self) -> Option<Vec<u8>> {
+        if self.state.load(Ordering::Acquire) != READ_MAPPED {
+            return None;
+        }
+        let data = self.buf.slice(..).get_mapped_range().ok().map(|d| d.to_vec());
+        self.buf.unmap();
+        self.state.store(READ_IDLE, Ordering::Release);
+        data
     }
 }

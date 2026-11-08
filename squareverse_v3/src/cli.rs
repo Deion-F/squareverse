@@ -8,8 +8,8 @@ pub struct Cli {
     /// Run without a window and print (or write) a JSON report.
     #[arg(long)]
     pub headless: bool,
-    /// Headless: steps to run (after a short warm-up).
-    #[arg(long, default_value_t = 300)]
+    /// Headless: steps of dt to run (after a short warm-up).
+    #[arg(long, default_value_t = 50)]
     pub steps: u32,
     /// Headless: write the JSON report here instead of printing it.
     #[arg(long)]
@@ -22,16 +22,28 @@ pub struct Cli {
     pub particles: Option<u32>,
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
-    /// Myr per step.
+    /// The longest time step, Myr (default 2).
     #[arg(long)]
     pub dt: Option<f64>,
+    /// Time-step bins: steps run from dt down to dt / 2^(levels - 1) (default 5; 1: one fixed step).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8))]
+    pub levels: Option<u32>,
+    /// Time-step accuracy: each particle steps at most sqrt(2 eta softening / |a|) (default 0.025).
+    #[arg(long)]
+    pub eta: Option<f64>,
+    /// Time-step accuracy: and at most eta_jerk |a| / |da/dt| (default 0.05; 0: off).
+    #[arg(long)]
+    pub eta_jerk: Option<f64>,
     /// Opening angle of the gravity tree (smaller: more accurate, slower).
     #[arg(long)]
     pub theta: Option<f64>,
+    /// Tree nodes smaller than this many softening lengths act as one mass at any distance (0: off).
+    #[arg(long)]
+    pub open_small: Option<f64>,
     /// How the force pass walks the tree (default: chosen for the GPU).
     #[arg(long, value_enum)]
     pub walk: Option<crate::sim::Walk>,
-    /// Steps between full tree rebuilds (refits in between).
+    /// Sub-steps between full tree rebuilds (refits in between).
     #[arg(long)]
     pub rebuild_every: Option<u32>,
     /// Use only a GPU whose name contains this (any case).

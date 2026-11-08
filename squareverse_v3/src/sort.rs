@@ -4,7 +4,7 @@
 use crate::kernels::{Bind, Groups, Kernel, storage, uniform};
 
 pub const TILE: u32 = 256;
-const PASSES: u32 = 6;
+pub const PASSES: u32 = 6;
 const SCAN_BLOCK: u32 = 1024;
 
 #[repr(C)]
@@ -122,10 +122,16 @@ impl RadixSort {
     }
 
     pub fn encode(&self, pass: &mut wgpu::ComputePass) {
-        for (local, scatter) in &self.passes {
-            self.kernel.run(pass, "local_sort", local, self.groups);
-            self.scan.encode(pass);
-            self.kernel.run(pass, "scatter", scatter, self.groups);
+        for p in 0..PASSES {
+            self.encode_pass(pass, p);
         }
+    }
+
+    /// One of the six 8-bit passes (they must run in order, 0 first; frames may fall between them).
+    pub fn encode_pass(&self, pass: &mut wgpu::ComputePass, p: u32) {
+        let (local, scatter) = &self.passes[p as usize];
+        self.kernel.run(pass, "local_sort", local, self.groups);
+        self.scan.encode(pass);
+        self.kernel.run(pass, "scatter", scatter, self.groups);
     }
 }
