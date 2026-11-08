@@ -17,7 +17,7 @@ struct ViewUniform {
     square_px: f32,
     brightness: f32,
     extrap_myr: f32,
-    _pad: f32,
+    show_dm: u32,
 }
 
 #[repr(C)]
@@ -67,6 +67,8 @@ pub struct Look {
     pub square_px: f32,
     pub brightness: f32,
     pub exposure: f32,
+    /// Draw the dark matter (dim violet), normally unseen.
+    pub show_dm: bool,
 }
 
 struct Hdr {
@@ -131,6 +133,12 @@ impl Renderer {
                             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
                             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 2 },
                         ],
+                    }),
+                    // (mass bits, kind << 28 | id)
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 8,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![3 => Uint32x2],
                     }),
                 ],
             },
@@ -274,7 +282,7 @@ impl Renderer {
             square_px: look.square_px,
             brightness: look.brightness,
             extrap_myr: extrap_myr as f32,
-            _pad: 0.0,
+            show_dm: look.show_dm as u32,
         };
         queue.write_buffer(&self.view_buf, 0, bytemuck::bytes_of(&view));
         let tone = ToneUniform { exposure: look.exposure, manual_srgb: self.manual_srgb as u32, _pad: [0; 2] };
@@ -299,6 +307,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.view_bind, &[]);
             pass.set_vertex_buffer(0, sim.pos_buffer().slice(..));
             pass.set_vertex_buffer(1, sim.kin_buffer().slice(..));
+            pass.set_vertex_buffer(2, sim.body_buffer().slice(..));
             pass.draw(0..6, 0..sim.n);
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

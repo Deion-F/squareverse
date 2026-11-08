@@ -17,6 +17,7 @@ struct Body {
     s: vec3<f32>,   // second moments about the centre of mass: xx, xy, yy
     first: u32,     // its particles: the first one's index and how many
     count: u32,
+    eps2: f32,      // the largest softening^2 among them
     bmin: vec2<u32>,
     bmax: vec2<u32>,
 }
@@ -31,6 +32,7 @@ fn load(r: u32) -> Body {
         let j = r & ~LEAF;
         b.com = pos[j];
         b.m = bitcast<f32>(body[j].x);
+        b.eps2 = eps2_of(kind_of(body[j]));
         b.bmin = rel(b.com);
         b.bmax = b.bmin;
         b.s = vec3<f32>(0.0);
@@ -47,6 +49,7 @@ fn load(r: u32) -> Body {
                     bitcast<f32>(atomicLoad(&node[o + 12u])));
     b.first = atomicLoad(&node[o + 13u]);
     b.count = atomicLoad(&node[o + 14u]);
+    b.eps2 = bitcast<f32>(atomicLoad(&node[o + 15u]));
     return b;
 }
 
@@ -118,6 +121,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicStore(&node[o + 12u], bitcast<u32>(sm.z));
         atomicStore(&node[o + 13u], min(a.first, b.first));
         atomicStore(&node[o + 14u], a.count + b.count);
+        atomicStore(&node[o + 15u], bitcast<u32>(max(a.eps2, b.eps2)));
         k = parents[k];
     }
 }

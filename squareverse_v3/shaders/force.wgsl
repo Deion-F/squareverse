@@ -25,7 +25,7 @@ var<workgroup> stack: array<u32, STACK_CAP>;
 var<workgroup> sp: u32;
 var<workgroup> count: u32;
 var<workgroup> l_a: array<vec4<f32>, LIST>;   // (x, y relative to the group's first particle, pc; mass; sxx)
-var<workgroup> l_b: array<vec2<f32>, LIST>;   // (sxy, syy)
+var<workgroup> l_b: array<vec4<f32>, LIST>;   // (sxy, syy, softening^2, -)
 var<workgroup> l_j: array<u32, LIST>;         // the particle's index, NONE for a node
 var<workgroup> scan: array<u32, GROUP>;       // accepts in the low 16 bits, pushes in the high 16
 var<workgroup> bmin: array<vec2<f32>, GROUP>;
@@ -38,7 +38,7 @@ struct Sums {
 }
 
 // the list's first n entries acting on the particle at qr (relative position), skipping itself
-fn sum_list(n: u32, qr: vec2<f32>, i: u32, s_in: Sums) -> Sums {
+fn sum_list(n: u32, qr: vec2<f32>, i: u32, eps2_i: f32, s_in: Sums) -> Sums {
     var s = s_in;
     for (var k = 0u; k < n; k++) {
         if (l_j[k] == i) {
@@ -47,7 +47,7 @@ fn sum_list(n: u32, qr: vec2<f32>, i: u32, s_in: Sums) -> Sums {
         let e = l_a[k];
         let qd = l_b[k];
         let d = e.xy - qr;
-        let r2 = dot(d, d) + c.eps2;
+        let r2 = dot(d, d) + max(eps2_i, qd.z);
         let ir = inverseSqrt(r2);
         let ir2 = ir * ir;
         let gm = c.g * e.z * ir;
@@ -102,6 +102,10 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
     let gimin = todo_list[first];
     let gimax = todo_list[min(first + GROUP, todo) - 1u];
     let qref = pos[gimin];
+    var eps2_i = 0.0;
+    if (real) {
+        eps2_i = eps2_of(kind_of(body[i]));
+    }
     var q = qref;
     if (real) {
         q = pos[i];
@@ -143,7 +147,7 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
         }
         // classify this thread's node
         var ea = vec4<f32>(0.0);
-        var eb = vec2<f32>(0.0);
+        var eb = vec4<f32>(0.0);
         var ej = NONE;
         var ch = vec2<u32>(0u);
         var accept = 0u;
@@ -152,6 +156,7 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
             if ((r & LEAF) != 0u) {
                 let j = r & ~LEAF;
                 ea = vec4<f32>(fx_delta2(pos[j], qref) * c.unit_pc, bitcast<f32>(body[j].x), 0.0);
+                eb = vec4<f32>(0.0, 0.0, eps2_of(kind_of(body[j])), 0.0);
                 ej = j;
                 accept = 1u;
             } else {
@@ -164,7 +169,7 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
                 let holds = tail.y <= gimax && gimin < tail.y + tail.z;
                 if (dot(gap, gap) > open2 && (open2 > 0.0 || !holds)) {
                     ea = vec4<f32>(cr, bitcast<f32>(extra.x), bitcast<f32>(extra.z));
-                    eb = vec2<f32>(bitcast<f32>(extra.w), bitcast<f32>(tail.x));
+                    eb = vec4<f32>(bitcast<f32>(extra.w), bitcast<f32>(tail.x), bitcast<f32>(tail.w), 0.0);
                     accept = 1u;
                 } else {
                     ch = child[r];
@@ -185,7 +190,8 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
             if (open == 1u) {
                 let extra = node[4u * r + 2u];
                 ea = vec4<f32>(fx_delta2(node[4u * r], qref) * c.unit_pc, bitcast<f32>(extra.x), bitcast<f32>(extra.z));
-                eb = vec2<f32>(bitcast<f32>(extra.w), bitcast<f32>(node[4u * r + 3u].x));
+                let tl = node[4u * r + 3u];
+                eb = vec4<f32>(bitcast<f32>(extra.w), bitcast<f32>(tl.x), bitcast<f32>(tl.w), 0.0);
                 accept = 1u;
                 open = 0u;
             }
@@ -202,7 +208,7 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
         let n_list = workgroupUniformLoad(&count);
         var at = n_list;
         if (n_list + accepts > LIST) {
-            sums = sum_list(n_list, qr, i, sums);
+            sums = sum_list(n_list, qr, i, eps2_i, sums);
             at = 0u;
             workgroupBarrier();
         }
@@ -221,7 +227,7 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
             sp = base + pushes;
         }
     }
-    sums = sum_list(workgroupUniformLoad(&count), qr, i, sums);
+    sums = sum_list(workgroupUniformLoad(&count), qr, i, eps2_i, sums);
 
     if (real) {
         // the central mass

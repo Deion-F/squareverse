@@ -17,6 +17,12 @@ pub struct Cli {
     /// Headless: after the run, draw one frame (1280 x 800, the default view) into this PNG file.
     #[arg(long)]
     pub snapshot: Option<PathBuf>,
+    /// The starting scene (default: galaxy).
+    #[arg(long, value_enum)]
+    pub scene: Option<crate::sim::Scene>,
+    /// The galaxy disc's Toomre Q (default 1.5; ~1 grows spiral arms).
+    #[arg(long)]
+    pub toomre_q: Option<f64>,
     /// Number of particles (default: chosen for the GPU).
     #[arg(long)]
     pub particles: Option<u32>,
@@ -34,6 +40,24 @@ pub struct Cli {
     /// Time-step accuracy: and at most eta_jerk |a| / |da/dt| (default 0.05; 0: off).
     #[arg(long)]
     pub eta_jerk: Option<f64>,
+    /// The stars' softening, pc (default: 50 in the galaxy, 20 in the test disc).
+    #[arg(long)]
+    pub softening: Option<f64>,
+    /// Dark matter's softening, pc (default 1000).
+    #[arg(long)]
+    pub dm_softening: Option<f64>,
+    /// The galaxy's share of particles that are dark matter (default 0.4).
+    #[arg(long)]
+    pub halo_share: Option<f64>,
+    /// Galaxy component masses, Msun (defaults: disc 4e10, bulge 1e10, halo 3.5e11, central well 4e6).
+    #[arg(long)]
+    pub disc_mass: Option<f64>,
+    #[arg(long)]
+    pub bulge_mass: Option<f64>,
+    #[arg(long)]
+    pub halo_mass: Option<f64>,
+    #[arg(long)]
+    pub well_mass: Option<f64>,
     /// Opening angle of the gravity tree (smaller: more accurate, slower).
     #[arg(long)]
     pub theta: Option<f64>,

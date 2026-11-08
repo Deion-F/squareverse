@@ -101,7 +101,7 @@ impl Rate {
 }
 
 fn home_camera(cfg: &SimConfig, size: (u32, u32)) -> Camera {
-    Camera { center_pc: cfg.center_pc, px_per_pc: size.0.min(size.1).max(1) as f64 / (2.3 * cfg.r_out_pc) }
+    Camera { center_pc: cfg.center_pc, px_per_pc: size.0.min(size.1).max(1) as f64 / (2.3 * cfg.view_radius_pc()) }
 }
 
 impl Running {
@@ -150,7 +150,9 @@ impl Running {
         let egui_renderer = egui_wgpu::Renderer::new(&gpu.device, format, Default::default());
 
         let camera = home_camera(&sim.cfg, (config.width, config.height));
-        let ui = UiState::new(sim.cfg.particles, sim.cfg.seed, cli.fps);
+        let mut ui = UiState::new(sim.cfg.particles, sim.cfg.seed, cli.fps);
+        ui.scene = sim.cfg.scene;
+        ui.toomre_q = sim.cfg.galaxy.toomre_q;
         Ok(Self {
             window,
             gpu,
@@ -201,7 +203,9 @@ impl Running {
     }
 
     fn reset(&mut self) -> Result<()> {
-        let cfg = SimConfig { particles: self.ui.particles, seed: self.ui.seed, ..self.sim.cfg.clone() };
+        let base = if self.ui.scene == self.sim.cfg.scene { self.sim.cfg.clone() } else { SimConfig::for_scene(self.ui.scene) };
+        let mut cfg = SimConfig { particles: self.ui.particles, seed: self.ui.seed, ..base };
+        cfg.galaxy.toomre_q = self.ui.toomre_q;
         self.sim = Sim::new(&self.gpu, cfg)?;
         self.display_myr = 0.0;
         self.display_rate = 0.0;
@@ -225,6 +229,7 @@ impl Running {
             }
             Key::Character(c) => match c.to_lowercase().as_str() {
                 "h" => ui.help_open = !ui.help_open,
+                "d" => ui.show_dm = !ui.show_dm,
                 "r" => ui.reset_requested = true,
                 "f" => ui.fps_target = if ui.fps_target == 60 { 30 } else { 60 },
                 "[" => ui.speed = ui.speed.saturating_sub(1),
@@ -329,7 +334,12 @@ impl Running {
         let reach = (4.0 * self.display_rate).max(self.sim.cfg.dt_min());
         self.display_myr = self.display_myr.clamp(sim_t - reach, sim_t + reach);
         let extrap = self.display_myr - sim_t;
-        let look = Look { square_px: self.ui.square_px, brightness: self.ui.brightness, exposure: self.ui.exposure };
+        let look = Look {
+            square_px: self.ui.square_px,
+            brightness: self.ui.brightness,
+            exposure: self.ui.exposure,
+            show_dm: self.ui.show_dm,
+        };
         self.renderer.draw(
             &self.gpu.device,
             &self.gpu.queue,

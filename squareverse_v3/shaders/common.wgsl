@@ -19,9 +19,29 @@ struct Common {
     eta_eps: f32,        // 2 eta softening: a particle wants steps of at most sqrt(eta_eps / |a|)
     eta_jerk: f32,       // and at most eta_jerk |a| / |da/dt| (0: off)
     open_small: f32,     // nodes smaller than this (pc) act as one mass at any distance, unless they hold the particle
-    _p0: u32,
-    _p1: u32,
-    _p2: u32,
+    n_wells: u32,        // super wells (their numbers are 0 .. n_wells - 1, in about.w)
+    acc_r2: f32,         // a super well swallows bound particles nearer than this, pc^2
+    single_stars: u32,   // 1: each star particle is one star (its mass changes at death), 0: a population
+    eps2_kind: array<vec4<f32>, 2>,   // softening^2 by kind (K_*), pc^2; a pair uses the larger of its two
+}
+
+// Particle kinds, in the top 4 bits of body.y (the id below them).
+const KIND_SHIFT: u32 = 28u;
+const ID_MASK: u32 = 0x0FFFFFFFu;
+const K_STAR: u32 = 0u;
+const K_DM: u32 = 1u;     // dark matter
+const K_WELL: u32 = 2u;   // super well (black hole)
+const K_WD: u32 = 3u;     // white dwarf
+const K_NS: u32 = 4u;     // neutron star
+const K_BH: u32 = 5u;     // stellar black hole
+const K_GONE: u32 = 6u;   // swallowed: massless, not drawn
+
+fn kind_of(b: vec2<u32>) -> u32 {
+    return b.y >> KIND_SHIFT;
+}
+
+fn eps2_of(k: u32) -> f32 {
+    return c.eps2_kind[k >> 2u][k & 3u];
 }
 
 // Per dispatch (a dynamic-offset uniform): which sub-step of the longest step this is, and where a force-pass
@@ -49,10 +69,12 @@ fn bin_ends(levels: u32, b: u32, s: u32) -> bool {
 }
 
 // Particle arrays: pos vec4<u32> (fixed point), kin vec4<f32> (vx, vy, temperature K, luminosity Lsun),
-// body vec2<u32> (mass f32 bits, id). Node records: NODE_WORDS u32s a node: centre of mass (4, fixed point),
-// box (4: min x, min y, max x, max y, hi words relative to the origin), mass, opening radius^2, and the second
-// moments about the centre of mass sxx, sxy, syy (Msun pc^2) for the quadrupole (all f32 bits), then the node's
-// particles: the first one's index and how many (a node covers a contiguous run of the sorted particles).
+// body vec2<u32> (mass f32 bits, kind << KIND_SHIFT | id), about vec4<f32> (birth time Myr, the star's mass Msun
+// (0: no stellar evolution), the particle's mass at birth, the super well's number as f32 bits for wells).
+// Node records: NODE_WORDS u32s a node: centre of mass (4, fixed point), box (4: min x, min y, max x, max y, hi
+// words relative to the origin), mass, opening radius^2, and the second moments about the centre of mass sxx, sxy,
+// syy (Msun pc^2) for the quadrupole (all f32 bits), then the node's particles: the first one's index and how many
+// (a node covers a contiguous run of the sorted particles), and the largest softening^2 among them.
 // `parents`: internal node k's parent at k, particle j's at n + j.
 const NODE_WORDS: u32 = 16u;
 

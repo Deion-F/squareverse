@@ -34,6 +34,9 @@ pub struct Report {
     pub bin_counts: Vec<u32>,
     /// Force evaluations per particle per Myr with those bins (a fixed step of dt_min would be 1 / dt_min).
     pub force_evals_per_myr: f64,
+    /// The galaxy's figures at the start and the end (galaxy scene).
+    pub galaxy_start: Option<crate::sim::init::GalaxyStats>,
+    pub galaxy_end: Option<crate::sim::init::GalaxyStats>,
     pub energy_initial: f64,
     pub energy_final: f64,
     pub energy_rel_change: f64,
@@ -44,10 +47,28 @@ pub fn config_from(cli: &Cli, gpu: &Gpu) -> SimConfig {
     let mut cfg = SimConfig {
         particles: cli.particles.unwrap_or_else(|| crate::budget::default_particles(gpu)),
         seed: cli.seed,
-        ..Default::default()
+        ..SimConfig::for_scene(cli.scene.unwrap_or(crate::sim::Scene::Galaxy))
     };
+    if let Some(q) = cli.toomre_q {
+        cfg.galaxy.toomre_q = q;
+    }
     if let Some(dt) = cli.dt {
         cfg.dt_myr = dt;
+    }
+    if let Some(e) = cli.dm_softening {
+        cfg.dm_softening_pc = e;
+    }
+    let g = &mut cfg.galaxy;
+    for (v, f) in [(cli.disc_mass, &mut g.disc_mass), (cli.bulge_mass, &mut g.bulge_mass), (cli.halo_mass, &mut g.halo_mass), (cli.well_mass, &mut g.well_mass)] {
+        if let Some(v) = v {
+            *f = v;
+        }
+    }
+    if let Some(h) = cli.halo_share {
+        cfg.galaxy.halo_share = h;
+    }
+    if let Some(e) = cli.softening {
+        cfg.softening_pc = e;
     }
     if let Some(t) = cli.theta {
         cfg.theta = t;
@@ -80,7 +101,10 @@ pub fn run(gpu: &Gpu, cfg: SimConfig, steps: u32) -> Result<Report> {
 pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::path::Path>) -> Result<Report> {
     let mut sim = Sim::new(gpu, cfg)?;
     let mut timer = GpuTimer::new(&gpu.device, &gpu.queue, gpu.timestamps);
-    let e0 = sim.energy(&sim.read_state(gpu)?);
+    let s0 = sim.read_state(gpu)?;
+    let e0 = sim.energy(&s0);
+    let galaxy = sim.cfg.scene == crate::sim::Scene::Galaxy;
+    let galaxy_start = galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &s0));
 
     // one step a submit, so the timer sees all of its passes
     let submit = |sim: &mut Sim, timer: &mut GpuTimer| -> Result<()> {
@@ -145,6 +169,8 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
             .collect(),
         force_evals_per_myr: sim.evals_per_myr(&bin_counts),
         bin_counts,
+        galaxy_start,
+        galaxy_end: galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &state)),
         energy_initial: e0,
         energy_final: e1,
         energy_rel_change: (e1 - e0) / e0.abs(),

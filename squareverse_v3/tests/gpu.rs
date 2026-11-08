@@ -30,15 +30,16 @@ fn gpu() -> Option<&'static Mutex<Gpu>> {
     .as_ref()
 }
 
+/// The phase-1 test disc (stars round a fixed central mass).
 fn small(particles: u32, seed: u64) -> SimConfig {
-    SimConfig { particles, seed, ..Default::default() }
+    SimConfig { particles, seed, ..SimConfig::test_disc() }
 }
 
 fn run(g: &Gpu, sim: &mut Sim, steps: u32) {
     let mut timer = GpuTimer::new(&g.device, &g.queue, false);
     let mut left = steps;
     while left > 0 {
-        let k = left.min(100);
+        let k = left.min(5);
         let mut enc = g.device.create_command_encoder(&Default::default());
         sim.encode_steps(&mut enc, k, &mut timer);
         g.queue.submit([enc.finish()]);
@@ -103,7 +104,7 @@ fn tree_forces_match_direct_summation() {
         (Walk::Group, 0.6, 1e-3, 1.5e-2),
         (Walk::Group, 0.3, 1e-4, 1.5e-3),
     ] {
-        let cfg = SimConfig { central_mass: 0.0, theta, walk, ..Default::default() };
+        let cfg = SimConfig { central_mass: 0.0, theta, walk, ..SimConfig::test_disc() };
         let sim = Sim::from_initial(&g, cfg.clone(), &cluster(&cfg, 20_000, 5)).unwrap();
         let s = sim.read_state(&g).unwrap();
         let mut errs = Vec::new();
@@ -126,7 +127,7 @@ fn two_bodies_keep_their_orbit() {
     let (m, d) = (1e6, 100.0); // two 1e6 Msun bodies 100 pc apart
     let v = (G * 2.0 * m / d).sqrt() / 2.0; // each moves at half the relative circular speed
     let period = std::f64::consts::TAU * d / (2.0 * v);
-    let cfg = SimConfig { central_mass: 0.0, softening_pc: 0.01, dt_myr: period / 2_000.0, levels: 1, ..Default::default() };
+    let cfg = SimConfig { central_mass: 0.0, softening_pc: 0.01, dt_myr: period / 2_000.0, levels: 1, ..SimConfig::test_disc() };
     let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
     let mut init = Initial::with_capacity(2);
     init.push(c.offset_pc(-d / 2.0, 0.0, cfg.box_pc), [0.0, -v], m, (5772.0, 1.0));
@@ -148,7 +149,7 @@ fn momentum_holds_without_the_central_mass() {
     let Some(g) = gpu() else { return };
     let g = g.lock().unwrap_or_else(|e| e.into_inner());
     // a self-gravitating disc with nothing in the middle: it falls in on itself, but its total momentum should stay
-    let cfg = SimConfig { particles: 20_000, seed: 2, central_mass: 0.0, ..Default::default() };
+    let cfg = SimConfig { particles: 20_000, seed: 2, central_mass: 0.0, ..SimConfig::test_disc() };
     let mut sim = Sim::new(&g, cfg).unwrap();
     let s0 = sim.read_state(&g).unwrap();
     let scale: f64 = s0.vel.iter().zip(&s0.mass).map(|(v, &m)| m as f64 * (v[0] as f64).hypot(v[1] as f64)).sum();
@@ -174,7 +175,7 @@ fn gpu_matches_the_cpu_reference_across_the_box_edge() {
         disc_mass: 1e-3,
         dt_myr: 0.25,
         levels: 1,
-        ..Default::default()
+        ..SimConfig::test_disc()
     };
     let steps = 20;
     let mut sim = Sim::new(&g, cfg.clone()).unwrap();
@@ -207,7 +208,7 @@ fn block_steps_follow_a_fine_fixed_step() {
     let g = g.lock().unwrap_or_else(|e| e.into_inner());
     // the central mass alone (the disc all but massless): block steps of 2 Myr down to 0.125 against the CPU
     // reference stepping everyone at 0.125 Myr, over 40 Myr (the inner edge goes round more than once)
-    let cfg = SimConfig { particles: 5_000, seed: 4, disc_mass: 1e-3, ..Default::default() };
+    let cfg = SimConfig { particles: 5_000, seed: 4, disc_mass: 1e-3, ..SimConfig::test_disc() };
     let mut sim = Sim::new(&g, cfg.clone()).unwrap();
     let start = sim.read_state(&g).unwrap();
     let mut pos = start.pos.clone();
@@ -261,7 +262,15 @@ fn frames_falling_anywhere_change_nothing() {
 
 #[test]
 fn hash_sees_one_changed_word() {
-    let s = |x: u64| State { pos: vec![Fixed2 { x, y: 5 }], vel: vec![[1.0, 2.0]], mass: vec![1.0], acc: vec![[0.0; 4]] };
+    let s = |x: u64| State {
+        pos: vec![Fixed2 { x, y: 5 }],
+        vel: vec![[1.0, 2.0]],
+        mass: vec![1.0],
+        acc: vec![[0.0; 4]],
+        kind: vec![0],
+        star: vec![[5772.0, 1.0]],
+        about: vec![[0.0; 4]],
+    };
     assert_ne!(state_hash(&s(1)), state_hash(&s(2)));
 }
 
@@ -314,7 +323,7 @@ fn force_accuracy_table() {
     let Some(g) = gpu() else { return };
     let g = g.lock().unwrap_or_else(|e| e.into_inner());
     for theta in [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] {
-        let cfg = SimConfig { central_mass: 0.0, theta, ..Default::default() };
+        let cfg = SimConfig { central_mass: 0.0, theta, ..SimConfig::test_disc() };
         let sim = Sim::from_initial(&g, cfg.clone(), &cluster(&cfg, 20_000, 5)).unwrap();
         let s = sim.read_state(&g).unwrap();
         let mut errs = Vec::new();
@@ -326,4 +335,163 @@ fn force_accuracy_table() {
         let (m, p) = (percentile(&mut errs, 0.5), percentile(&mut errs, 0.99));
         eprintln!("theta {theta:.1}: median {m:.2e}, 99th percentile {p:.2e}");
     }
+}
+
+/// Half-mass radius (pc) of the particles of one part, about the galaxy's centre.
+fn half_mass_radius(cfg: &SimConfig, s: &State, parts: &[u8], part: u8) -> f64 {
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut rs: Vec<(f64, f64)> = (0..s.pos.len())
+        .filter(|&i| parts[i] == part)
+        .map(|i| {
+            let (dx, dy) = s.pos[i].delta_pc(c, cfg.box_pc);
+            (dx.hypot(dy), s.mass[i] as f64)
+        })
+        .collect();
+    rs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f64 = rs.iter().map(|r| r.1).sum();
+    let mut acc = 0.0;
+    for (r, m) in rs {
+        acc += m;
+        if acc >= 0.5 * total {
+            return r;
+        }
+    }
+    0.0
+}
+
+/// Diagnostic, run on demand: `cargo test --release --test gpu -- --ignored --nocapture galaxy_diagnostics`.
+#[test]
+#[ignore]
+fn galaxy_diagnostics() {
+    use squareverse::sim::init;
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let mut cfg = SimConfig { particles: env("SV_N", 50_000.0) as u32, seed: 1, ..Default::default() };
+    cfg.galaxy.toomre_q = env("SV_Q", cfg.galaxy.toomre_q);
+    cfg.softening_pc = env("SV_EPS", cfg.softening_pc);
+    cfg.well_softening_pc = env("SV_EPS_WELL", cfg.well_softening_pc);
+    cfg.levels = env("SV_LEVELS", cfg.levels as f64) as u32;
+    cfg.dt_myr = env("SV_DT", cfg.dt_myr);
+    cfg.galaxy.bulge_scale_pc = env("SV_BULGE_A", cfg.galaxy.bulge_scale_pc);
+    let span: f64 = env("SV_STEPS", 50.0);
+    eprintln!("softening {} well {} levels {} dt {} bulge a {}", cfg.softening_pc, cfg.well_softening_pc, cfg.levels, cfg.dt_myr, cfg.galaxy.bulge_scale_pc);
+    let (_, parts) = init::galaxy(&cfg);
+    let mut sim = Sim::new(&g, cfg.clone()).unwrap();
+    let s = sim.read_state(&g).unwrap();
+    let curve = init::radial_pull(&cfg, &s);
+    for r in [500.0, 1000.0, 2000.0, 4000.0, 6000.0, 8000.0, 10000.0, 13000.0, 20000.0, 30000.0] {
+        let gr = curve.iter().min_by(|a, b| (a.0 - r).abs().total_cmp(&(b.0 - r).abs())).unwrap();
+        eprintln!("R {:6.0} pc: v_c {:6.1} pc/Myr", gr.0, (gr.0 * gr.1).max(0.0).sqrt());
+    }
+    let mut t = 0;
+    for steps in [0u32, 5, (span as u32 / 2).saturating_sub(5), span as u32 - span as u32 / 2] {
+        run(&g, &mut sim, steps);
+        t += steps;
+        let s = sim.read_state(&g).unwrap();
+        let k: f64 = s.vel.iter().zip(&s.mass).map(|(v, &m)| 0.5 * m as f64 * ((v[0] as f64).powi(2) + (v[1] as f64).powi(2))).sum();
+        let w: f64 = s.acc.iter().zip(&s.mass).map(|(a, &m)| m as f64 * (0.5 * a[2] as f64 + a[3] as f64)).sum();
+        let mut kinds = [0u32; 8];
+        s.kind.iter().for_each(|&k| kinds[k as usize] += 1);
+        eprintln!(
+            "t {:5} Myr: K {k:.3e} W {w:.3e} 2K/|W| {:.3} E {:.4e}; half-mass R disc {:.0} bulge {:.0} halo {:.0}; kinds {:?}; bins {:?}",
+            t as f64 * cfg.dt_myr,
+            2.0 * k / w.abs(),
+            k + w,
+            half_mass_radius(&cfg, &s, &parts, init::PART_DISC),
+            half_mass_radius(&cfg, &s, &parts, init::PART_BULGE),
+            half_mass_radius(&cfg, &s, &parts, init::PART_HALO),
+            kinds,
+            sim.read_counts(&g).unwrap()
+        );
+    }
+}
+
+#[test]
+fn galaxy_has_a_flat_rotation_curve_and_holds_together() {
+    use squareverse::sim::init;
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { particles: 30_000, seed: 2, ..Default::default() };
+    let mut sim = Sim::new(&g, cfg.clone()).unwrap();
+    let s0 = sim.read_state(&g).unwrap();
+    let a = init::galaxy_stats(&cfg, &s0);
+    // flat from 4 to 16 kpc: within 10% of the mean (measured 2026-11-08: 221 - 229 pc/Myr at 100k)
+    let vs: Vec<f64> = a.rotation_curve.iter().filter(|(r, _)| (4_000.0..=16_000.0).contains(r)).map(|p| p.1).collect();
+    let mean = vs.iter().sum::<f64>() / vs.len() as f64;
+    eprintln!("rotation curve {:?}", a.rotation_curve);
+    assert!(vs.iter().all(|v| (v / mean - 1.0).abs() < 0.1), "{vs:?}");
+    // 100 Myr: every part keeps its size (measured 2026-11-08 over 2 Gyr at 100k: disc +2%)
+    let e0 = sim.energy(&s0);
+    run(&g, &mut sim, 50);
+    let s1 = sim.read_state(&g).unwrap();
+    let b = init::galaxy_stats(&cfg, &s1);
+    let de = (sim.energy(&s1) - e0) / e0.abs();
+    eprintln!("half-mass radii {:?} -> {:?}, energy change {de:.2e}, kinds {:?}", a.half_mass_pc, b.half_mass_pc, b.kinds);
+    for k in 0..3 {
+        assert!((b.half_mass_pc[k] / a.half_mass_pc[k] - 1.0).abs() < 0.12, "part {k}: {:?} -> {:?}", a.half_mass_pc, b.half_mass_pc);
+    }
+    assert!(de.abs() < 5e-3, "{de}");
+}
+
+#[test]
+fn stars_live_die_and_leave_remnants() {
+    use squareverse::sim::init::{Initial, Kind};
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { central_mass: 0.0, ..SimConfig::test_disc() };
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut init = Initial::with_capacity(4);
+    // (star mass, age Myr): a 20 Msun star lives ~5.6 Myr, a 7 Msun one ~77, the Sun ~10 Gyr, 40 Msun ~3
+    let stars = [(20.0f64, 10.0f64), (7.0, 1_000.0), (1.0, 4_600.0), (40.0, 50.0)];
+    for (k, &(m, age)) in stars.iter().enumerate() {
+        let p = c.offset_pc(1_000.0 * k as f64, 0.0, cfg.box_pc);
+        init.push_kind(p, [0.0, 0.0], m, (5000.0, 1.0), Kind::Star, [-age as f32, m as f32, m as f32, 0.0]);
+    }
+    let sim = Sim::from_initial(&g, cfg, &init).unwrap();
+    let s = sim.read_state(&g).unwrap();
+    eprintln!("kinds {:?}, masses {:?}, (T, L) {:?}", s.kind, s.mass, s.star);
+    assert_eq!(s.kind, vec![Kind::NeutronStar as u32, Kind::WhiteDwarf as u32, Kind::Star as u32, Kind::BlackHole as u32]);
+    // single stars: the remnant's mass (white dwarf 0.109 m + 0.394, neutron star 1.4, black hole m / 4)
+    assert!((s.mass[0] - 1.4).abs() < 1e-4 && (s.mass[1] - (0.109 * 7.0 + 0.394)).abs() < 1e-4 && s.mass[2] == 1.0);
+    assert!((s.mass[3] - 10.0).abs() < 1e-4);
+    assert!(s.star[2][0] > 5_000.0 && s.star[2][0] < 6_500.0, "the Sun's temperature {}", s.star[2][0]);
+    assert!(s.star[0][1] == 0.0 && s.star[1][1] > 0.0 && s.star[1][1] < 0.03);
+}
+
+#[test]
+fn a_well_swallows_what_comes_close_and_keeps_the_momentum() {
+    use squareverse::sim::init::{Initial, Kind};
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { central_mass: 0.0, accretion_pc: 2.0, ..SimConfig::test_disc() };
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut init = Initial::with_capacity(3);
+    init.push_well(c, [1.0, 0.0], 1e6);
+    // one star 1 pc away moving slowly (bound): swallowed; one 1 pc away much faster than escape: not; one far away
+    let sun = |init: &mut Initial, dx: f64, v: [f64; 2]| {
+        init.push_kind(c.offset_pc(dx, 0.0, cfg.box_pc), v, 1.0, (5772.0, 1.0), Kind::Star, [0.0, 1.0, 1.0, 0.0]);
+    };
+    sun(&mut init, 1.0, [0.0, 20.0]);
+    sun(&mut init, -1.0, [0.0, 3_000.0]);
+    sun(&mut init, 500.0, [0.0, 0.0]);
+    let p0 = Sim::momentum(&{
+        let mut sim = Sim::from_initial(&g, cfg.clone(), &init).unwrap();
+        let s = sim.read_state(&g).unwrap();
+        run(&g, &mut sim, 0);
+        s
+    });
+    let mut sim = Sim::from_initial(&g, cfg, &init).unwrap();
+    // the first step's evolution pass does the swallowing
+    let mut timer = GpuTimer::new(&g.device, &g.queue, false);
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    sim.advance(&mut enc, &mut timer, Limit { budget_ms: 1e-9, new_sub_steps: 1 });
+    g.queue.submit([enc.finish()]);
+    g.wait().unwrap();
+    let s = sim.read_state(&g).unwrap();
+    let p1 = Sim::momentum(&s);
+    eprintln!("kinds {:?}, masses {:?}, momentum {p0:?} -> {p1:?}", s.kind, s.mass);
+    assert_eq!(s.kind, vec![Kind::Well as u32, Kind::Gone as u32, Kind::Star as u32, Kind::Star as u32]);
+    assert!((s.mass[0] - 1e6 - 1.0).abs() < 0.01 && s.mass[1] == 0.0);
+    assert!((p1[0] - p0[0]).abs() < 1e-2 * p0[0].abs() && (p1[1] - p0[1]).abs() < 1e-3 * 3_000.0, "{p0:?} {p1:?}");
 }

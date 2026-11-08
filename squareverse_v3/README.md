@@ -4,10 +4,11 @@ Galaxies and the universe they live in, simulated on the GPU and drawn as square
 `squareverse_v2` in Rust + wgpu: one native program per OS (Windows: DX12 / Vulkan, Mac: Metal, Linux: Vulkan / GL),
 nothing for users to install. The design, the decisions behind it and progress are in `../PLAN_V3.md`.
 
-**Status: phase 1 (gravity core), first part done.** Every particle pulls on every other through a Barnes-Hut tree
-built on the GPU each step, plus a central point mass (phase 2 makes it a super well). Still to come in phase 1:
-adaptive per-particle time steps, and spreading a step over several frames so the frame rate holds when the sim
-can't keep up.
+**Status: phase 2 (a galaxy, collisionless) done.** The default scene is a Milky-Way-like galaxy in balance: a
+disc of stars, a bulge, a dark matter halo and a super well at the centre. Its stars age, turn into giants and leave
+white dwarfs, neutron stars and black holes. Gravity is a Barnes-Hut tree on the GPU, each particle steps as often as
+it needs (block time steps), and the frame rate holds while the sim slows instead. Next: gas and star formation
+(phase 3).
 
 ## Setting up a machine (WSL / Ubuntu), once
 
@@ -30,7 +31,9 @@ cargo run --release -- --headless --steps 50 --snapshot frame.png    # no window
 cargo run --release -- --list-adapters                # the GPUs wgpu can see
 cargo run --release -- --exit-after-frames 600        # close after 600 frames and print the fps reached
 cargo run --release -- --headless --theta 0.5 --walk group --rebuild-every 1   # gravity options
-cargo run --release -- --headless --dt 2 --levels 5 --eta 0.025 --eta-jerk 0.05   # time-step options
+cargo run --release -- --headless --dt 2 --levels 7 --eta 0.025 --eta-jerk 0.1    # time-step options
+cargo run --release -- --toomre-q 1.0                 # a cold galaxy disc: a bar and spiral arms
+cargo run --release -- --scene disc                   # the phase-1 test disc
 cargo test -- --nocapture                             # unit + GPU tests
 cargo build --release --target x86_64-pc-windows-gnu  # the Windows exe, from WSL (needs mingw-w64)
 ```
@@ -48,12 +51,13 @@ the same way (no jitter at any zoom).
 
 ## Gravity and time steps (`src/sim/mod.rs`, `src/sort.rs`, `shaders/`)
 
-**Block time steps.** The longest step is `dt` (2 Myr); each particle takes dt / 2^bin, bin 0 - 4 (`levels` 5), so
-steps run from 2 Myr down to 0.125. A particle steps at most sqrt(2 eta softening / |a|) (eta 0.025, GADGET's
-criterion) and at most eta_jerk |a| / |da/dt| (eta_jerk 0.05, da/dt from the change in its acceleration over its last
+**Block time steps.** The longest step is `dt` (2 Myr); each particle takes dt / 2^bin, bin 0 - 6 (`levels` 7 in the
+galaxy, 5 in the test disc), so steps run from 2 Myr down to 1/32 (test disc: 0.125). The galaxy's bulge centre has
+orbits of a few Myr: with only 5 levels it swelled 590 -> 3,700 pc in 100 Myr. A particle steps at most sqrt(2 eta softening / |a|) (eta 0.025, GADGET's
+criterion) and at most eta_jerk |a| / |da/dt| (eta_jerk 0.1 in the galaxy, 0.05 in the test disc; da/dt from the change in its acceleration over its last
 step). The galaxy's pull dominates |a|, so the second rule is the one that sees a close encounter coming. A particle
 may take shorter steps from the end of any step, longer ones only where their boundaries line up. A step of dt is
-16 sub-steps of 0.125 Myr, and each sub-step is:
+2^(levels - 1) sub-steps (64 in the galaxy). Each step begins with **Evolve** (below), and each sub-step is:
 
 1. **Open, drift** (`integrate.wgsl`): the opening half kick for the particles whose step begins now; every particle
    drifts one sub-step, in fixed point.
@@ -97,19 +101,66 @@ Measured 2026-11-07 (20k particles, 250 Myr), relative energy change for seeds 1
 | Particle | 3.1e-3 / 2.0e-2 | 3.3e-4 / 2.3e-3 |
 | Group | 5.0e-4 / 7.9e-3 | 4.3e-5 / 5.6e-4 |
 
-## The scene
+**Kinds and softening.** Every particle has a kind: star, dark matter, super well, white dwarf, neutron star, stellar
+black hole, or swallowed. The kind is kept in the top 4 bits of its id word.
+- **Softening by kind:** stars and remnants 50 pc (20 in the test disc), dark matter 1,000 pc, super wells 50 pc.
+  A pair uses the larger of the two.
+- **Why the dark matter gets its own tree:** the Morton key carries a bit for dark matter, so the sorted dark
+  matter comes last and the tree's root splits into a tree of everything else and a tree of the dark matter. Every
+  node then holds one softening class, and every pair is softened the same both ways.
+  - With mixed nodes (each node softened by its largest), the forces were one-sided: a bulge alone gained 18% of
+    its energy in 200 Myr.
+  - The large dark matter softening keeps its heavy particles, which in 2D all cross the disc plane, from heating
+    the disc. At 300 pc the disc's radial dispersion rose 65 -> 107 pc/Myr in 500 Myr; at 1,000 pc it stayed at 72.
 
-`SimConfig::default()` (`src/sim/mod.rs`) is a disc around a central mass:
-- **Central mass:** a point mass of 1e10 Msun (softening 50 pc) in the middle of a 20 Mpc box.
-- **Disc:** 2e9 Msun (`disc_mass`) between 1 and 15 kpc, on near-circular orbits. The circular speed counts the disc
-  inside each radius, plus a 10% random speed spread.
-- **Particles:** softening 20 pc, theta 0.6. Each gets a mass from the Kroupa IMF (0.08 - 100 Msun), scaled so the
-  disc weighs `disc_mass` (each particle then stands for several stars). Its colour comes from its star's
-  main-sequence temperature and luminosity (`src/sim/init.rs`).
+**Stellar evolution** (`evolve.wgsl`, once per step of dt, from fitting formulas, not star interiors):
+- **Main sequence:** a lifetime of 10 Gyr x m^-2.5, at least 3 Myr. The last tenth of it is spent as a giant:
+  cooler and much brighter.
+- **Remnants:** below 8 Msun a white dwarf (0.109 m + 0.394 Msun, cooling and fading), 8 - 25 a neutron star (1.4),
+  above that a black hole (m / 4). Neutron stars and black holes aren't drawn.
+- **One particle, one star's colour:** each particle carries one star's mass from the Kroupa IMF.
+  - When a particle is one star (stars per particle about 1), its mass becomes the remnant's at death.
+  - When it stands for a population (the galaxy: ~10^5 - 10^6 stars each), it loses mass smoothly as its stars die,
+    0.046 ln(age / 0.276 Myr + 1) of its birth mass (Jungwiert et al. 2001).
+  - For now that mass just leaves; phase 3 returns it as gas.
 
-The cold disc soon breaks into flocculent spiral arms and clumps.
+**Super wells:** heavy particles with their own softening.
+- **Swallowing:** a single-star particle that comes within `accretion_pc` (2 pc) of a well, bound to it, is swallowed.
+  Mass and momentum are added with 64-bit integer atomics, so the result is the same in any order.
+- **Not for populations:** a population particle is never swallowed. One stands for a million stars spread over 50
+  pc, and taking them whole grew the central well 4e6 -> 5e8 Msun in 2 Gyr.
 
-How many particles by default depends on the GPU (`src/budget.rs`):
+## The scenes
+
+**Galaxy** (the default, `init::galaxy`, roughly the Milky Way, `GalaxyConfig`):
+- **Disc:** exponential, 4e10 Msun, scale length 2.6 kpc, cut at 5 scale lengths; Toomre Q 1.5 (`--toomre-q`, and
+  in the menu).
+- **Bulge:** projected Plummer, 1e10 Msun, scale 1 kpc.
+- **Halo:** dark matter, Σ ∝ 1 / sqrt(R² + 3 kpc²) out to 40 kpc, 3.5e11 Msun. In 2D with 1/r² gravity this gives a
+  flat rotation curve, as Mestel's disc does, the way an isothermal sphere does in 3D.
+- **Centre:** a super well of 4e6 Msun.
+- **Particles:** 40% dark matter, 10% bulge, the rest disc. Disc stars are spread evenly over ages 0 - 10 Gyr, the
+  bulge's are about 10 Gyr old, so many have already died at the start.
+
+**How the galaxy is put in balance:**
+1. The positions are placed first.
+2. One force pass on the GPU gives each particle's pull, averaged in rings into the circular speed curve.
+3. The velocities follow (`init::galaxy_velocities`):
+   - **Bulge and halo:** no rotation, isotropic dispersion from the Jeans equation, Σσ²(R) = ∫ Σ g dR'.
+   - **Disc:** σ_R from Q (σ_R = Q 3.36 G Σ / κ), σ_φ = σ_R κ / 2Ω, and rotation from the circular speed less the
+     asymmetric drift.
+
+**Measured 2026-11-08 (RTX 2070 Super, Q 1.5):**
+- **Rotation curve:** 221 - 237 pc/Myr from 4 to 24 kpc.
+- **Over 10 rotations (2 Gyr):** the disc's half-mass radius 4,200 -> 4,154 pc at 500k (+2% at 100k). Its radial
+  dispersion rises ~60% (spiral heating).
+- **Cold disc:** at Q 1.0 it grows a bar and two spiral arms within 300 Myr.
+
+**Test disc** (`--scene disc`, `SimConfig::test_disc()`, the phase-1 scene and the tests'):
+- stars round a fixed central point mass of 1e10 Msun, a 2e9 Msun disc from 1 to 15 kpc;
+- softening 20 pc, IMF masses scaled to the disc, no stellar evolution.
+
+**Default particle counts** depend on the GPU (`src/budget.rs`):
 - 500,000 on a discrete GPU;
 - 50,000 on an integrated one;
 - 250,000 on a known discrete GPU reached through a translation layer (WSL's OpenGL over D3D12).
@@ -140,9 +191,10 @@ The menu is behind the button in the bottom-right corner (or Tab), with an (i) b
   - pause;
   - speed: sim time per second, 0.5 - 200 Myr/s or "max" (the default: as much as the frame budget allows), with
     the speed reached shown below;
+  - the scene (galaxy or test disc) and the galaxy's Toomre Q, for the next reset;
   - particles and seed for the next reset, with a button back to this GPU's default;
   - Reset.
-* **Display:** frame-rate target 60 / 30 fps, brightness (light each star adds), exposure (the whole picture), square
+* **Display:** frame-rate target 60 / 30 fps, dark matter on / off (dim violet), brightness (light each star adds), exposure (the whole picture), square
   size (1 - 6 px), reset view, fullscreen.
 * **Advanced:**
   - the GPU and backend, and the sim's GPU budget a frame;
@@ -159,6 +211,7 @@ the GPU and its total ms a frame.
 | Space | pause / run |
 | [ / ] | slower / faster (sim time per second) |
 | R | reset the universe |
+| D | show / hide the dark matter |
 | F | frame-rate target 60 / 30 fps |
 | Home | reset the view |
 | F11 | fullscreen |
@@ -175,6 +228,8 @@ prints a JSON report (`src/headless.rs`), or writes it to `--report`. The report
 - `wall_ms_per_step`, `gpu_ms_per_step` and `gpu_ms_per_myr` (GPU timestamps, the median step; null without timestamp
   support), and `gpu_ms_by_stage`;
 - `bin_counts` (particles in each time-step bin) and `force_evals_per_myr`;
+- for the galaxy, `galaxy_start` / `galaxy_end`: each part's half-mass radius, the disc's radial dispersion at 1, 2
+  and 3 scale lengths, the rotation curve, particles by kind, and the central well's mass;
 - energy before and after, and its relative change;
 - `state_hash`: FNV-1a over every position and velocity word. The same seed on the same machine and backend gives the
   same hash.
@@ -204,16 +259,26 @@ runs them in software):
 - momentum without the central mass;
 - block steps follow a fine fixed step under the central mass (median 0.02 pc, worst 1.1 pc after 40 Myr);
 - three steps run whole and run as ~2,800 tiny frames give the same state hash;
+- the galaxy has a flat rotation curve (within 10% from 4 to 16 kpc) and keeps its parts' sizes over 100 Myr;
+- stars of known mass and age become the right remnants with the right masses;
+- a well swallows a bound star and keeps mass and momentum, but not a fast one;
 - the GPU matches a CPU f64 reference (`src/sim/reference.rs`) with the disc centred on the box's corner, so particles
   cross the wrap and every step carries between the words.
 
 **Diagnostics** (`cargo test --release --test gpu -- --ignored --nocapture <name>`):
 - `force_accuracy_table`: the force error for theta 0.4 - 1.0;
-- `clump_force_table`: the error in the evolved, clumpy disc for `open_small`.
+- `clump_force_table`: the error in the evolved, clumpy disc for `open_small`;
+- `galaxy_diagnostics`: the galaxy's rotation curve, energies and half-mass radii over time (settings from `SV_*`
+  environment variables).
 
-## Measured (2026-11-07, Windows exe, RTX 2070 Super on Vulkan)
+## Measured (Windows exe, RTX 2070 Super on Vulkan)
 
-Window with the frame budget, speed "max", 60 fps target:
+**Galaxy, window, 60 fps target (2026-11-08):**
+- **500,000 particles:** 60.0 fps, worst frame 17.2 ms, 3.8 Myr/s. One turn at 8 kpc (~200 Myr) takes ~50 s.
+- **1,000,000 particles:** 59.7 fps, worst frame 31.7 ms, 1.2 Myr/s. Some frames came late, so the budget shrank.
+- **Headless:** 170 GPU ms per Myr at 500k.
+
+**Test disc, window, speed "max" (2026-11-07):**
 
 | Particles | fps | Worst frame | Sim speed |
 |---|---|---|---|

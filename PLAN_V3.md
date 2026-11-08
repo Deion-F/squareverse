@@ -222,6 +222,79 @@ Advanced fold), the status figures in the corners, conserved-totals checks in te
 physics from step 6 (spin from angular momentum, Peters inspiral). The open v2 TO_DO items (merge-rate cap, fusion
 ladder tuning, heavy super well speed) are superseded by v3's design, not carried over.
 
+## Laptop backlog (user, 2026-11-08: collected here, run in one go later with the optimizer)
+
+The user no longer switches to the laptop after each change. Every check the laptop (Ryzen 5 PRO 5650U, integrated
+Radeon, WSL2) needs goes here as it comes up, with what to change based on the result. When all the work is done,
+the sim-optimizer runs through this list on the laptop. Each item:
+- **What:** the commands to run;
+- **Look for:** what to read from the output;
+- **Then:** the change to make, and in which file.
+
+Setup, once (in WSL from the repo root):
+
+```
+git pull
+cd squareverse_v3 && cargo build --release --target x86_64-pc-windows-gnu
+E=target/x86_64-pc-windows-gnu/release/squareverse.exe
+$E --list-adapters
+```
+
+### L1. Block steps and frame budget, test disc (phase 1b)
+
+- **What:**
+
+  ```
+  for p in 25000 50000 100000; do $E --scene disc --headless --steps 10 --particles $p | grep -E '"(name|backend|particles|gpu_ms_per_myr|force_evals_per_myr)"' | tr -d '\n '; echo; done
+  $E --scene disc --exit-after-frames 600
+  $E --scene disc --fps 30 --exit-after-frames 300
+  $E --scene disc --particles 100000 --exit-after-frames 600
+  ```
+
+- **Look for:**
+  - fps at the target, and the worst frame under ~20 ms (60 fps) or ~37 ms (30 fps);
+  - `myr_per_s` and `sim_budget_ms`;
+  - `gpu_ms_mean` by pass.
+- **Then:**
+  - If fps misses the target although `sim_budget_ms` is small: the overhead between passes (the Intel UHD 630
+    showed this on the desktop). Check that `budget_scale` (`src/app.rs`) settles, and reduce the passes per
+    sub-step.
+  - If the worst frame is long while the mean is fine: the force floor (`FORCE_FLOOR`, `src/sim/mod.rs`, 0.2 of a
+    full pass, measured on the RTX) may differ on the Radeon. Measure the per-pass times with
+    `SV_DEBUG_PASSES=1 WSLENV=SV_DEBUG_PASSES $E --scene disc --headless --steps 3 --particles 50000` and set it
+    from the deepest-bin-only sub-steps.
+
+### L2. The galaxy (phase 2)
+
+- **What:**
+
+  ```
+  for p in 25000 50000 100000; do $E --headless --steps 10 --particles $p | grep -E '"(name|backend|particles|gpu_ms_per_myr|force_evals_per_myr)"' | tr -d '\n '; echo; done
+  $E --exit-after-frames 600
+  $E --fps 30 --exit-after-frames 300
+  $E --particles 100000 --exit-after-frames 600
+  $E --particles 25000 --exit-after-frames 600
+  ```
+
+- **Look for:**
+  - fps and the worst frame (as L1);
+  - `myr_per_s` at each count. One rotation of the disc at 8 kpc takes ~200 Myr.
+- **Then:**
+  - Set the integrated default in `src/budget.rs` to the largest count giving at least ~2 Myr/s (a rotation in
+    under two minutes) at 60 fps, or at 30 if 60 can't give 1 Myr/s.
+  - Below 25k the galaxy gets noisy: then let the integrated GPU default to 30 fps instead
+    (`budget::default_fps`, to add).
+
+### L3. For the optimizer, from the desktop (no laptop needed, but the same pass)
+
+- **The galaxy's sim speed:** 170 GPU ms per Myr at 500k on the RTX, 3.8 Myr/s in the window.
+  - Most of it is force passes over the short lists of the deep bins (7 levels), each costing about one walk's
+    latency (`FORCE_FLOOR`).
+  - Candidates: split a particle's walk over several threads on short lists; drift tree nodes instead of
+    refitting each sub-step.
+- **Late frames at 1M in the galaxy window:** 59.7 fps, worst frame 31.7 ms. The late-frame feedback shrank the sim
+  budget to 6.4 ms, giving 1.2 Myr/s. Find what the timestamps miss there (many small passes per frame?).
+
 ## Progress
 
 Phase 0 (started 2026-11-06):
@@ -378,24 +451,7 @@ The Radeon now beats the UHD 630 stand-in at compute (20.3 vs 36 ms a step at 10
   | 500k | 59.9 | 18.7 ms | 15.3 Myr/s |
 
   On the Intel UHD 630, 50k gives 58.9 fps (its frames are copied to the RTX, which drives the monitors).
-- [ ] **Laptop check, phase 1b** (block steps and frame budget). In WSL from the repo root, after `git pull`:
-
-  ```
-  cd squareverse_v3 && cargo build --release --target x86_64-pc-windows-gnu
-  E=target/x86_64-pc-windows-gnu/release/squareverse.exe
-  for p in 25000 50000 100000; do $E --headless --steps 10 --particles $p | grep -E '"(name|backend|particles|gpu_ms_per_myr|force_evals_per_myr)"' | tr -d '\n '; echo; done
-  $E --exit-after-frames 600
-  $E --fps 30 --exit-after-frames 300
-  $E --particles 100000 --exit-after-frames 600
-  $E --particles 250000 --exit-after-frames 600
-  ```
-
-  - **The first three lines:** GPU ms per Myr of sim time at 25k / 50k / 100k.
-  - **The window runs:** each prints one JSON line with fps, worst frame, Myr/s, mean GPU ms by pass and the sim
-    budget.
-  - **What changed:** the frame rate should now hold at any count (the sim slows instead). The figure to choose the
-    integrated default by is Myr/s.
-  - **What to look for:** fps at the target and a worst frame under ~20 ms (60 fps) or ~37 ms (30 fps).
+- [ ] **Laptop check, phase 1b:** moved to the laptop backlog (L1) above.
 
 ### Laptop results, phase 1b (block steps, frame budget)
 
@@ -408,3 +464,46 @@ The Radeon now beats the UHD 630 stand-in at compute (20.3 vs 36 ms a step at 10
 | | `--fps 30 --exit-after-frames 300` | | (default) | ( 30) | | | |
 | | `--particles 100000 --exit-after-frames 600` | | 100,000 | ( 60) | | | |
 | | `--particles 250000 --exit-after-frames 600` | | 250,000 | ( 60) | | | |
+
+Phase 2 (started 2026-11-08):
+
+- [x] **Particle kinds** (star, dark matter, super well, white dwarf, neutron star, black hole, swallowed) in the top
+  4 bits of the id word.
+  - **Softening by kind:** a pair uses the larger of the two. Stars 50 pc in the galaxy, dark matter 1,000, wells 50.
+  - **A tree per softening class:** a dark matter bit above the 46-bit Morton key splits the tree at the root.
+    - Mixed nodes, softened by their largest, made one-sided forces: a bulge alone gained 18% of its energy in
+      200 Myr.
+    - Split, the halo alone conserves energy to 7e-5.
+- [x] **`about` records** per particle (birth time, the star's mass, mass at birth, part or well number), gathered
+  with the sort.
+- [x] **Stellar evolution** (`shaders/evolve.wgsl`, once per step of dt):
+  - main-sequence lifetimes, then the last 10% as a giant, then a remnant by mass;
+  - single stars take the remnant's mass at death; population particles lose mass smoothly (Jungwiert 2001);
+  - the mass lost just leaves for now (phase 3: gas).
+- [x] **Super well sink:** bound single stars within 2 pc are swallowed, with 64-bit integer atomics for mass and
+  momentum. Population particles aren't swallowed: taking whole ~10^6 Msun clusters grew the well 4e6 -> 5e8 in
+  2 Gyr.
+- [x] **Galaxy generator** (`init::galaxy`, `GalaxyConfig`, MW-like):
+  - **Parts:** exponential disc 4e10, Plummer bulge 1e10 (1 kpc), cored 1/R halo 3.5e11 to 40 kpc, well 4e6.
+  - **Velocities from the measured forces:** Jeans for the bulge and halo; Toomre Q plus asymmetric drift for the
+    disc.
+  - **Steps:** 7 levels (2 Myr to 1/32) and eta_jerk 0.1. The bulge centre needs the deep bins: with 5 levels it
+    blew up.
+- [x] **Window:** scene and Toomre Q in the menu (for the next reset); dark matter toggle (D); wells drawn as white
+  markers; nothing drawn for swallowed particles, neutron stars or black holes. **Headless:** galaxy figures
+  (`galaxy_start` / `galaxy_end`) and flags (`--scene`, `--toomre-q`, `--softening`, `--dm-softening`,
+  `--halo-share`, `--disc-mass`, `--bulge-mass`, `--halo-mass`, `--well-mass`).
+- [x] **Tests:** the galaxy (flat curve, parts keep their sizes over 100 Myr, energy), stellar remnants, swallowing
+  (mass and momentum); `galaxy_diagnostics` (ignored). 12 pass.
+- [x] **Acceptance** (2026-11-08, RTX 2070 Super):
+  - **Flat rotation curve:** 221 - 237 pc/Myr from 4 to 24 kpc.
+  - **10 rotations (2 Gyr):** the disc's half-mass radius 4,200 -> 4,154 pc at 500k (+2% at 100k). Its radial
+    dispersion rose ~60% (spiral heating); energy within 0.35% at 100k.
+  - **Spiral arms:** at Q 1.0 a bar and two arms grow within 300 Myr.
+- **Known, not fixed:**
+  - The halo settles ~8% inward in its first ~500 Myr. That is usual for starts built from Jeans moments with
+    Gaussian speeds.
+  - The bulge alone loses 1.5 - 5% of its energy in 200 Myr, depending on the step settings. In the full galaxy
+    it's 0.35% over 2 Gyr.
+- [ ] **Laptop:** L2 in the laptop backlog.
+

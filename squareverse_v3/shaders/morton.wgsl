@@ -1,12 +1,15 @@
-// The particles' bounding box (relative to the tree origin, hi words) and their 48-bit Morton keys over it:
-// 24 bits a side, so a galaxy 30 kpc across is cut into cells ~2 mpc wide. Keys are (lo 32 bits, hi 16 bits);
-// values are the particle's index before sorting.
+// The particles' bounding box (relative to the tree origin, hi words) and their Morton keys over it: 23 bits a
+// side (46 bits), so a galaxy 80 kpc across is cut into cells ~0.01 pc wide, and above them bit 47 set for dark
+// matter. Sorted, the dark matter comes after everything else, so the tree's root splits into a tree of the stars
+// (and wells) and a tree of the dark matter: every node holds one softening class, and every pair is softened the
+// same both ways. Keys are (lo 32 bits, hi 16 bits); values are the particle's index before sorting.
 
 @group(0) @binding(0) var<uniform> c: Common;
 @group(0) @binding(1) var<storage, read> pos: array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read_write> bbox: array<atomic<u32>, 4>;  // min x, min y, max x, max y
 @group(0) @binding(3) var<storage, read_write> keys: array<vec2<u32>>;
 @group(0) @binding(4) var<storage, read_write> vals: array<u32>;
+@group(0) @binding(5) var<storage, read> body: array<vec2<u32>>;
 
 var<workgroup> wmin: array<vec2<u32>, 256>;
 var<workgroup> wmax: array<vec2<u32>, 256>;
@@ -83,10 +86,11 @@ fn keys_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bits = 32u - countLeadingZeros(ext);  // ext < 2^bits
     let q = pos[i];
     let r = rel(q);
-    let qx = quantise(r.x, q.y, mn.x, bits);
-    let qy = quantise(r.y, q.w, mn.y, bits);
+    let qx = quantise(r.x, q.y, mn.x, bits) >> 1u;
+    let qy = quantise(r.y, q.w, mn.y, bits) >> 1u;
     let lo = spread(qx) | (spread(qy) << 1u);
-    let hi = spread(qx >> 16u) | (spread(qy >> 16u) << 1u);
+    let dm = select(0u, 1u, kind_of(body[i]) == K_DM);
+    let hi = spread(qx >> 16u) | (spread(qy >> 16u) << 1u) | (dm << 15u);
     keys[i] = vec2<u32>(lo, hi);
     vals[i] = i;
 }

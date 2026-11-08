@@ -14,7 +14,7 @@ pub const SIZE: (u32, u32) = (1280, 800);
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 pub fn default_look() -> Look {
-    Look { square_px: 1.0, brightness: 0.5, exposure: 1.0 }
+    Look { square_px: 1.0, brightness: 0.5, exposure: 1.0, show_dm: false }
 }
 
 pub fn save(gpu: &Gpu, sim: &Sim, path: &Path) -> Result<()> {
@@ -39,7 +39,7 @@ pub fn save(gpu: &Gpu, sim: &Sim, path: &Path) -> Result<()> {
         mapped_at_creation: false,
     });
     let mut renderer = Renderer::new(d, FORMAT);
-    let camera = Camera { center_pc: sim.cfg.center_pc, px_per_pc: w.min(h) as f64 / (2.3 * sim.cfg.r_out_pc) };
+    let camera = Camera { center_pc: sim.cfg.center_pc, px_per_pc: w.min(h) as f64 / (2.3 * sim.cfg.view_radius_pc()) };
     let mut timer = GpuTimer::new(d, &gpu.queue, false);
     let mut enc = d.create_command_encoder(&Default::default());
     renderer.draw(d, &gpu.queue, &mut enc, &view, SIZE, sim, &camera, &default_look(), 0.0, &mut timer);

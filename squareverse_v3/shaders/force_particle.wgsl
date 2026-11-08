@@ -1,9 +1,9 @@
 // Gravity, one particle a thread (`Walk::Particle`; the group walk is force.wgsl): walk the tree from the root; a
 // node far enough away (beyond its opening radius) acts as a softened point mass at its centre of mass plus its
-// quadrupole, a nearer one is opened; particles act one by one. Plus the central point mass. Only for particles whose time step ends this sub-step. Faster than the group
-// walk on integrated GPUs (measured 2026-11-06, Intel UHD 630, 250k: 76 against 171 ms), as fast on the RTX 2070
-// Super, a little less accurate at the same theta. Writes (ax, ay, phi_self, phi_central) per particle; phi_self counts each pair once per
-// side, so the self-gravity energy is half its mass-weighted sum.
+// quadrupole, a nearer one is opened; particles act one by one. Plus the central point mass. Only for the particles
+// whose time step ends this sub-step. A pair is softened by the larger of the two kinds' softenings (a node: its
+// largest). Faster than the group walk on the GPUs measured (2026-11-06). Writes (ax, ay, phi_self, phi_central)
+// per particle; phi_self counts each pair once per side, so the self-gravity energy is half its mass-weighted sum.
 
 @group(0) @binding(0) var<uniform> c: Common;
 @group(0) @binding(1) var<storage, read> pos: array<vec4<u32>>;
@@ -26,6 +26,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let i = todo_list[k];
     let q = pos[i];
+    let eps2_i = eps2_of(kind_of(body[i]));
     var a = vec2<f32>(0.0);
     var phi = 0.0;
     var stack: array<u32, STACK>;
@@ -39,16 +40,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let r = stack[sp];
         var m: f32;
         var d: vec2<f32>;
+        var eps2: f32;
         if ((r & LEAF) != 0u) {
             let j = r & ~LEAF;
             if (j == i) {
                 continue;
             }
-            m = bitcast<f32>(body[j].x);
+            let bj = body[j];
+            m = bitcast<f32>(bj.x);
+            eps2 = max(eps2_i, eps2_of(kind_of(bj)));
             d = fx_delta2(pos[j], q) * c.unit_pc;
         } else {
             let extra = node[4u * r + 2u];  // (mass, opening radius^2, sxx, sxy)
-            let tail = node[4u * r + 3u];   // (syy, first particle, count, -)
+            let tail = node[4u * r + 3u];   // (syy, first particle, count, largest softening^2)
             d = fx_delta2(node[4u * r], q) * c.unit_pc;
             let open2 = bitcast<f32>(extra.y);
             // radius 0: a node under the softening scale, far enough unless it holds this particle
@@ -61,12 +65,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 continue;
             }
             m = bitcast<f32>(extra.x);
+            eps2 = max(eps2_i, bitcast<f32>(tail.w));
             // the quadrupole (planar masses, 3D force law): with d from the particle to the centre of mass,
             // A = d.S.d, T = tr S: a += G/2 (-6 S d / R^5 + 15 A d / R^7 - 3 T d / R^5), phi -= G/2 (3A - T R^2) / R^5
             let sxx = bitcast<f32>(extra.z);
             let sxy = bitcast<f32>(extra.w);
             let syy = bitcast<f32>(tail.x);
-            let r2 = dot(d, d) + c.eps2;
+            let r2 = dot(d, d) + eps2;
             let ir = inverseSqrt(r2);
             let ir2 = ir * ir;
             let ir5 = ir2 * ir2 * ir;
@@ -76,7 +81,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             a += (0.5 * c.g * ir5) * (-6.0 * sd + (15.0 * aa * ir2 - 3.0 * tr) * d);
             phi -= 0.5 * c.g * ir5 * (3.0 * aa - tr * r2);
         }
-        let s2 = dot(d, d) + c.eps2;
+        let s2 = dot(d, d) + eps2;
         let inv = inverseSqrt(s2);
         let gm = c.g * m * inv;
         a += d * (gm * inv * inv);

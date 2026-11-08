@@ -104,6 +104,25 @@ pub struct SimConfig {
     pub rebuild_every: u32,
     /// Random speed spread, as a fraction of the circular speed.
     pub dispersion: f64,
+    /// What `Sim::new` builds.
+    pub scene: Scene,
+    /// The galaxy (`Scene::Galaxy`).
+    pub galaxy: init::GalaxyConfig,
+    /// Softening of dark matter particles and of super wells, pc (stars and remnants use `softening_pc`). Large
+    /// for dark matter, so its few heavy particles act as a smooth field and don't kick the stars about.
+    pub dm_softening_pc: f64,
+    pub well_softening_pc: f64,
+    /// A super well swallows particles bound to it within this, pc.
+    pub accretion_pc: f64,
+}
+
+/// The starting scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, clap::ValueEnum)]
+pub enum Scene {
+    /// A galaxy in equilibrium: disc, bulge, dark matter halo and a central super well (`init::galaxy`).
+    Galaxy,
+    /// The phase-1 test disc: stars round a fixed central point mass (`init::build`).
+    Disc,
 }
 
 impl Default for SimConfig {
@@ -114,30 +133,72 @@ impl Default for SimConfig {
             seed: 1,
             box_pc,
             center_pc: (box_pc / 2.0, box_pc / 2.0),
-            central_mass: 1e10,
+            central_mass: 0.0, // the galaxy has its own super well
             central_softening_pc: 50.0,
             disc_mass: 2e9,
             r_in_pc: 1_000.0,
             r_out_pc: 15_000.0,
-            // 2 Myr down to 0.125: the inner edge (1 kpc, a 30 Myr orbit) wants ~0.15, the outer disc ~2
+            // 2 Myr down to 1/32: the outer disc wants ~2, the bulge's centre (orbits of a few Myr) the shortest.
+            // With 5 levels (down to 0.125) the bulge swelled 590 -> 3,700 pc in 100 Myr and the energy rose 35%
+            // (2026-11-08, 50k); with 7 it holds (984 -> 1,026 pc, energy within 0.8%)
             dt_myr: 2.0,
-            levels: 5,
+            levels: 7,
             eta: 0.025,
-            eta_jerk: 0.05,
-            softening_pc: 20.0,
+            // ~60 steps an orbit; 0.05 cost 290 against 170 GPU ms per Myr at 500k (RTX 2070 Super, 2026-11-08)
+            // for the same energy behaviour in the smooth galaxy
+            eta_jerk: 0.1,
+            // about half the disc's particle spacing at 50k, and a stand-in for its thickness
+            softening_pc: 50.0,
             theta: 0.6,
             open_small: 0.0,
             rebuild_every: 8,
             walk: Walk::Particle,
             dispersion: 0.1,
+            scene: Scene::Galaxy,
+            galaxy: init::GalaxyConfig::default(),
+            // the halo is smooth on kpc scales; 300 pc let its heavy particles heat the disc (σ_R 65 -> 107 pc/Myr
+            // at one scale length in 500 Myr, 100k), 1,000 kept it at 72 -> 73 (2026-11-08)
+            dm_softening_pc: 1_000.0,
+            well_softening_pc: 50.0,
+            accretion_pc: 2.0,
         }
     }
 }
 
 impl SimConfig {
+    /// The phase-1 test disc: stars round a fixed central point mass of 1e10 Msun, softening 20 pc, steps 2 Myr
+    /// down to 0.125. The tests' scene.
+    pub fn test_disc() -> Self {
+        Self {
+            scene: Scene::Disc,
+            central_mass: 1e10,
+            levels: 5,
+            eta_jerk: 0.05,
+            softening_pc: 20.0,
+            well_softening_pc: 20.0,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults for a scene.
+    pub fn for_scene(scene: Scene) -> Self {
+        match scene {
+            Scene::Galaxy => Self::default(),
+            Scene::Disc => Self::test_disc(),
+        }
+    }
+
     /// The sub-step (the shortest time step), Myr.
     pub fn dt_min(&self) -> f64 {
         self.dt_myr / (1u64 << (self.levels.clamp(1, MAX_LEVELS) - 1)) as f64
+    }
+
+    /// How far out the scene reaches (the window's first view shows about this radius), pc.
+    pub fn view_radius_pc(&self) -> f64 {
+        match self.scene {
+            Scene::Galaxy => self.galaxy.disc_scale_pc * self.galaxy.disc_cut,
+            Scene::Disc => self.r_out_pc,
+        }
     }
 }
 
@@ -162,7 +223,10 @@ struct Common {
     eta_eps: f32,
     eta_jerk: f32,
     open_small: f32,
-    _p: [u32; 3],
+    n_wells: u32,
+    acc_r2: f32,
+    single_stars: u32,
+    eps2_kind: [[f32; 4]; 2],
 }
 
 #[repr(C)]
@@ -181,6 +245,11 @@ pub struct State {
     pub mass: Vec<f32>,
     /// (ax, ay, phi_self, phi_central) from each particle's last force pass.
     pub acc: Vec<[f32; 4]>,
+    /// Kind (`init::Kind` as u32), (temperature K, luminosity Lsun), and the `about` record (birth time Myr, star
+    /// mass, mass at birth, well number bits).
+    pub kind: Vec<u32>,
+    pub star: Vec<[f32; 2]>,
+    pub about: Vec<[f32; 4]>,
 }
 
 /// One piece of a sub-step (see the module comment). Frames can fall between any two.
@@ -191,6 +260,8 @@ pub enum Work {
     Sort(u32),
     Build,
     Refit,
+    /// Stellar evolution and super wells swallowing, at the start of each step of dt (`evolve.wgsl`).
+    Evolve,
     /// The list of particles whose step ends this sub-step.
     Compact,
     /// Force slices `from .. to` of the list (of up to `CHUNKS`).
@@ -199,7 +270,7 @@ pub enum Work {
 }
 
 /// The stages GPU time is split into (timer labels).
-pub const STAGES: [&str; 6] = ["integrate", "sort", "build", "refit", "compact", "force"];
+pub const STAGES: [&str; 7] = ["integrate", "sort", "build", "refit", "compact", "force", "evolve"];
 const FORCE: usize = 5;
 /// A force dispatch costs at least one tree walk's latency however few particles it has (the GPU isn't full):
 /// measured 2026-11-07 on the RTX 2070 Super, 2.2 of 10.7 ms at 500k, 4.5 of 21.5 at 1M.
@@ -213,6 +284,7 @@ impl Work {
             Work::Build => "build",
             Work::Refit => "refit",
             Work::Compact => "compact",
+            Work::Evolve => "evolve",
             Work::Force { .. } => "force",
         }
     }
@@ -235,6 +307,7 @@ struct SetBinds {
     /// this set -> the other one
     gather: wgpu::BindGroup,
     gather_step: wgpu::BindGroup,
+    evolve: wgpu::BindGroup,
     compact: wgpu::BindGroup,
     moments: wgpu::BindGroup,
     force: wgpu::BindGroup,
@@ -245,6 +318,7 @@ struct Kernels {
     morton: Kernel,
     gather: Kernel,
     gather_step: Kernel,
+    evolve: Kernel,
     compact: Kernel,
     karras: Kernel,
     moments: Kernel,
@@ -259,6 +333,8 @@ pub struct Sim {
     body: [wgpu::Buffer; 2],
     acc: [wgpu::Buffer; 2],
     _bins: [wgpu::Buffer; 2],
+    about: [wgpu::Buffer; 2],
+    n_wells: u32,
     /// particles in each bin (u32 x MAX_LEVELS)
     counts: wgpu::Buffer,
     /// which particle set is current
@@ -286,7 +362,7 @@ pub struct Sim {
     pub bin_counts: [u32; MAX_LEVELS as usize],
     counts_read: AsyncRead,
     /// estimated GPU ms per unit of work, by `STAGES` label (force: a full pass)
-    rates: [f64; 6],
+    rates: [f64; 7],
     _buffers: Vec<wgpu::Buffer>,
 }
 
@@ -300,8 +376,29 @@ fn module(body: &str) -> String {
 
 impl Sim {
     pub fn new(gpu: &Gpu, cfg: SimConfig) -> Result<Self> {
-        let init = init::build(&cfg);
-        Self::from_initial(gpu, cfg, &init)
+        match cfg.scene {
+            Scene::Disc => {
+                let init = init::build(&cfg);
+                Self::from_initial(gpu, cfg, &init)
+            }
+            Scene::Galaxy => {
+                // positions first; the velocities come from the forces they give (`init::galaxy_velocities`)
+                let (init, parts) = init::galaxy(&cfg);
+                let sim = Self::from_initial(gpu, cfg, &init)?;
+                let s = sim.read_state(gpu)?;
+                let kin = init::galaxy_velocities(&sim.cfg, &init, &parts, &s);
+                sim.write_kin(gpu, &kin)?;
+                Ok(sim)
+            }
+        }
+    }
+
+    /// Replaces every particle's (vx, vy, temperature, luminosity), given in id order.
+    pub fn write_kin(&self, gpu: &Gpu, kin_by_id: &[[f32; 4]]) -> Result<()> {
+        let body: Vec<[u32; 2]> = bytemuck::cast_slice(&gpu.read_buffer(&self.body[self.cur])?).to_vec();
+        let sorted: Vec<[f32; 4]> = body.iter().map(|b| kin_by_id[(b[1] & init::ID_MASK) as usize]).collect();
+        gpu.queue.write_buffer(&self.kin[self.cur], 0, bytemuck::cast_slice(&sorted));
+        gpu.wait()
     }
 
     /// From given particles (tests and other scenes); `cfg.particles` is taken from them.
@@ -332,9 +429,14 @@ impl Sim {
         };
         let pos = [make("pos 0", bytemuck::cast_slice(&init.pos), true), make("pos 1", bytemuck::cast_slice(&init.pos), true)];
         let kin = [make("kin 0", bytemuck::cast_slice(&init.kin), true), make("kin 1", bytemuck::cast_slice(&init.kin), true)];
-        let body = [make("body 0", bytemuck::cast_slice(&init.body), false), make("body 1", bytemuck::cast_slice(&init.body), false)];
+        let body = [make("body 0", bytemuck::cast_slice(&init.body), true), make("body 1", bytemuck::cast_slice(&init.body), true)];
         let acc = [storage(d, "acc 0", n as u64 * 16), storage(d, "acc 1", n as u64 * 16)];
         let bins = [storage(d, "bins 0", n as u64 * 16), storage(d, "bins 1", n as u64 * 16)];
+        let about = [make("about 0", bytemuck::cast_slice(&init.about), false), make("about 1", bytemuck::cast_slice(&init.about), false)];
+        // stellar evolution's clock, the wells' particle indices and what they swallowed (evolve.wgsl)
+        let clock = storage(d, "clock", 16);
+        let wells = storage(d, "wells", init.wells.max(1) as u64 * 4);
+        let sink = storage(d, "sink", init.wells.max(1) as u64 * 6 * 4);
         let counts = storage(d, "bin counts", MAX_LEVELS as u64 * 4);
         // the list of particles whose step ends this sub-step (compact.wgsl)
         let flags = storage(d, "active flags", n as u64 * 4);
@@ -371,7 +473,14 @@ impl Sim {
             eta_eps: (2.0 * cfg.eta * cfg.softening_pc) as f32,
             eta_jerk: cfg.eta_jerk as f32,
             open_small: (cfg.open_small * cfg.softening_pc) as f32,
-            _p: [0; 3],
+            n_wells: init.wells,
+            acc_r2: cfg.accretion_pc.powi(2) as f32,
+            single_stars: init.single_stars as u32,
+            eps2_kind: {
+                let (st, dm, w) = (cfg.softening_pc.powi(2) as f32, cfg.dm_softening_pc.powi(2) as f32, cfg.well_softening_pc.powi(2) as f32);
+                // K_STAR, K_DM, K_WELL, K_WD | K_NS, K_BH, K_GONE, -
+                [[st, dm, w, st], [st, st, st, st]]
+            },
         };
         let common = uniform(d, "common", &common_with_row(groups.x * 256));
         // the force pass's workgroups have their own size, so its rows have their own length
@@ -404,7 +513,7 @@ impl Sim {
                 d,
                 "morton",
                 &module(include_str!("../../shaders/morton.wgsl")),
-                &[U, R, W, W, W],
+                &[U, R, W, W, W, R],
                 &["bbox_reset", "bbox_reduce", "keys_main"],
             ),
             gather: Kernel::new(d, "gather", &module(include_str!("../../shaders/gather.wgsl")), &[U, R, R, R, R, W, W, W], &["main"]),
@@ -412,8 +521,15 @@ impl Sim {
                 d,
                 "gather step",
                 &module(include_str!("../../shaders/gather_step.wgsl")),
-                &[U, R, R, R, W, W],
+                &[U, R, R, R, W, W, R, W],
                 &["main"],
+            ),
+            evolve: Kernel::new(
+                d,
+                "evolve",
+                &module(include_str!("../../shaders/evolve.wgsl")),
+                &[U, R, W, W, R, W, W, W],
+                &["evolve", "tick_clock", "find_wells", "swallow", "swallow_apply"],
             ),
             compact: Kernel::new(d, "compact", &module(include_str!("../../shaders/compact.wgsl")), &[U, R, W, W, W, T], &["flag", "scatter"]),
             karras: Kernel::new(d, "karras", &module(include_str!("../../shaders/karras.wgsl")), &[U, R, W, W, W], &["main"]),
@@ -440,9 +556,14 @@ impl Sim {
             let o = 1 - s;
             SetBinds {
                 integrate: k.integrate.bind(d, "integrate", &[&common, &pos[s], &kin[s], &acc[s], &bins[s], &counts, &tick]),
-                morton: k.morton.bind(d, "morton", &[&common, &pos[s], &bbox, &sort.keys[0], &sort.vals[0]]),
+                morton: k.morton.bind(d, "morton", &[&common, &pos[s], &bbox, &sort.keys[0], &sort.vals[0], &body[s]]),
                 gather: k.gather.bind(d, "gather", &[&common, &sort.vals[0], &pos[s], &kin[s], &body[s], &pos[o], &kin[o], &body[o]]),
-                gather_step: k.gather_step.bind(d, "gather step", &[&common, &sort.vals[0], &acc[s], &bins[s], &acc[o], &bins[o]]),
+                gather_step: k.gather_step.bind(
+                    d,
+                    "gather step",
+                    &[&common, &sort.vals[0], &acc[s], &bins[s], &acc[o], &bins[o], &about[s], &about[o]],
+                ),
+                evolve: k.evolve.bind(d, "evolve", &[&common, &pos[s], &kin[s], &body[s], &about[s], &clock, &wells, &sink]),
                 compact: k.compact.bind(d, "compact", &[&common, &bins[s], &flags, &active, &active_n, &tick]),
                 moments: k.moments.bind(d, "moments", &[&common, &pos[s], &body[s], &child, &parents, &counter, &node]),
                 force: k.force.bind(d, "force", &[&force_common, &pos[s], &body[s], &child, &node, &acc[s], &active, &tick, &active_n]),
@@ -453,7 +574,7 @@ impl Sim {
 
         // first guesses of GPU ms per unit (a little pessimistic: a laptop's integrated GPU); measurements replace them
         let per = n as f64;
-        let rates = [3e-6 * per, 1.5e-5 * per, 2e-5 * per, 1.5e-5 * per, 1e-5 * per, 2e-4 * per];
+        let rates = [3e-6 * per, 1.5e-5 * per, 2e-5 * per, 1.5e-5 * per, 1e-5 * per, 2e-4 * per, 1e-5 * per];
         let mut sim = Self {
             cfg,
             n,
@@ -481,12 +602,16 @@ impl Sim {
             bin_counts: [0; MAX_LEVELS as usize],
             counts_read: AsyncRead::new(d, "bin counts read", MAX_LEVELS as u64 * 4),
             rates,
-            _buffers: vec![bbox, child, parents, counter, node, common, force_common, tick, flags, active, active_n],
+            about,
+            n_wells: init.wells,
+            _buffers: vec![bbox, child, parents, counter, node, common, force_common, tick, flags, active, active_n, clock, wells, sink],
         };
         // the first forces, for every particle (they all start in bin 0, and at the last sub-step every bin's step
         // ends), then everyone's first bin
         let mut enc = d.create_command_encoder(&Default::default());
         let mut timer = GpuTimer::new(d, &gpu.queue, false);
+        // the stars' state at the start (no clock tick: the first step's evolution runs again at the same time)
+        sim.encode_evolve(&mut enc, &mut timer, false);
         let last = sim.subs - 1;
         let first = [Work::Build, Work::Compact, Work::Force { from: 0, to: sim.chunks }];
         for w in [Work::Keys].into_iter().chain((0..PASSES).map(Work::Sort)).chain(first) {
@@ -504,8 +629,26 @@ impl Sim {
         ((s * CHUNKS + chunk) as u64 * DYN_STRIDE) as u32
     }
 
+    /// Stellar evolution, then super wells swallowing (and, with `tick`, the clock moves on a step).
+    fn encode_evolve(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer, tick: bool) {
+        let mut pass = begin(encoder, timer, "evolve", 1.0);
+        let (b, g) = (&self.sets[self.cur].evolve, self.groups);
+        self.k.evolve.run(&mut pass, "evolve", b, g);
+        if self.n_wells > 0 {
+            self.k.evolve.run(&mut pass, "find_wells", b, g);
+            self.k.evolve.run(&mut pass, "swallow", b, g);
+            self.k.evolve.run(&mut pass, "swallow_apply", b, Groups::for_items(self.n_wells, 64));
+        }
+        if tick {
+            self.k.evolve.run(&mut pass, "tick_clock", b, Groups { x: 1, y: 1 });
+        }
+    }
+
     /// The work of the next sub-step.
     fn plan(&mut self) {
+        if self.sub == 0 {
+            self.queue.push_back(Work::Evolve);
+        }
         self.queue.push_back(Work::Open);
         if (self.sub_done + 1).is_multiple_of(self.cfg.rebuild_every.max(1) as u64) {
             self.queue.push_back(Work::Keys);
@@ -590,6 +733,10 @@ impl Sim {
             Work::Force { from, to } => {
                 let groups = Groups::count((to - from) * self.chunk_groups);
                 self.k.force.run_at(&mut pass, "main", &self.sets[c].force, &[self.tick_offset(s, from)], groups);
+            }
+            Work::Evolve => {
+                drop(pass);
+                self.encode_evolve(encoder, timer, true);
             }
         }
     }
@@ -724,6 +871,15 @@ impl Sim {
         if total > 0.0 { evals / total / self.cfg.dt_myr } else { 0.0 }
     }
 
+    fn about_buffer(&self) -> &wgpu::Buffer {
+        &self.about[self.cur]
+    }
+
+    /// The current (mass bits, kind << 28 | id) (vertex buffer: vec2<u32> each).
+    pub fn body_buffer(&self) -> &wgpu::Buffer {
+        &self.body[self.cur]
+    }
+
     /// The current positions (vertex buffer: vec4<u32> each).
     pub fn pos_buffer(&self) -> &wgpu::Buffer {
         &self.pos[self.cur]
@@ -745,6 +901,7 @@ impl Sim {
         let pos: Vec<[u32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.pos[self.cur])?).to_vec();
         let kin: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.kin[self.cur])?).to_vec();
         let body: Vec<[u32; 2]> = bytemuck::cast_slice(&gpu.read_buffer(&self.body[self.cur])?).to_vec();
+        let about: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(self.about_buffer())?).to_vec();
         let acc: Vec<[f32; 4]> = bytemuck::cast_slice(&gpu.read_buffer(&self.acc[self.cur])?).to_vec();
         let n = self.n as usize;
         let mut s = State {
@@ -752,13 +909,19 @@ impl Sim {
             vel: vec![[0.0; 2]; n],
             mass: vec![0.0; n],
             acc: vec![[0.0; 4]; n],
+            kind: vec![0; n],
+            star: vec![[0.0; 2]; n],
+            about: vec![[0.0; 4]; n],
         };
         for i in 0..n {
-            let id = body[i][1] as usize;
+            let id = (body[i][1] & init::ID_MASK) as usize;
             s.pos[id] = Fixed2::from_words(pos[i]);
             s.vel[id] = [kin[i][0], kin[i][1]];
             s.mass[id] = f32::from_bits(body[i][0]);
             s.acc[id] = acc[i];
+            s.kind[id] = body[i][1] >> init::KIND_SHIFT;
+            s.star[id] = [kin[i][2], kin[i][3]];
+            s.about[id] = about[i];
         }
         Ok(s)
     }

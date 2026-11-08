@@ -18,6 +18,10 @@ pub struct UiState {
     /// Particles and seed for the next reset.
     pub particles: u32,
     pub seed: u64,
+    /// The scene and the galaxy's Toomre Q for the next reset.
+    pub scene: crate::sim::Scene,
+    pub toomre_q: f64,
+    pub show_dm: bool,
     pub reset_requested: bool,
     pub view_reset_requested: bool,
     pub fullscreen_requested: bool,
@@ -36,6 +40,9 @@ impl UiState {
             help_open: false,
             particles,
             seed,
+            scene: crate::sim::Scene::Galaxy,
+            toomre_q: 1.5,
+            show_dm: false,
             reset_requested: false,
             view_reset_requested: false,
             fullscreen_requested: false,
@@ -81,6 +88,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Space", "pause / run"),
     ("[ / ]", "slower / faster (sim time per second)"),
     ("R", "reset the universe"),
+    ("D", "show / hide the dark matter"),
     ("F", "frame-rate target 60 / 30 fps"),
     ("Home", "reset the view"),
     ("F11", "fullscreen"),
@@ -198,6 +206,27 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
                 ));
             });
             ui.horizontal(|ui| {
+                ui.label("Scene");
+                ui.selectable_value(&mut st.scene, crate::sim::Scene::Galaxy, "Galaxy");
+                ui.selectable_value(&mut st.scene, crate::sim::Scene::Disc, "Test disc");
+                info(
+                    ui,
+                    "What the next reset makes. Galaxy: a disc of stars, a bulge, a dark matter halo and a super well \
+                     at the centre, in balance. Test disc: stars round a fixed central mass (the phase-1 test scene).",
+                );
+            });
+            if st.scene == crate::sim::Scene::Galaxy {
+                ui.horizontal(|ui| {
+                    ui.label("Toomre Q");
+                    ui.add(egui::Slider::new(&mut st.toomre_q, 0.6..=3.0).step_by(0.1));
+                    info(
+                        ui,
+                        "How much random motion the disc's stars have, against their own gravity (for the next reset). \
+                         Under ~1 the disc breaks into clumps; ~1 - 1.5 it grows spiral arms; 2 and up it stays smooth.",
+                    );
+                });
+            }
+            ui.horizontal(|ui| {
                 ui.label("Seed");
                 ui.add(egui::DragValue::new(&mut st.seed));
                 info(ui, "The same seed always makes the same universe.");
@@ -223,6 +252,10 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
                 ui.label("Exposure");
                 ui.add(egui::Slider::new(&mut st.exposure, 0.05..=20.0).logarithmic(true));
                 info(ui, "Brightens or darkens the whole picture after the light is added up.");
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut st.show_dm, "Dark matter (D)");
+                info(ui, "Draws the dark matter particles, dim violet. They are normally unseen, as in the real sky.");
             });
             ui.horizontal(|ui| {
                 ui.label("Square size");
