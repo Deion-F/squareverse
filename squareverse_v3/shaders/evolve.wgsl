@@ -20,13 +20,19 @@
 @group(0) @binding(3) var<storage, read_write> body: array<vec2<u32>>;
 @group(0) @binding(4) var<storage, read_write> about: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> ctl: array<u32>;            // [3]: steps of dt begun (the clock)
-// each well's particle index at [w], then from MAX_WELLS what it swallowed: mass, px, py (lo, hi each) per well
+// [0] how many wells, [1 + w] well w's particle index (wells.wgsl lists them each step), then from WELL_SINK what
+// each swallowed: mass, px, py (lo, hi each)
 @group(0) @binding(6) var<storage, read_write> wsink: array<atomic<u32>>;
-@group(0) @binding(7) var<storage, read> gas: array<vec4<f32>>;            // (u, Σ, H, -) at 2i
+@group(0) @binding(7) var<storage, read> gas: array<vec4<f32>>;            // (u, Σ, H, metallicity) at 2i
 // what each star gives back this step: (mass, energy, new He, new C/N/O), (new Mg/Si, new Fe, -, -)
 @group(0) @binding(8) var<storage, read_write> emit: array<vec4<f32>>;
 
 const MAX_WELLS: u32 = 64u;
+const WELL_SINK: u32 = 65u;
+
+fn well_count() -> u32 {
+    return min(atomicLoad(&wsink[0]), MAX_WELLS);
+}
 const SINK_WORDS: u32 = 6u;
 const PART_NEW: u32 = 5u;   // about.w of stars born in the run
 const SINK_SCALE: f32 = 1024.0;   // fixed-point units per Msun (and per Msun pc / Myr)
@@ -128,6 +134,15 @@ fn form_star(i: u32, b: vec2<u32>) {
     if (random01(id, 0u) >= 1.0 - exp(-c.gas_b.z * c.dt / tff)) {
         return;
     }
+    // direct collapse: dense, metal-poor and massive enough, it becomes a seed super well instead (wells_b.z on,
+    // metallicity under wells_b.w solar, density over wells_c.x, mass over wells_c.y)
+    if (c.wells_b.z > 0.5 && g.w < c.wells_b.w && rho > c.wells_c.x && bitcast<f32>(b.x) >= c.wells_c.y) {
+        body[i] = vec2<u32>(b.x, (K_WELL << KIND_SHIFT) | id);
+        about[i] = vec4<f32>(f32(ctl[3]) * c.dt, 0.0, bitcast<f32>(b.x), 0.0);
+        let v = kin[i];
+        kin[i] = vec4<f32>(v.xy, 5000.0, 0.0);
+        return;
+    }
     let m = kroupa(random01(id, 1u), random01(id, 2u));
     body[i] = vec2<u32>(b.x, (K_STAR << KIND_SHIFT) | id);
     about[i] = vec4<f32>(f32(ctl[3]) * c.dt, m, bitcast<f32>(b.x), bitcast<f32>(PART_NEW));
@@ -224,39 +239,26 @@ fn tick_clock() {
     ctl[3] += 1u;
 }
 
-// each well's index in the (sorted) particle arrays
-@compute @workgroup_size(256)
-fn find_wells(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = flat_index(gid, c.row);
-    if (i >= c.n || kind_of(body[i]) != K_WELL) {
-        return;
-    }
-    let w = bitcast<u32>(about[i].w);
-    if (w < c.n_wells) {
-        atomicStore(&wsink[w], i);
-    }
-}
-
 // adds x (scaled to fixed point; may be negative) to the 64-bit sum in words (at, at + 1)
 fn add64(at: u32, x: f32) {
     let v = x * SINK_SCALE;
     let hi = floor(v / TWO32);
     let lo = u32(v - hi * TWO32);
-    let old = atomicAdd(&wsink[MAX_WELLS + at], lo);
+    let old = atomicAdd(&wsink[WELL_SINK + at], lo);
     let carry = select(0u, 1u, old + lo < old);
-    atomicAdd(&wsink[MAX_WELLS + at + 1u], bitcast<u32>(i32(hi)) + carry);
+    atomicAdd(&wsink[WELL_SINK + at + 1u], bitcast<u32>(i32(hi)) + carry);
 }
 
 fn read64(at: u32) -> f32 {
-    let lo = atomicLoad(&wsink[MAX_WELLS + at]);
-    let hi = bitcast<i32>(atomicLoad(&wsink[MAX_WELLS + at + 1u]));
+    let lo = atomicLoad(&wsink[WELL_SINK + at]);
+    let hi = bitcast<i32>(atomicLoad(&wsink[WELL_SINK + at + 1u]));
     return (f32(hi) * TWO32 + f32(lo)) / SINK_SCALE;
 }
 
 @compute @workgroup_size(256)
 fn swallow(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = flat_index(gid, c.row);
-    if (i >= c.n || c.n_wells == 0u) {
+    if (i >= c.n || well_count() == 0u) {
         return;
     }
     let b = body[i];
@@ -272,8 +274,8 @@ fn swallow(@builtin(global_invocation_id) gid: vec3<u32>) {
     // the nearest well that has it
     var best = NONE;
     var best_r2 = c.acc_r2;
-    for (var w = 0u; w < c.n_wells; w++) {
-        let j = atomicLoad(&wsink[w]);
+    for (var w = 0u; w < well_count(); w++) {
+        let j = atomicLoad(&wsink[1u + w]);
         let d = fx_delta2(pos[j], q) * c.unit_pc;
         let r2 = dot(d, d);
         let dv = v - kin[j].xy;
@@ -298,13 +300,13 @@ fn swallow(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn swallow_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = gid.x;
-    if (w >= c.n_wells) {
+    if (w >= well_count()) {
         return;
     }
     let at = w * SINK_WORDS;
     let dm = read64(at);
     if (dm > 0.0) {
-        let j = atomicLoad(&wsink[w]);
+        let j = atomicLoad(&wsink[1u + w]);
         let b = body[j];
         let m = bitcast<f32>(b.x);
         let k = kin[j];
@@ -313,6 +315,6 @@ fn swallow_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
         kin[j] = vec4<f32>(v, k.zw);
     }
     for (var x = 0u; x < SINK_WORDS; x++) {
-        atomicStore(&wsink[MAX_WELLS + at + x], 0u);
+        atomicStore(&wsink[WELL_SINK + at + x], 0u);
     }
 }

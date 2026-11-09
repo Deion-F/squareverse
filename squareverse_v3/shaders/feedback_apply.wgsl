@@ -32,17 +32,22 @@ fn apply(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dm = take64(at) / MASS_SCALE;
     let de = take64(at + 2u);
     let dz = vec4<f32>(take64(at + 4u), take64(at + 6u), take64(at + 8u), take64(at + 10u)) / MASS_SCALE;
-    if ((dm <= 0.0 && de <= 0.0) || kind_of(body[i]) != K_GAS) {
+    if ((dm == 0.0 && de <= 0.0) || kind_of(body[i]) != K_GAS) {
         return;
     }
     let b = body[i];
     let m = bitcast<f32>(b.x);
     let m1 = m + dm;
     body[i] = vec2<u32>(bitcast<u32>(m1), b.y);
-    chem[i] = (chem[i] * m + dz) / m1;
+    // (accretion onto a well takes mass away, dm < 0: the elements' fractions stay)
+    var ch = chem[i];
+    if (dm > 0.0) {
+        ch = (ch * m + dz) / m1;
+        chem[i] = ch;
+    }
     let g = gas[2u * i];
     let u = min((g.x * m + de) / m1, max(u_ceiling(g.z), g.x));
-    gas[2u * i] = vec4<f32>(u, g.yzw);
+    gas[2u * i] = vec4<f32>(u, g.yz, (ch.y + ch.z + ch.w) / 0.0133);
     let k = kin[i];
     kin[i] = vec4<f32>(k.xy, gas_temperature(u), k.w);
     // a step its sound speed allows (signal speed ~ 2 c_s)

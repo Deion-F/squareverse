@@ -500,6 +500,10 @@ fn a_well_swallows_what_comes_close_and_keeps_the_momentum() {
 
 /// A Gaussian blob (sigma 300 pc) of gas at `t_k`, 1e6 Msun in all, no central mass.
 fn gas_blob(cfg: &SimConfig, n: usize, t_k: f64) -> squareverse::sim::init::Initial {
+    gas_blob_of(cfg, n, t_k, 1e6)
+}
+
+fn gas_blob_of(cfg: &SimConfig, n: usize, t_k: f64, total: f64) -> squareverse::sim::init::Initial {
     use squareverse::sim::init::{Initial, SOLAR};
     let mut rng = squareverse::rng::Rng::new(11);
     let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
@@ -507,7 +511,7 @@ fn gas_blob(cfg: &SimConfig, n: usize, t_k: f64) -> squareverse::sim::init::Init
     init.single_stars = false;
     for _ in 0..n {
         let (x, y) = (rng.normal() * 300.0, rng.normal() * 300.0);
-        init.push_gas(c.offset_pc(x, y, cfg.box_pc), [0.0, 0.0], 1e6 / n as f64, t_k, 60.0, SOLAR);
+        init.push_gas(c.offset_pc(x, y, cfg.box_pc), [0.0, 0.0], total / n as f64, t_k, 60.0, SOLAR);
     }
     init
 }
@@ -595,4 +599,113 @@ fn gas_forms_stars_that_grow_richer_in_metals() {
     // no blow-out, no collapse
     assert!((b.gas_half_mass_pc / a.gas_half_mass_pc - 1.0).abs() < 0.3, "{} {}", a.gas_half_mass_pc, b.gas_half_mass_pc);
     assert!(b.gas_temperature_k[2] < 1e7);
+}
+
+/// One step of dt (the wells' passes run at its start, so two steps: the second one's start).
+fn wells_cfg() -> SimConfig {
+    let mut cfg = SimConfig { central_mass: 0.0, levels: 8, ..SimConfig::test_disc() };
+    cfg.gas.cooling = false;
+    cfg.gas.star_formation = false;
+    cfg.gas.feedback = false;
+    cfg
+}
+
+#[test]
+fn a_well_feeds_on_gas_at_most_at_eddington_and_heats_it() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = wells_cfg();
+    // 1e8 Msun of gas (2.5e4 a particle), a 1e5 Msun well: Eddington (4.4% of its mass a step) is below a quarter of a
+    // gas particle, so the cap can show
+    let mut init = gas_blob_of(&cfg, 4_000, 1e4, 1e8);
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    init.push_well(c, [0.0, 0.0], 1e5);
+    let mut sim = Sim::from_initial(&g, cfg.clone(), &init).unwrap();
+    run(&g, &mut sim, 3);
+    let s = sim.read_state(&g).unwrap();
+    let m = s.mass[4_000] as f64;
+    let hottest = s.star[..4_000].iter().map(|x| x[0]).fold(0.0f32, f32::max);
+    // accretion at the starts of the 2nd and 3rd steps (none at 0): at most (1 + 2/45)^2
+    eprintln!("well 1e5 -> {m:.4e} Msun in 6 Myr (Eddington allows {:.4e}), hottest gas {hottest:.3e} K", 1e5 * (1.0 + 2.0 / 45.0f64).powi(2));
+    assert!(m > 1e5 * 1.01 && m <= 1e5 * (1.0 + 2.0 / 45.0f64).powi(2) * 1.001, "{m}");
+    assert!(hottest > 1e5, "{hottest}");
+}
+
+#[test]
+fn bound_wells_merge_keeping_mass_and_momentum() {
+    use squareverse::sim::init::{Initial, Kind};
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    // one fixed step for all (block steps sample the pair's strong pull at different rates, so momentum drifts)
+    let cfg = SimConfig { levels: 1, dt_myr: 0.05, ..wells_cfg() };
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut init = Initial::with_capacity(3);
+    init.push_well(c.offset_pc(-25.0, 0.0, cfg.box_pc), [0.0, -5.0], 2e6);
+    init.push_well(c.offset_pc(25.0, 0.0, cfg.box_pc), [3.0, 10.0], 1e6);
+    init.push_well(c.offset_pc(5_000.0, 0.0, cfg.box_pc), [0.0, 0.0], 1e6);   // far away: stays
+    let mut sim = Sim::from_initial(&g, cfg, &init).unwrap();
+    let p0 = Sim::momentum(&sim.read_state(&g).unwrap());
+    run(&g, &mut sim, 2);
+    let s = sim.read_state(&g).unwrap();
+    let p1 = Sim::momentum(&s);
+    eprintln!("kinds {:?}, masses {:?}, momentum {p0:?} -> {p1:?}", s.kind, s.mass);
+    assert_eq!(s.kind, vec![Kind::Well as u32, Kind::Gone as u32, Kind::Well as u32]);
+    assert!((s.mass[0] - 3e6).abs() < 1.0);
+    assert!((p1[0] - p0[0]).hypot(p1[1] - p0[1]) < 1e-3 * 2e7, "{p0:?} {p1:?}");
+}
+
+#[test]
+fn dynamical_friction_slows_a_light_well() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let speed = |friction: bool| {
+        let mut cfg = wells_cfg();
+        cfg.wells.friction = friction;
+        // a wide field at rest, nearly static over the test (free fall ~50 Myr): 20k particles of 5e5 Msun evenly
+        // over 5 kpc; a 5e6 Msun well (10 field particles, too light for the tree to drag it properly) at 30 pc/Myr
+        let mut rng = squareverse::rng::Rng::new(5);
+        let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+        let mut init = squareverse::sim::init::Initial::with_capacity(20_001);
+        init.single_stars = false;
+        for _ in 0..20_000 {
+            let (r, a) = (5_000.0 * rng.f64().sqrt(), rng.f64() * std::f64::consts::TAU);
+            init.push(c.offset_pc(r * a.cos(), r * a.sin(), cfg.box_pc), [0.0, 0.0], 5e5, (5772.0, 1.0));
+        }
+        init.push_well(c, [30.0, 0.0], 5e6);
+        let mut sim = Sim::from_initial(&g, cfg, &init).unwrap();
+        run(&g, &mut sim, 4);
+        let v = sim.read_state(&g).unwrap().vel[20_000];
+        (v[0] as f64).hypot(v[1] as f64)
+    };
+    let (with, without) = (speed(true), speed(false));
+    // Chandrasekhar: 4 pi G² M rho ln Λ / v² x 0.6 (its weight) ~1.6 pc/Myr², at 3 step starts
+    eprintln!("well moving at 30 pc/Myr through a field at rest, after 8 Myr: {with:.1} with friction, {without:.1} without");
+    assert!(with < without - 3.0, "{with} {without}");
+}
+
+#[test]
+fn dense_primordial_gas_collapses_into_wells() {
+    use squareverse::sim::init::{Initial, Kind, PRIMORDIAL};
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = wells_cfg();
+    cfg.gas.star_formation = true;
+    cfg.gas.cooling = true;
+    let mut rng = squareverse::rng::Rng::new(13);
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut init = Initial::with_capacity(2_000);
+    init.single_stars = false;
+    // 4e7 Msun of metal-free gas in a Gaussian of sigma 150 pc: ~40 hydrogen atoms / cm^3 at the centre
+    for _ in 0..2_000 {
+        init.push_gas(c.offset_pc(rng.normal() * 150.0, rng.normal() * 150.0, cfg.box_pc), [0.0, 0.0], 2e4, 1e4, 30.0, PRIMORDIAL);
+    }
+    let mut sim = Sim::from_initial(&g, cfg, &init).unwrap();
+    run(&g, &mut sim, 4);
+    let s = sim.read_state(&g).unwrap();
+    let count = |k: Kind| s.kind.iter().filter(|&&x| x == k as u32).count();
+    let born_stars = (0..s.kind.len()).filter(|&i| s.kind[i] == Kind::Star as u32).count();
+    eprintln!("after 8 Myr: {} wells, {} merged away, {born_stars} stars", count(Kind::Well), count(Kind::Gone));
+    // a few gas particles the new wells have eaten below the collapse mass may still form stars
+    assert!(count(Kind::Well) + count(Kind::Gone) >= 3);
+    assert!(born_stars <= 2, "metal-free gas this dense and massive should collapse to wells, not stars: {born_stars}");
 }

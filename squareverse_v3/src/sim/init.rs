@@ -103,7 +103,8 @@ impl Initial {
     pub fn push_gas(&mut self, p: Fixed2, v: [f64; 2], mass: f64, t_k: f64, h: f64, chem: [f32; 4]) {
         let u = if t_k >= 1e4 { t_k / 46.3 } else { t_k / 98.0 };
         self.push_kind(p, v, mass, (t_k, 0.0), Kind::Gas, [0.0, 0.0, mass as f32, f32::from_bits(PART_GAS as u32)]);
-        *self.gas.last_mut().expect("just pushed") = [u as f32, 0.0, h as f32, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let z = (chem[1] + chem[2] + chem[3]) as f64 / SOLAR_Z;
+        *self.gas.last_mut().expect("just pushed") = [u as f32, 0.0, h as f32, z as f32, 0.0, 0.0, 0.0, 0.0];
         self.set_chem(chem);
     }
 

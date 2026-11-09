@@ -557,3 +557,27 @@ Phase 3 (started 2026-11-08):
   `sf_efficiency` (0.01) and the gas fraction tune it. Material shed by stars arrives without the star's momentum.
 - [ ] **Laptop:** L4 in the laptop backlog.
 
+Phase 4 (started 2026-11-08, paused mid-phase at the user's request):
+
+- [x] **Well list rebuilt each step** (`wells_list.wgsl`, a prefix sum in sorted order, so it's deterministic): wells
+  can be born and merge. At most 64.
+- [x] **Bondi accretion** (`wells_env.wgsl`), Eddington-capped (Salpeter 45 Myr) and at most a quarter of the
+  nearest gas particle a step. The mass and momentum come out of the gas through the deposit buffer (negative mass).
+  - **AGN feedback:** 0.015 of mdot c² heats that gas.
+  - **Galaxy:** the central well grew 4e6 -> 3e7 Msun in 300 Myr (100k).
+- [x] **Dynamical friction** (Chandrasekhar, Maxwellian) for wells too light for the tree, weighted
+  1 - M / 50 m. Test: 30 -> 11.8 pc/Myr in 8 Myr against 20.5 without.
+- [x] **Well mergers** (`wells_merge.wgsl`): bound pairs within 100 pc. Mass, momentum and the mass-weighted
+  acceleration are kept (else the next half kick carried the partner's pull). The last hardening and the GW
+  inspiral are taken as instant.
+- [x] **Direct collapse:** metal-poor (under 1e-3 solar), dense (over 10 cm^-3), massive (over 1e4 Msun) gas becomes
+  a seed well at star formation. The gas metallicity is now kept in the gas record's 4th word.
+- [x] **Tests:** 19 pass (4 new: Eddington-capped feeding with AGN heat, mergers keeping mass and momentum, dynamical
+  friction, direct collapse).
+- [ ] **Next when resumed:**
+  - Stellar black holes -> intermediate wells (single-star resolution: BH remnants merging in dense clusters).
+  - Tight-binary sub-grid (binary fraction and orbits at birth, encounters harden / soften / disrupt), with Type Ia
+    from binaries alongside the delay-time model.
+  - A galaxy diagnostic for a light well sinking to the centre.
+  - README phase-4 section, a laptop backlog item (L5), commit.
+

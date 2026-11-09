@@ -116,6 +116,46 @@ pub struct SimConfig {
     pub accretion_pc: f64,
     /// Gas physics (phase 3).
     pub gas: GasConfig,
+    /// Super wells (phase 4).
+    pub wells: WellConfig,
+}
+
+/// Super wells: accretion, feedback, dynamical friction, mergers, and new ones from direct collapse (wells_env.wgsl).
+#[derive(Clone, Debug, Serialize)]
+pub struct WellConfig {
+    /// Bondi accretion from the nearest gas, capped at Eddington (M / `salpeter_myr` a Myr).
+    pub bondi: bool,
+    pub salpeter_myr: f64,
+    /// The share of accreted mc² that heats the gas (radiative 0.1 x coupling 0.15).
+    pub agn_efficiency: f64,
+    /// Chandrasekhar dynamical friction from the field within `surroundings_pc`, for wells too light to feel it.
+    pub friction: bool,
+    pub surroundings_pc: f64,
+    /// Two wells closer than this and bound merge, pc.
+    pub merge_pc: f64,
+    /// Dense, metal-poor, massive gas becomes a seed well: metallicity under this (solar = 1), hydrogen density
+    /// over this (cm^-3), the gas particle's mass over this (Msun).
+    pub direct_collapse: bool,
+    pub collapse_max_metallicity: f64,
+    pub collapse_density_cm3: f64,
+    pub collapse_min_mass: f64,
+}
+
+impl Default for WellConfig {
+    fn default() -> Self {
+        Self {
+            bondi: true,
+            salpeter_myr: 45.0,
+            agn_efficiency: 0.015,
+            friction: true,
+            surroundings_pc: 500.0,
+            merge_pc: 100.0,
+            direct_collapse: true,
+            collapse_max_metallicity: 1e-3,
+            collapse_density_cm3: 10.0,
+            collapse_min_mass: 1e4,
+        }
+    }
 }
 
 /// Gas: SPH, cooling, star formation and feedback (shaders/hydro.wgsl, integrate.wgsl, evolve.wgsl, feedback*.wgsl).
@@ -210,6 +250,7 @@ impl Default for SimConfig {
             well_softening_pc: 50.0,
             accretion_pc: 2.0,
             gas: GasConfig::default(),
+            wells: WellConfig::default(),
         }
     }
 }
@@ -272,7 +313,7 @@ struct Common {
     eta_eps: f32,
     eta_jerk: f32,
     open_small: f32,
-    n_wells: u32,
+    _spare: u32,
     acc_r2: f32,
     single_stars: u32,
     eps2_kind: [[f32; 4]; 2],
@@ -280,6 +321,9 @@ struct Common {
     gas_b: [f32; 4],
     gas_c: [f32; 4],
     gas_d: [f32; 4],
+    wells_a: [f32; 4],
+    wells_b: [f32; 4],
+    wells_c: [f32; 4],
 }
 
 #[repr(C)]
@@ -367,6 +411,9 @@ struct SetBinds {
     gather: wgpu::BindGroup,
     gather_step: wgpu::BindGroup,
     gather_gas: wgpu::BindGroup,
+    wells_list: wgpu::BindGroup,
+    wells_env: wgpu::BindGroup,
+    wells_merge: wgpu::BindGroup,
     hydro: wgpu::BindGroup,
     spread: wgpu::BindGroup,
     apply: wgpu::BindGroup,
@@ -382,6 +429,9 @@ struct Kernels {
     gather: Kernel,
     gather_step: Kernel,
     gather_gas: Kernel,
+    wells_list: Kernel,
+    wells_env: Kernel,
+    wells_merge: Kernel,
     hydro: Kernel,
     spread: Kernel,
     apply: Kernel,
@@ -403,7 +453,6 @@ pub struct Sim {
     about: [wgpu::Buffer; 2],
     gas: [wgpu::Buffer; 2],
     chem: [wgpu::Buffer; 2],
-    n_wells: u32,
     /// any gas particles at the start (the gas passes run only then)
     has_gas: bool,
     /// particles in each bin (u32 x MAX_LEVELS)
@@ -509,7 +558,8 @@ impl Sim {
         // the wells' particle indices and what they swallowed (evolve.wgsl), what stars give back and where it
         // goes (feedback.wgsl)
         anyhow::ensure!(init.wells <= 64, "at most 64 super wells");
-        let wsink = storage(d, "wells and sink", (64 + init.wells.max(1) as u64 * 6) * 4);
+        // [0] how many wells, [1 ..= 64] their indices (wells_list.wgsl), then 6 sums a well (evolve.wgsl swallow)
+        let wsink = storage(d, "wells and sink", (65 + 64 * 6) * 4);
         let emit = storage(d, "emit", n as u64 * 32);
         let deposit = storage(d, "deposit", n as u64 * 48);
         let counts = storage(d, "bin counts", MAX_LEVELS as u64 * 4);
@@ -549,7 +599,7 @@ impl Sim {
             eta_eps: (2.0 * cfg.eta * cfg.softening_pc) as f32,
             eta_jerk: cfg.eta_jerk as f32,
             open_small: (cfg.open_small * cfg.softening_pc) as f32,
-            n_wells: init.wells,
+            _spare: 0,
             acc_r2: cfg.accretion_pc.powi(2) as f32,
             single_stars: init.single_stars as u32,
             eps2_kind: {
@@ -568,6 +618,19 @@ impl Sim {
             gas_c: [cfg.gas.floor_k as f32, cfg.gas.cooling as u32 as f32, cfg.gas.feedback_radius_pc as f32, (0.5 * cfg.softening_pc) as f32],
             // 10^51 erg = 5.26e7 Msun (pc/Myr)^2
             gas_d: [5.26e7, cfg.gas.star_formation as u32 as f32, cfg.gas.feedback as u32 as f32, 0.0],
+            wells_a: [
+                cfg.wells.merge_pc as f32,
+                cfg.wells.surroundings_pc as f32,
+                cfg.wells.agn_efficiency as f32,
+                cfg.wells.salpeter_myr as f32,
+            ],
+            wells_b: [
+                cfg.wells.bondi as u32 as f32,
+                cfg.wells.friction as u32 as f32,
+                cfg.wells.direct_collapse as u32 as f32,
+                cfg.wells.collapse_max_metallicity as f32,
+            ],
+            wells_c: [(cfg.wells.collapse_density_cm3 / 40.7 / 0.71) as f32, cfg.wells.collapse_min_mass as f32, 0.0, 0.0],
         };
         let common = uniform(d, "common", &common_with_row(groups.x * 256));
         // the force pass's workgroups have their own size, so its rows have their own length
@@ -616,8 +679,17 @@ impl Sim {
                 "evolve",
                 &module(include_str!("../../shaders/evolve.wgsl")),
                 &[U, R, W, W, W, W, W, R, W],
-                &["evolve", "tick_clock", "find_wells", "swallow", "swallow_apply"],
+                &["evolve", "tick_clock", "swallow", "swallow_apply"],
             ),
+            wells_list: Kernel::new(d, "wells list", &module(include_str!("../../shaders/wells_list.wgsl")), &[U, R, W, W], &["flag", "scatter"]),
+            wells_env: Kernel::new(
+                d,
+                "wells",
+                &module(include_str!("../../shaders/wells_env.wgsl")),
+                &[U, R, W, W, R, R, R, W, W],
+                &["surroundings"],
+            ),
+            wells_merge: Kernel::new(d, "wells merge", &module(include_str!("../../shaders/wells_merge.wgsl")), &[U, R, W, W, W, W], &["merge"]),
             gather_gas: Kernel::new(d, "gather gas", &module(include_str!("../../shaders/gather_gas.wgsl")), &[U, R, R, R, W, W], &["main"]),
             hydro: Kernel::new(
                 d,
@@ -664,6 +736,9 @@ impl Sim {
                     &[&common, &pos[s], &kin[s], &acc[s], &bins[s], &counts, &tick, &gas[s], &chem[s], &body[s]],
                 ),
                 gather_gas: k.gather_gas.bind(d, "gather gas", &[&common, &sort.vals[0], &gas[s], &chem[s], &gas[o], &chem[o]]),
+                wells_list: k.wells_list.bind(d, "wells list", &[&common, &body[s], &flags, &wsink]),
+                wells_merge: k.wells_merge.bind(d, "wells merge", &[&common, &pos[s], &kin[s], &body[s], &acc[s], &wsink]),
+                wells_env: k.wells_env.bind(d, "wells", &[&common, &pos[s], &kin[s], &body[s], &gas[s], &child, &node, &wsink, &deposit]),
                 hydro: k.hydro.bind(d, "hydro", &[&common, &pos[s], &kin[s], &body[s], &gas[s], &child, &node, &active, &active_n]),
                 spread: k.spread.bind(d, "feedback", &[&common, &pos[s], &body[s], &chem[s], &emit, &child, &node, &active_n, &deposit]),
                 apply: k.apply.bind(d, "feedback apply", &[&common, &kin[s], &body[s], &gas[s], &chem[s], &deposit, &bins[s], &counts]),
@@ -714,7 +789,6 @@ impl Sim {
             counts_read: AsyncRead::new(d, "bin counts read", MAX_LEVELS as u64 * 4),
             rates,
             about,
-            n_wells: init.wells,
             gas,
             chem,
             has_gas: init.body.iter().any(|b| b[1] >> init::KIND_SHIFT == init::Kind::Gas as u32),
@@ -743,24 +817,31 @@ impl Sim {
         ((s * CHUNKS + chunk) as u64 * DYN_STRIDE) as u32
     }
 
-    /// Stellar evolution, then super wells swallowing (and, with `tick`, the clock moves on a step).
+    /// The start of a step of dt (with `tick`; without, only the stars' state and the well list, for the start):
+    /// star formation and stellar evolution, the well list, wells swallowing, accreting, dragged and merging, what
+    /// stars and wells give the gas, and the clock moves on.
     fn encode_evolve(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer, tick: bool) {
         let mut pass = begin(encoder, timer, "evolve", 1.0);
-        let (b, g) = (&self.sets[self.cur].evolve, self.groups);
-        self.k.evolve.run(&mut pass, "evolve", b, g);
-        if self.n_wells > 0 {
-            self.k.evolve.run(&mut pass, "find_wells", b, g);
-            self.k.evolve.run(&mut pass, "swallow", b, g);
-            self.k.evolve.run(&mut pass, "swallow_apply", b, Groups::for_items(self.n_wells, 64));
+        let g = self.groups;
+        let set = &self.sets[self.cur];
+        self.k.evolve.run(&mut pass, "evolve", &set.evolve, g);
+        self.k.wells_list.run(&mut pass, "flag", &set.wells_list, g);
+        self.flag_scan.encode(&mut pass);
+        self.k.wells_list.run(&mut pass, "scatter", &set.wells_list, g);
+        if !tick {
+            return;
         }
-        if self.has_gas && tick {
-            // what stars gave back goes to the nearest gas (the tree is the last sub-step's, the positions unchanged)
-            self.k.spread.run(&mut pass, "spread", &self.sets[self.cur].spread, self.groups);
-            self.k.apply.run(&mut pass, "apply", &self.sets[self.cur].apply, g);
+        let one = Groups { x: 1, y: 1 };
+        self.k.evolve.run(&mut pass, "swallow", &set.evolve, g);
+        self.k.evolve.run(&mut pass, "swallow_apply", &set.evolve, one);
+        self.k.wells_env.run(&mut pass, "surroundings", &set.wells_env, one);
+        self.k.wells_merge.run(&mut pass, "merge", &set.wells_merge, one);
+        if self.has_gas {
+            // what stars gave back, and wells took, goes to the gas (the tree is the last sub-step's)
+            self.k.spread.run(&mut pass, "spread", &set.spread, g);
+            self.k.apply.run(&mut pass, "apply", &set.apply, g);
         }
-        if tick {
-            self.k.evolve.run(&mut pass, "tick_clock", b, Groups { x: 1, y: 1 });
-        }
+        self.k.evolve.run(&mut pass, "tick_clock", &set.evolve, one);
     }
 
     /// The work of the next sub-step.

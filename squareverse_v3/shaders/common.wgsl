@@ -19,7 +19,7 @@ struct Common {
     eta_eps: f32,        // 2 eta softening: a particle wants steps of at most sqrt(eta_eps / |a|)
     eta_jerk: f32,       // and at most eta_jerk |a| / |da/dt| (0: off)
     open_small: f32,     // nodes smaller than this (pc) act as one mass at any distance, unless they hold the particle
-    n_wells: u32,        // super wells (their numbers are 0 .. n_wells - 1, in about.w)
+    _spare: u32,
     acc_r2: f32,         // a super well swallows bound particles nearer than this, pc^2
     single_stars: u32,   // 1: each star particle is one star (its mass changes at death), 0: a population
     eps2_kind: array<vec4<f32>, 2>,   // softening^2 by kind (K_*), pc^2; a pair uses the larger of its two
@@ -27,6 +27,9 @@ struct Common {
     gas_b: vec4<f32>,    // star formation: least density (Msun/pc^3), most temperature (K), efficiency per free fall, disc half-thickness z0 (pc)
     gas_c: vec4<f32>,    // temperature floor (K), cooling on (1/0), feedback search radius (pc), least kernel reach H (pc)
     gas_d: vec4<f32>,    // supernova energy (Msun pc^2/Myr^2), star formation on, feedback on, -
+    wells_a: vec4<f32>,  // wells: merge distance (pc), surroundings radius (pc), AGN efficiency (of mc²), Salpeter time (Myr)
+    wells_b: vec4<f32>,  // Bondi accretion on, dynamical friction on, direct collapse on, its largest metallicity (solar)
+    wells_c: vec4<f32>,  // direct collapse: least density (Msun/pc^3), least mass (Msun); -, -
 }
 
 // Particle kinds, in the top 4 bits of body.y (the id below them).
@@ -52,7 +55,7 @@ fn class_of(kind: u32) -> u32 {
     return 0u;
 }
 
-// Gas: (u, Σ, H, -) and (hydro ax, ay, du/dt, signal speed) per particle, in `gas` at 2i and 2i + 1. u is the
+// Gas: (u, Σ, H, metallicity / solar) and (hydro ax, ay, du/dt, signal speed) per particle, in `gas` at 2i and 2i + 1. u is the
 // internal energy per mass, (pc/Myr)^2; Σ the surface density, Msun/pc^2; H the kernel's reach, pc. The pressure
 // (2D) is (gamma - 1) Σ u. Temperature: mean molecular mass 0.6 when ionised, 1.27 when neutral.
 const U_TO_K_IONISED: f32 = 46.3;    // K per (pc/Myr)^2 at mu 0.6, gamma 5/3
