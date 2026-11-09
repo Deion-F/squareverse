@@ -57,6 +57,8 @@ struct Running {
     /// What is selected and followed (phase 6)
     view: ViewState,
     spare_share: f64,
+    /// The expanding universe has reached today (z = 0): it pauses there once.
+    past_today: bool,
     default_particles: u32,
     cursor: (f64, f64),
     dragging: bool,
@@ -187,6 +189,7 @@ impl Running {
             camera,
             view: ViewState::default(),
             spare_share: cli.spares.unwrap_or(SPARE_SHARE),
+            past_today: false,
             default_particles,
             cursor: (0.0, 0.0),
             dragging: false,
@@ -260,6 +263,7 @@ impl Running {
                 "h" => ui.help_open = !ui.help_open,
                 "d" => ui.show_dm = !ui.show_dm,
                 "g" => ui.show_gas = !ui.show_gas,
+                "o" => ui.show_rings = !ui.show_rings,
                 "r" => ui.reset_requested = true,
                 "f" => ui.fps_target = if ui.fps_target == 60 { 30 } else { 60 },
                 "[" => {
@@ -478,6 +482,13 @@ impl Running {
         // picking and following (read-only passes)
         self.sim.encode_probe(&self.gpu.queue, &mut enc);
         let advanced = self.sim.pos_time_myr() - before;
+        // the universe reaches today: pause there, once (it can go on into the future, where it keeps expanding)
+        let past = self.sim.cfg.cosmology.is_some() && self.sim.redshift() <= 0.0;
+        if past && !self.past_today {
+            self.ui.paused = true;
+            self.say("Today (redshift 0, 13.5 billion years): paused. Space goes on into the future.".into());
+        }
+        self.past_today = past;
         self.allowance = (self.allowance - advanced).max(0.0);
         self.myr_rate.tick(now, advanced);
         // the display clock: runs at the sim's average pace, pulled gently towards the sim's time
@@ -532,13 +543,13 @@ impl Running {
         };
         let raw = self.egui_state.take_egui_input(&self.window);
         let mut actions = view::PanelActions::default();
-        let (tool, brush_px, cursor) = (self.ui.tool, self.ui.tools.brush_px, self.cursor);
+        let (tool, brush_px, cursor, show_rings) = (self.ui.tool, self.ui.tools.brush_px, self.cursor, self.ui.show_rings);
         let press = self.view.press;
         let (sim, camera, vstate, display_myr) = (&self.sim, &self.camera, &mut self.view, self.display_myr);
         let out = self.egui_ctx.run_ui(raw, |ui| {
             ui::show(ui, &mut self.ui, &hud);
             let ctx = ui.ctx().clone();
-            view::draw_marks(&ctx, camera, viewport, sim, vstate, ctx.pixels_per_point());
+            view::draw_marks(&ctx, camera, viewport, sim, vstate, ctx.pixels_per_point(), show_rings);
             actions = view::panel(&ctx, vstate, sim, display_myr);
             crate::system::window(&ctx, vstate, sim, display_myr);
             // the brush under the cursor, and a drag's arrow
@@ -687,6 +698,9 @@ impl ApplicationHandler for App {
                 };
                 let size = r.size();
                 r.camera.zoom_at(1.2f64.powf(lines), r.cursor, (size.0 as f64, size.1 as f64));
+                // no further out than the whole box (it repeats beyond)
+                let widest = size.0.min(size.1) as f64 / (1.2 * r.sim.cfg.box_pc);
+                r.camera.px_per_pc = r.camera.px_per_pc.max(widest);
             }
             WindowEvent::MouseInput { state, button, .. } if matches!(button, MouseButton::Left | MouseButton::Right) => {
                 let pressed = state == ElementState::Pressed;
@@ -701,8 +715,8 @@ impl ApplicationHandler for App {
                             if r.ui.tool == ui::Tool::Select {
                                 if click {
                                     let size = r.size();
-                                    let dm = r.ui.show_dm;
-                                    r.view.click(&mut r.sim, &r.camera, r.cursor, (size.0 as f64, size.1 as f64), dm);
+                                    let (dm, rings) = (r.ui.show_dm, r.ui.show_rings);
+                                    r.view.click(&mut r.sim, &r.camera, r.cursor, (size.0 as f64, size.1 as f64), dm, rings);
                                 }
                             } else if let Err(e) = r.use_tool(p, r.cursor) {
                                 r.say(format!("{e:#}"));

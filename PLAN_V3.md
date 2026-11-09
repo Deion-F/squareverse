@@ -681,6 +681,10 @@ Phase 6, joining the views:
 - [x] Click a galaxy's ring (drawn round each galaxy the finder found while it is small on screen) or a particle
   (`shaders/probe.wgsl`: the nearest within 10 px, ties to the lowest id): it is followed (the camera glides to it)
   and zoomed to, with a panel about it. Dragging stops following; Esc clears.
+- [x] **Fixed after the user's first look (2026-11-09):** the rings didn't wrap round the periodic box as the particles
+  do (after panning they sat off in the void), and in the universe every halo got one (1,712). Now only galaxies
+  with stars, at most 300, wrapped, with a toggle (O); zooming out stops at the whole box; the universe pauses once
+  at today (it had run on to z = -0.96).
 - [x] Speed by zoom (on by default, A): ~10 Myr/s on a galaxy, ~0.5 on its centre, up to 2,000 on the universe.
 - [x] Level of detail: close up, brighter stars are bigger squares (same light), white dwarfs, neutron stars and
   stellar black holes fade in.

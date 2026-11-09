@@ -25,6 +25,8 @@ pub struct UiState {
     pub toomre_q: f64,
     pub show_dm: bool,
     pub show_gas: bool,
+    /// Rings round the galaxies the finder found.
+    pub show_rings: bool,
     pub reset_requested: bool,
     pub view_reset_requested: bool,
     pub fullscreen_requested: bool,
@@ -98,6 +100,7 @@ impl UiState {
             toomre_q: 1.5,
             show_dm: false,
             show_gas: true,
+            show_rings: true,
             reset_requested: false,
             view_reset_requested: false,
             fullscreen_requested: false,
@@ -175,6 +178,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Space", "pause / run"),
     ("[ / ]", "slower / faster (sim time per second)"),
     ("A", "speed by zoom on / off"),
+    ("O", "galaxy rings on / off"),
     ("1 - 7", "tools: select, galaxy, super well, gas, kick, delete, move"),
     ("F5 / F9", "quick save / quick load"),
     ("Click", "select a galaxy (its ring) or a particle; it is followed"),
@@ -489,6 +493,14 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
                     ui,
                     "Draws the gas, coloured by temperature: cold gas dim blue, gas near 10,000 K the pink of glowing \
                      hydrogen, hot gas (a million degrees and more, from supernovae) blue-white. Brighter where denser.",
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut st.show_rings, "Galaxy rings (O)");
+                info(
+                    ui,
+                    "Rings round the galaxies the galaxy finder found (those with stars, at most 300, the most stars \
+                     first), while they are small on screen; click one to follow it. They fade out as you zoom in.",
                 );
             });
             ui.horizontal(|ui| {

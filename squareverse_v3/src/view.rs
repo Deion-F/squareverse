@@ -75,11 +75,12 @@ impl ViewState {
 
     /// A click at `px`: the nearest galaxy mark within reach, else a particle (asked of the GPU; the answer comes
     /// in `frame`).
-    pub fn click(&mut self, sim: &mut Sim, camera: &Camera, px: (f64, f64), viewport: (f64, f64), with_dm: bool) {
+    pub fn click(&mut self, sim: &mut Sim, camera: &Camera, px: (f64, f64), viewport: (f64, f64), with_dm: bool, rings: bool) {
         let a = sim.scale_factor();
         let mut best: Option<(f64, &Galaxy)> = None;
-        for g in &sim.galaxies {
-            let (sx, sy) = screen_of(camera, g.center_pc, viewport);
+        let candidates = if rings { ringed(sim) } else { Vec::new() };
+        for g in candidates {
+            let (sx, sy) = screen_of(camera, g.center_pc, viewport, sim.cfg.box_pc);
             let reach = (g.radius_pc / a * camera.px_per_pc).max(10.0);
             let d = (sx - px.0).hypot(sy - px.1);
             // only marks too small to click particles in
@@ -180,14 +181,28 @@ fn dist(p: (f64, f64), q: (f64, f64), box_pc: f64) -> f64 {
 }
 
 /// Screen pixel of a point in the box, taking the nearest copy across the periodic edge.
-pub fn screen_of(camera: &Camera, p: (f64, f64), viewport: (f64, f64)) -> (f64, f64) {
-    (viewport.0 / 2.0 + (p.0 - camera.center_pc.0) * camera.px_per_pc, viewport.1 / 2.0 - (p.1 - camera.center_pc.1) * camera.px_per_pc)
+pub fn screen_of(camera: &Camera, p: (f64, f64), viewport: (f64, f64), box_pc: f64) -> (f64, f64) {
+    // the particles are drawn at their copy nearest the camera (squares.wgsl), so the marks must be too
+    let wrap = |d: f64| d - box_pc * (d / box_pc).round();
+    let (dx, dy) = (wrap(p.0 - camera.center_pc.0), wrap(p.1 - camera.center_pc.1));
+    (viewport.0 / 2.0 + dx * camera.px_per_pc, viewport.1 / 2.0 - dy * camera.px_per_pc)
 }
 
-/// Circles round the galaxies the finder found, while they are small on screen (they fade out as you zoom in), the
-/// selected one brighter.
-pub fn draw_marks(ctx: &egui::Context, camera: &Camera, viewport: (f64, f64), sim: &Sim, view: &ViewState, ppp: f32) {
-    if sim.galaxies.is_empty() {
+/// The galaxies that get a ring: those with stars (the finder's halos without any are left out), at most
+/// `MAX_RINGS`, the most stars first.
+pub const MAX_RINGS: usize = 300;
+
+pub fn ringed(sim: &Sim) -> Vec<&Galaxy> {
+    let mut v: Vec<&Galaxy> = sim.galaxies.iter().filter(|g| g.stars > 0.0).collect();
+    v.sort_by(|a, b| b.stars.total_cmp(&a.stars));
+    v.truncate(MAX_RINGS);
+    v
+}
+
+/// Circles round the galaxies the finder found (`ringed`), while they are small on screen (they fade out as you zoom
+/// in), the selected one brighter. Off with the menu's "Galaxy rings" (O).
+pub fn draw_marks(ctx: &egui::Context, camera: &Camera, viewport: (f64, f64), sim: &Sim, view: &ViewState, ppp: f32, show: bool) {
+    if sim.galaxies.is_empty() || !show {
         return;
     }
     let a = sim.scale_factor();
@@ -196,14 +211,14 @@ pub fn draw_marks(ctx: &egui::Context, camera: &Camera, viewport: (f64, f64), si
         Selected::Galaxy { galaxy, .. } => Some(galaxy.center_pc),
         _ => None,
     };
-    for g in &sim.galaxies {
+    for g in ringed(sim) {
         let r_px = (g.radius_pc / a * camera.px_per_pc).max(4.0);
         let fade = (1.0 - (r_px - 30.0) / 60.0).clamp(0.0, 1.0);
         let is_sel = selected.is_some_and(|c| dist(c, g.center_pc, sim.cfg.box_pc) < 1.0);
         if fade <= 0.0 && !is_sel {
             continue;
         }
-        let (x, y) = screen_of(camera, g.center_pc, viewport);
+        let (x, y) = screen_of(camera, g.center_pc, viewport, sim.cfg.box_pc);
         if x < -50.0 || y < -50.0 || x > viewport.0 + 50.0 || y > viewport.1 + 50.0 {
             continue;
         }

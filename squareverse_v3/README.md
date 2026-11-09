@@ -284,7 +284,12 @@ particle and is mostly capped away. The universe's lattice still shows in the vo
 
 ## Joining the views (phase 6)
 
-- **Select:** click a galaxy's ring (drawn round each galaxy the finder found, while it is small on screen) or a
+- **Galaxy rings:** blue circles round the galaxies the finder found that have stars (at most 300, the most stars
+  first), while they are small on screen; they fade out as you zoom in. O or the menu's "Galaxy rings" turns them
+  off. Like the particles, they are drawn at their copy nearest the camera in the periodic box.
+- **Zoom:** no further out than the whole box (beyond it the box repeats).
+- **Today:** the universe pauses once when it reaches redshift 0; Space goes on into the future.
+- **Select:** click a galaxy's ring or a
   particle (`shaders/probe.wgsl`: the nearest within 10 px, ties to the lowest id). It is followed (the camera
   glides to it) and zoomed to, and a panel describes it. Dragging stops following; Esc clears the selection.
 - **Speed by zoom** (on by default, A or the menu's checkbox): about 10 Myr/s on a galaxy, ~0.5 on its centre, up
@@ -423,6 +428,7 @@ the GPU and its total ms a frame.
 | Space | pause / run |
 | [ / ] | slower / faster (sim time per second) |
 | A | speed by zoom on / off |
+| O | galaxy rings on / off |
 | 1 - 7 | tools: select, galaxy, super well, gas, kick, delete, move |
 | F5 / F9 | quick save / quick load (`saves/quick.sqv`) |
 | Click | select a galaxy (its ring) or a particle; it is followed |
