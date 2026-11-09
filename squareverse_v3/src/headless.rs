@@ -37,6 +37,12 @@ pub struct Report {
     /// The galaxy's figures at the start and the end (galaxy scene).
     pub galaxy_start: Option<crate::sim::init::GalaxyStats>,
     pub galaxy_end: Option<crate::sim::init::GalaxyStats>,
+    /// The universe's figures at the start and the end (universe scene).
+    pub universe_start: Option<crate::sim::init::UniverseStats>,
+    pub universe_end: Option<crate::sim::init::UniverseStats>,
+    /// The galaxy finder at the end (if on): how many groups, and the heaviest 50.
+    pub galaxy_count: usize,
+    pub galaxies: Vec<crate::sim::Galaxy>,
     pub energy_initial: f64,
     pub energy_final: f64,
     pub energy_rel_change: f64,
@@ -65,6 +71,9 @@ pub fn config_from(cli: &Cli, gpu: &Gpu) -> SimConfig {
         }
     }
     cfg.gas.feedback &= !cli.no_feedback;
+    if cli.no_finder {
+        cfg.finder.every_myr = 0.0;
+    }
     cfg.gas.cooling &= !cli.no_cooling;
     cfg.gas.star_formation &= !cli.no_star_formation;
     if let Some(m) = cli.gas_mass {
@@ -105,12 +114,19 @@ pub fn run(gpu: &Gpu, cfg: SimConfig, steps: u32) -> Result<Report> {
 
 /// As `run`, and if `snapshot` is given, draws the final state into that PNG file.
 pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::path::Path>) -> Result<Report> {
+    run_full(gpu, cfg, steps, snapshot, false)
+}
+
+/// As `run_with`; `show_dm` draws the dark matter in the snapshot.
+pub fn run_full(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::path::Path>, show_dm: bool) -> Result<Report> {
     let mut sim = Sim::new(gpu, cfg)?;
     let mut timer = GpuTimer::new(&gpu.device, &gpu.queue, gpu.timestamps);
     let s0 = sim.read_state(gpu)?;
     let e0 = sim.energy(&s0);
     let galaxy = sim.cfg.scene == crate::sim::Scene::Galaxy;
     let galaxy_start = galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &s0, 0.0));
+    let universe = sim.cfg.scene == crate::sim::Scene::Universe;
+    let universe_start = universe.then(|| crate::sim::init::universe_stats(&sim.cfg, &s0, 0.0, sim.redshift()));
 
     // one step a submit, so the timer sees all of its passes
     let submit = |sim: &mut Sim, timer: &mut GpuTimer| -> Result<()> {
@@ -151,10 +167,11 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
     }
     let state = sim.read_state(gpu)?;
     let e1 = sim.energy(&state);
+    let found = if sim.cfg.finder.every_myr > 0.0 { sim.find_galaxies(gpu)?.to_vec() } else { Vec::new() };
     let bin_counts = sim.read_counts(gpu)?;
     gpu_ms.sort_by(f64::total_cmp);
     if let Some(path) = snapshot {
-        crate::snapshot::save(gpu, &sim, path)?;
+        crate::snapshot::save(gpu, &sim, path, show_dm)?;
     }
     let per_step = gpu_ms.get(gpu_ms.len() / 2).copied();
     Ok(Report {
@@ -177,6 +194,10 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
         bin_counts,
         galaxy_start,
         galaxy_end: galaxy.then(|| crate::sim::init::galaxy_stats(&sim.cfg, &state, sim.time_myr())),
+        universe_start,
+        galaxy_count: found.len(),
+        galaxies: found.into_iter().take(50).collect(),
+        universe_end: universe.then(|| crate::sim::init::universe_stats(&sim.cfg, &state, sim.time_myr(), sim.redshift())),
         energy_initial: e0,
         energy_final: e1,
         energy_rel_change: (e1 - e0) / e0.abs(),
@@ -188,7 +209,7 @@ pub fn run_with(gpu: &Gpu, cfg: SimConfig, steps: u32, snapshot: Option<&std::pa
 pub fn main(cli: &Cli) -> Result<()> {
     let gpu = Gpu::headless(cli.adapter.as_deref(), cli.allow_cpu)?;
     let cfg = config_from(cli, &gpu);
-    let report = run_with(&gpu, cfg, cli.steps, cli.snapshot.as_deref())?;
+    let report = run_full(&gpu, cfg, cli.steps, cli.snapshot.as_deref(), cli.show_dm)?;
     let json = serde_json::to_string_pretty(&report)?;
     match &cli.report {
         Some(path) => std::fs::write(path, json + "\n")?,

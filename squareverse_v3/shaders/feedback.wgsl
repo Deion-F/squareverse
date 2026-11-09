@@ -24,18 +24,14 @@ fn rel(q: vec4<u32>) -> vec2<u32> {
 }
 
 fn box_distance(p: vec2<u32>, r: u32) -> f32 {
-    let b = node[NODE_VEC4 * r + 1u];
-    let dx = select(0u, b.x - p.x, p.x < b.x) + select(0u, p.x - b.z, p.x > b.z);
-    let dy = select(0u, b.y - p.y, p.y < b.y) + select(0u, p.y - b.w, p.y > b.w);
-    return max(length(vec2<f32>(f32(dx), f32(dy)) * c.unit_pc) - 2.0 * c.unit_pc, 0.0);
+    return box_distance_to(p, node[NODE_VEC4 * r + 1u]);
 }
 
 fn add64(at: u32, x: f32) {
-    let hi = floor(x / TWO32);
-    let lo = u32(x - hi * TWO32);
-    let old = atomicAdd(&deposit[at], lo);
-    let carry = select(0u, 1u, old + lo < old);
-    atomicAdd(&deposit[at + 1u], bitcast<u32>(i32(hi)) + carry);
+    let w = split64(x);
+    let old = atomicAdd(&deposit[at], w.x);
+    let carry = select(0u, 1u, old + w.x < old);
+    atomicAdd(&deposit[at + 1u], w.y + carry);
 }
 
 @compute @workgroup_size(256)

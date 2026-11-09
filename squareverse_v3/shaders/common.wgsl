@@ -30,6 +30,13 @@ struct Common {
     wells_a: vec4<f32>,  // wells: merge distance (pc), surroundings radius (pc), AGN efficiency (of mc²), Salpeter time (Myr)
     wells_b: vec4<f32>,  // Bondi accretion on, dynamical friction on, direct collapse on, its largest metallicity (solar)
     wells_c: vec4<f32>,  // direct collapse: least density (Msun/pc^3), least mass (Msun); -, -
+    pm: vec4<f32>,       // mesh gravity (pm.wgsl): cells a side (0: none, the tree does all), split scale r_s and cut r_cut (comoving pc), mass unit (Msun)
+    cosmo_p: vec4<f32>,  // expansion: H0 (1/Myr; 0: a static box), Omega_m, Omega_Lambda, cosmic time at the sim's start (Myr)
+    cosmo_q: vec4<f32>,  // softening comoving until a = this (0: always physical), UV background on, reionisation z, comoving pc per hi unit
+    gas_e: vec4<f32>,    // the universe's sheet thickness (comoving pc; 0: gas in a disc of half-thickness gas_b.w), its mean gas Σ (comoving), photoelectric heating scales with metallicity (1/0), UV self-shielding density (Msun/pc^3)
+    gas_f: vec4<f32>,    // gas: largest kernel reach H (pc), merging (gas lighter than this share of gas_f.w, thin and hot), splitting (heavier than this share), the reference gas particle mass (Msun)
+    finder: vec4<f32>,   // the galaxy finder (finder.wgsl): linking length (physical pc), dark matter linked (1/0), least members, -
+    cosmo: vec4<f32>,    // this step (pm.wgsl cosmo_step): scale factor a, Hubble rate H (1/Myr), softening² factor, 1 / a
 }
 
 // Particle kinds, in the top 4 bits of body.y (the id below them).
@@ -89,11 +96,28 @@ fn u_ceiling(h: f32) -> f32 {
 // gas from collapsing into clumps the kernel can't resolve (without it the disc's gas fragmented into ~40 massive
 // clumps within 300 Myr, 2026-11-08). Returns that floor's u (0 below the threshold).
 fn eos_u(sigma: f32) -> f32 {
-    let rho = sigma / (2.0 * c.gas_b.w);
+    let rho = gas_rho(sigma);
     if (rho <= c.gas_b.x) {
         return 0.0;
     }
     return u_of_temperature(8000.0) * pow(rho / c.gas_b.x, 1.0 / 3.0);
+}
+
+// A whole number (x, cut toward zero) as a 64-bit two's complement integer (lo, hi), for the deposit sums: exact for
+// negative numbers too (x + 2^32 in f32 would lose the low bits).
+fn split64(x: f32) -> vec2<u32> {
+    let a = abs(x);
+    let hm = floor(a / 4294967296.0);
+    var lo = u32(a - hm * 4294967296.0);
+    var hi = u32(hm);
+    if (x < 0.0) {
+        hi = ~hi;
+        lo = ~lo + 1u;
+        if (lo == 0u) {
+            hi += 1u;
+        }
+    }
+    return vec2<u32>(lo, hi);
 }
 
 fn hash(x: u32) -> u32 {
@@ -150,7 +174,75 @@ fn kind_of(b: vec2<u32>) -> u32 {
 }
 
 fn eps2_of(k: u32) -> f32 {
-    return c.eps2_kind[k >> 2u][k & 3u];
+    return c.eps2_kind[k >> 2u][k & 3u] * c.cosmo.z;
+}
+
+// The scale factor at cosmic time t (Myr) of a flat universe with matter and a cosmological constant; 1 in a static
+// box.
+fn scale_factor(t: f32) -> f32 {
+    if (c.cosmo_p.x <= 0.0) {
+        return 1.0;
+    }
+    let om = c.cosmo_p.y;
+    let ol = c.cosmo_p.z;
+    return pow(om / ol, 1.0 / 3.0) * pow(sinh(1.5 * sqrt(ol) * c.cosmo_p.x * max(t, 1e-3)), 2.0 / 3.0);
+}
+
+fn hubble(a: f32) -> f32 {
+    return c.cosmo_p.x * sqrt(c.cosmo_p.y / (a * a * a) + c.cosmo_p.z);
+}
+
+// erfc(x) for x >= 0 (Abramowitz & Stegun 7.1.26, error under 1.5e-7)
+fn erfc_approx(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let p = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    return p * exp(-x * x);
+}
+
+// With mesh gravity, the tree's share of a pair's pull at physical distance r (the force factor, and the
+// potential's), r_s = c.pm.y a: the rest comes from the mesh.
+fn short_range(r: f32) -> vec2<f32> {
+    if (c.pm.x <= 0.0) {
+        return vec2<f32>(1.0);
+    }
+    let u = r / (2.0 * c.pm.y * c.cosmo.x);
+    let e = erfc_approx(u);
+    return vec2<f32>(e + 1.1283792 * u * exp(-u * u), e);
+}
+
+// the tree leaves out nodes farther than this (physical pc); a very large number without mesh gravity
+fn short_cut() -> f32 {
+    if (c.pm.x <= 0.0) {
+        return 3e38;
+    }
+    return c.pm.z * c.cosmo.x;
+}
+
+// Distance from a point to a node's box (both hi words relative to the tree origin), pc, the short way round the
+// periodic box, less 2 hi units for rounding.
+fn box_distance_to(p: vec2<u32>, b: vec4<u32>) -> f32 {
+    var dx = 0u;
+    if (p.x < b.x || p.x > b.z) {
+        dx = min(b.x - p.x, p.x - b.z);
+    }
+    var dy = 0u;
+    if (p.y < b.y || p.y > b.w) {
+        dy = min(b.y - p.y, p.y - b.w);
+    }
+    let d = vec2<f32>(f32(dx), f32(dy)) * c.unit_pc;
+    return max(length(d) - 2.0 * c.unit_pc, 0.0);
+}
+
+// The gas's volume density (Msun/pc^3) from its surface density Σ: in a galaxy's disc Σ / 2 z0 (z0 = gas_b.w). In
+// the universe (gas_e.x > 0) the 2D sheet stands for a slab L thick: at the mean Σ the density is the mean, and as
+// gas collapses, area shrinking as r² and volume as r³, ρ ∝ Σ^(3/2) (z0 = L/2 sqrt(Σ_mean / Σ), the scale factor
+// cancelling out), no thinner than a disc.
+fn gas_rho(sigma: f32) -> f32 {
+    var z0 = c.gas_b.w;
+    if (c.gas_e.x > 0.0) {
+        z0 = max(0.5 * c.gas_e.x * sqrt(c.gas_e.y / max(sigma, 1e-12)), c.gas_b.w);
+    }
+    return sigma / (2.0 * z0);
 }
 
 // Per dispatch (a dynamic-offset uniform): which sub-step of the longest step this is, and where a force-pass

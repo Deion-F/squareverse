@@ -22,6 +22,10 @@ use crate::render::{Camera, Look, Renderer};
 use crate::sim::{Limit, Sim, SimConfig};
 use crate::timing::GpuTimer;
 use crate::ui::{self, Hud, UiState};
+use crate::view::{self, Selected, ViewState};
+
+/// Spare particle slots the window keeps for its tools, as a share of the particles.
+const SPARE_SHARE: f64 = 0.05;
 
 pub fn run(cli: Cli) -> Result<()> {
     let event_loop = EventLoop::new().context("opening the event loop")?;
@@ -50,6 +54,9 @@ struct Running {
     egui_renderer: egui_wgpu::Renderer,
     ui: UiState,
     camera: Camera,
+    /// What is selected and followed (phase 6)
+    view: ViewState,
+    spare_share: f64,
     default_particles: u32,
     cursor: (f64, f64),
     dragging: bool,
@@ -134,7 +141,8 @@ impl Running {
 
         let renderer = Renderer::new(&gpu.device, format);
         let default_particles = budget::default_particles(&gpu);
-        let cfg = config_from(cli, &gpu);
+        // the window keeps spare slots for the tools
+        let cfg = SimConfig { spare_share: cli.spares.unwrap_or(SPARE_SHARE), ..config_from(cli, &gpu) };
         let sim = Sim::new(&gpu, cfg)?;
         let timer = GpuTimer::new(&gpu.device, &gpu.queue, gpu.timestamps);
 
@@ -153,6 +161,17 @@ impl Running {
         let mut ui = UiState::new(sim.cfg.particles, sim.cfg.seed, cli.fps);
         ui.scene = sim.cfg.scene;
         ui.toomre_q = sim.cfg.galaxy.toomre_q;
+        ui.show_dm = cli.show_dm;
+        match cli.speed.as_deref() {
+            None | Some("auto") => {}
+            Some("max") => ui.auto_speed = false,
+            Some(v) => {
+                if let Ok(x) = v.parse::<f64>() {
+                    ui.auto_speed = false;
+                    ui.speed = ui::nearest_speed(x);
+                }
+            }
+        }
         Ok(Self {
             window,
             gpu,
@@ -166,6 +185,8 @@ impl Running {
             egui_renderer,
             ui,
             camera,
+            view: ViewState::default(),
+            spare_share: cli.spares.unwrap_or(SPARE_SHARE),
             default_particles,
             cursor: (0.0, 0.0),
             dragging: false,
@@ -206,7 +227,9 @@ impl Running {
         let base = if self.ui.scene == self.sim.cfg.scene { self.sim.cfg.clone() } else { SimConfig::for_scene(self.ui.scene) };
         let mut cfg = SimConfig { particles: self.ui.particles, seed: self.ui.seed, ..base };
         cfg.galaxy.toomre_q = self.ui.toomre_q;
+        cfg.spare_share = self.spare_share;
         self.sim = Sim::new(&self.gpu, cfg)?;
+        self.view = ViewState::default();
         self.display_myr = 0.0;
         self.display_rate = 0.0;
         self.allowance = 0.0;
@@ -220,11 +243,17 @@ impl Running {
             Key::Named(NamedKey::Space) => ui.paused = !ui.paused,
             Key::Named(NamedKey::Home) => ui.view_reset_requested = true,
             Key::Named(NamedKey::F11) => ui.fullscreen_requested = true,
+            Key::Named(NamedKey::F5) => ui.save_requested = Some(crate::save::quick_path()),
+            Key::Named(NamedKey::F9) => ui.load_requested = Some(crate::save::quick_path()),
             Key::Named(NamedKey::Escape) => {
                 if ui.help_open {
                     ui.help_open = false;
-                } else {
+                } else if ui.menu_open {
                     ui.menu_open = false;
+                } else if self.view.system_open {
+                    self.view.system_open = false;
+                } else {
+                    self.view.clear(&mut self.sim);
                 }
             }
             Key::Character(c) => match c.to_lowercase().as_str() {
@@ -233,12 +262,108 @@ impl Running {
                 "g" => ui.show_gas = !ui.show_gas,
                 "r" => ui.reset_requested = true,
                 "f" => ui.fps_target = if ui.fps_target == 60 { 30 } else { 60 },
-                "[" => ui.speed = ui.speed.saturating_sub(1),
-                "]" => ui.speed = (ui.speed + 1).min(ui::SPEEDS.len() - 1),
+                "[" => {
+                    ui.speed = if ui.auto_speed { ui::nearest_speed(self.view.suggested_myr_s) } else { ui.speed }.saturating_sub(1);
+                    ui.auto_speed = false;
+                }
+                "]" => {
+                    ui.speed = (if ui.auto_speed { ui::nearest_speed(self.view.suggested_myr_s) } else { ui.speed } + 1).min(ui::SPEEDS.len() - 1);
+                    ui.auto_speed = false;
+                }
+                "a" => ui.auto_speed = !ui.auto_speed,
+                "1" => ui.tool = ui::Tool::Select,
+                "2" => ui.tool = ui::Tool::Galaxy,
+                "3" => ui.tool = ui::Tool::Well,
+                "4" => ui.tool = ui::Tool::Gas,
+                "5" => ui.tool = ui::Tool::Kick,
+                "6" => ui.tool = ui::Tool::Delete,
+                "7" => ui.tool = ui::Tool::Move,
                 _ => {}
             },
             _ => {}
         }
+    }
+
+    fn say(&mut self, msg: String) {
+        self.ui.message = Some((msg, Instant::now() + Duration::from_secs(4)));
+    }
+
+    /// The velocity of what is followed (new things placed move with it).
+    fn followed_velocity(&self) -> [f64; 2] {
+        if !self.view.follow {
+            return [0.0; 2];
+        }
+        match &self.view.selected {
+            Selected::Galaxy { galaxy, .. } => galaxy.velocity,
+            Selected::Particle(_) => self.sim.tracked.map_or([0.0; 2], |t| [t.vel[0] as f64, t.vel[1] as f64]),
+            Selected::None => [0.0; 2],
+        }
+    }
+
+    /// A tool used from `press` to `release` (pixels).
+    fn use_tool(&mut self, press: (f64, f64), release: (f64, f64)) -> Result<()> {
+        use crate::sim::init::{self, Initial};
+        use crate::sim::{ALL_KINDS, Brush};
+        let size = self.size();
+        let vp = (size.0 as f64, size.1 as f64);
+        let a = self.sim.scale_factor();
+        let (p0, p1) = (self.camera.world_at(press, vp), self.camera.world_at(release, vp));
+        let box_pc = self.sim.cfg.box_pc;
+        let at = crate::fixed::Fixed2::from_pc(p0.0, p0.1, box_pc);
+        let brush = self.ui.tools.brush_px / self.camera.px_per_pc * a;
+        let drag = [(p1.0 - p0.0) * a, (p1.1 - p0.1) * a];
+        let v = self.followed_velocity();
+        let t = self.ui.tools.clone();
+        let placed = |what: &str, n: usize, want: usize| {
+            if n < want { format!("{what}: only {n} of {want} particles fitted (the spare slots ran out)") } else { format!("{what}: {n} particles") }
+        };
+        let msg = match self.ui.tool {
+            ui::Tool::Select => return Ok(()),
+            ui::Tool::Galaxy => {
+                let cfg = &self.sim.cfg;
+                let seed = self.frames ^ 0x9a1a;
+                let tpl = crate::sim::galaxy_template(&self.gpu, cfg, init::scaled_galaxy(t.galaxy_share), t.galaxy_particles, seed)?;
+                let centre = crate::fixed::Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, box_pc);
+                let angle = (seed % 628) as f64 / 100.0;
+                let g = init::place(&[tpl], centre, box_pc, &[init::Placement { template: 0, center_pc: p0, velocity: v, angle, mirror: seed.is_multiple_of(2) }]);
+                let n = self.sim.spawn(&self.gpu, &g)?;
+                placed("galaxy", n, g.len())
+            }
+            ui::Tool::Well => {
+                let mut w = Initial::with_capacity(1);
+                w.push_well(at, v, t.well_mass);
+                let n = self.sim.spawn(&self.gpu, &w)?;
+                if n == 1 { format!("super well of {:.1e} Msun", t.well_mass) } else { "no spare slot left for a super well".into() }
+            }
+            ui::Tool::Gas => {
+                let m = if self.sim.gas_ref_mass > 0.0 { self.sim.gas_ref_mass } else { (t.gas_mass / 2_000.0).max(1.0) };
+                let count = (t.gas_mass / m).round().clamp(20.0, 100_000.0) as usize;
+                let mut rng = crate::rng::Rng::new(self.frames);
+                let mut g = Initial::with_capacity(count);
+                let h = (24.0 * t.gas_radius_pc * t.gas_radius_pc / count as f64).sqrt().max(1.0);
+                for _ in 0..count {
+                    let (r, ang) = (t.gas_radius_pc * rng.f64().sqrt(), rng.f64() * std::f64::consts::TAU);
+                    g.push_gas(at.offset_pc(r * ang.cos() / a, r * ang.sin() / a, box_pc), v, t.gas_mass / count as f64, t.gas_temperature_k, h, init::elements(1.0));
+                }
+                let n = self.sim.spawn(&self.gpu, &g)?;
+                placed("gas", n, count)
+            }
+            ui::Tool::Kick => {
+                let dv = [drag[0] / 20.0, drag[1] / 20.0];
+                self.sim.brush(&self.gpu, at, brush, ALL_KINDS, Brush::Kick(dv))?;
+                format!("kicked by {:.0} km/s", dv[0].hypot(dv[1]) / 1.0227)
+            }
+            ui::Tool::Delete => {
+                self.sim.brush(&self.gpu, crate::fixed::Fixed2::from_pc(p1.0, p1.1, box_pc), brush, ALL_KINDS, Brush::Delete)?;
+                "deleted".into()
+            }
+            ui::Tool::Move => {
+                self.sim.brush(&self.gpu, at, brush, ALL_KINDS, Brush::Move(drag))?;
+                "moved".into()
+            }
+        };
+        self.say(msg);
+        Ok(())
     }
 
     fn apply_requests(&mut self) -> Result<()> {
@@ -247,6 +372,30 @@ impl Running {
         }
         if std::mem::take(&mut self.ui.view_reset_requested) {
             self.camera = home_camera(&self.sim.cfg, self.size());
+        }
+        if let Some(path) = self.ui.save_requested.take() {
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let msg = match crate::save::save(&self.gpu, &self.sim, &path, &name) {
+                Ok(()) => format!("saved {}", path.display()),
+                Err(e) => format!("could not save: {e:#}"),
+            };
+            self.ui.presets = crate::save::list_presets();
+            self.say(msg);
+        }
+        if let Some(path) = self.ui.load_requested.take() {
+            match crate::save::load(&self.gpu, &path) {
+                Ok(sim) => {
+                    self.sim = sim;
+                    self.view = ViewState::default();
+                    self.ui.scene = self.sim.cfg.scene;
+                    self.display_myr = self.sim.pos_time_myr();
+                    self.display_rate = 0.0;
+                    self.allowance = 0.0;
+                    self.camera = home_camera(&self.sim.cfg, self.size());
+                    self.say(format!("loaded {}", path.display()));
+                }
+                Err(e) => self.say(format!("could not load: {e:#}")),
+            }
         }
         if std::mem::take(&mut self.ui.fullscreen_requested) {
             let full = self.window.fullscreen().is_some();
@@ -301,7 +450,8 @@ impl Running {
         if !self.ui.paused {
             let fps = self.ui.fps_target as f64;
             let dt_min = self.sim.cfg.dt_min();
-            let new_sub_steps = match ui::SPEEDS[self.ui.speed] {
+            let speed = if self.ui.auto_speed { Some(self.view.suggested_myr_s) } else { ui::SPEEDS[self.ui.speed] };
+            let new_sub_steps = match speed {
                 Some(speed) => {
                     self.allowance = (self.allowance + speed / fps).min(4.0 * speed / fps + dt_min);
                     (self.allowance / dt_min).floor() as u32
@@ -325,6 +475,8 @@ impl Running {
             };
             self.budget_ms = base;
         }
+        // picking and following (read-only passes)
+        self.sim.encode_probe(&self.gpu.queue, &mut enc);
         let advanced = self.sim.pos_time_myr() - before;
         self.allowance = (self.allowance - advanced).max(0.0);
         self.myr_rate.tick(now, advanced);
@@ -334,7 +486,10 @@ impl Running {
         self.display_myr += self.display_rate + 0.1 * (sim_t - self.display_myr);
         let reach = (4.0 * self.display_rate).max(self.sim.cfg.dt_min());
         self.display_myr = self.display_myr.clamp(sim_t - reach, sim_t + reach);
-        let extrap = self.display_myr - sim_t;
+        let viewport = (size.0 as f64, size.1 as f64);
+        self.view.frame(&mut self.sim, &mut self.camera, viewport, self.display_myr);
+        // comoving positions: a peculiar velocity v moves a particle v / a across the box
+        let extrap = (self.display_myr - sim_t) / self.sim.scale_factor();
         let look = Look {
             square_px: self.ui.square_px,
             brightness: self.ui.brightness,
@@ -371,9 +526,47 @@ impl Running {
             gpu_ms: self.timer.labels().into_iter().map(|l| (l, self.timer.ms(l).unwrap_or(0.0))).collect(),
             timestamps: self.timer.enabled(),
             default_particles: self.default_particles,
+            redshift: self.sim.cfg.cosmology.as_ref().map(|_| self.sim.redshift()),
+            galaxies: (self.sim.cfg.finder.every_myr > 0.0 && self.sim.galaxies_myr > 0.0).then_some(self.sim.galaxies.len()),
+            auto_myr_s: self.view.suggested_myr_s,
         };
         let raw = self.egui_state.take_egui_input(&self.window);
-        let out = self.egui_ctx.run_ui(raw, |ui| ui::show(ui, &mut self.ui, &hud));
+        let mut actions = view::PanelActions::default();
+        let (tool, brush_px, cursor) = (self.ui.tool, self.ui.tools.brush_px, self.cursor);
+        let press = self.view.press;
+        let (sim, camera, vstate, display_myr) = (&self.sim, &self.camera, &mut self.view, self.display_myr);
+        let out = self.egui_ctx.run_ui(raw, |ui| {
+            ui::show(ui, &mut self.ui, &hud);
+            let ctx = ui.ctx().clone();
+            view::draw_marks(&ctx, camera, viewport, sim, vstate, ctx.pixels_per_point());
+            actions = view::panel(&ctx, vstate, sim, display_myr);
+            crate::system::window(&ctx, vstate, sim, display_myr);
+            // the brush under the cursor, and a drag's arrow
+            let ppp = ctx.pixels_per_point() as f64;
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let at = |p: (f64, f64)| egui::pos2((p.0 / ppp) as f32, (p.1 / ppp) as f32);
+            if matches!(tool, ui::Tool::Kick | ui::Tool::Delete | ui::Tool::Move) {
+                let centre = if tool == ui::Tool::Delete { cursor } else { press.unwrap_or(cursor) };
+                painter.circle_stroke(at(centre), (brush_px / ppp) as f32, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 200, 120, 140)));
+                if let Some(p) = press
+                    && tool != ui::Tool::Delete
+                {
+                    painter.arrow(at(p), at(cursor) - at(p), egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 120)));
+                }
+            }
+        });
+        if actions.clear {
+            self.view.clear(&mut self.sim);
+        }
+        if actions.zoom {
+            let a = self.sim.scale_factor();
+            self.view.zoom_to = match &self.view.selected {
+                Selected::Galaxy { galaxy, .. } => Some(view::fit(3.0 * galaxy.radius_pc.max(1_000.0) / a, viewport)),
+                Selected::Particle(_) => Some(view::fit(1_000.0 / a, viewport)),
+                Selected::None => None,
+            };
+            self.view.follow = true;
+        }
         self.egui_state.handle_platform_output(&self.window, out.platform_output);
         let jobs = self.egui_ctx.tessellate(out.shapes, out.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: [size.0, size.1], pixels_per_point: out.pixels_per_point };
@@ -495,13 +688,40 @@ impl ApplicationHandler for App {
                 let size = r.size();
                 r.camera.zoom_at(1.2f64.powf(lines), r.cursor, (size.0 as f64, size.1 as f64));
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left | MouseButton::Right, .. } => {
-                r.dragging = state == ElementState::Pressed && !consumed;
+            WindowEvent::MouseInput { state, button, .. } if matches!(button, MouseButton::Left | MouseButton::Right) => {
+                let pressed = state == ElementState::Pressed;
+                r.dragging = pressed && !consumed;
+                if button == MouseButton::Left {
+                    if pressed && !consumed {
+                        r.view.press = Some(r.cursor);
+                    } else if !pressed {
+                        // a click: pressed and let go in about the same place
+                        if let Some(p) = r.view.press.take() {
+                            let click = (p.0 - r.cursor.0).hypot(p.1 - r.cursor.1) < 4.0;
+                            if r.ui.tool == ui::Tool::Select {
+                                if click {
+                                    let size = r.size();
+                                    let dm = r.ui.show_dm;
+                                    r.view.click(&mut r.sim, &r.camera, r.cursor, (size.0 as f64, size.1 as f64), dm);
+                                }
+                            } else if let Err(e) = r.use_tool(p, r.cursor) {
+                                r.say(format!("{e:#}"));
+                            }
+                        }
+                    }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = (position.x, position.y);
-                if r.dragging {
+                // with a tool that drags (kick, move), the left button doesn't move the view
+                let tool_drag = matches!(r.ui.tool, ui::Tool::Kick | ui::Tool::Move | ui::Tool::Delete) && r.view.press.is_some();
+                if r.dragging && !tool_drag {
                     r.camera.drag(p.0 - r.cursor.0, p.1 - r.cursor.1);
+                    // moving the view by hand stops following
+                    if r.view.press.is_none_or(|q| (q.0 - p.0).hypot(q.1 - p.1) >= 4.0) {
+                        r.view.follow = false;
+                        r.view.zoom_to = None;
+                    }
                 }
                 r.cursor = p;
             }

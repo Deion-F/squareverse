@@ -313,6 +313,37 @@ $E --list-adapters
 - **Then:** if `evolve` is large, look at `wells_env.wgsl surroundings` (one thread a well, a tree walk of 500 pc)
   and `swallow` (every particle loops over the wells, up to 256).
 
+### L6. The universe, galaxy pair and group (phase 5), for the optimizer
+
+- **What:**
+
+  ```
+  for sc in universe pair group; do $E --scene $sc --headless --steps 20 --particles 100000 | grep -E '"(gpu_ms_per_myr|pm|find|wells|feedback)"' | tr -d '\n '; echo; done
+  for sc in universe pair group; do $E --scene $sc --exit-after-frames 900; $E --scene $sc --fps 30 --exit-after-frames 450; done
+  ```
+
+- **Look for:** fps and the worst frame; `myr_per_s` (the universe needs ~13,400 Myr to reach today: at 30 Myr/s
+  that is 7.5 minutes); the `pm` (mesh FFT), `find` (galaxy finder) and `wells` stages in `gpu_ms_mean`.
+- **Then:**
+  - Set the integrated GPU's default particles per scene (`src/budget.rs`, today one count for every scene): the
+    universe wants as many as hold 30 fps with at least ~15 Myr/s.
+  - If `pm` is large on the Radeon: 256 mesh cells instead of 512 (`SimConfig::universe`, `pm_cells`; the force
+    error is about the same, `tree_pm_matches_the_tree`), or a radix-4 FFT in `shaders/pm.wgsl`.
+  - If one `find` part makes a frame late: more, smaller parts (`FIND_PARTS`), or fewer linking rounds.
+  - **Desktop numbers to compare (RTX 2070 Super, Vulkan, 2026-11-09, 525k incl. 5% spares):** galaxy 60.0 fps,
+    worst 17.3 ms, 2.35 Myr/s; pair 60.0, 17.6, 2.46; group (24 galaxies) 60.0, 17.6, 3.13; universe 60.0, 17.4,
+    37.5 Myr/s.
+
+### L7. Selecting, the star system view and the tools (phases 6 - 8)
+
+- **What:** `$E` (the galaxy), then: click a star (it is followed; the panel shows it), press "Star system", zoom
+  with the wheel, press Esc twice; tool 4 (gas) and click in the disc; tool 6 (delete) and drag; F5 then F9 (quick
+  save and load). Also `$E --scene group`: click a galaxy's ring when zoomed out.
+- **Look for:** whether frames hitch while following (one small pass a frame), how long placing gas and deleting
+  pause the window (they finish the step under way first), and the save / load time at the default count.
+- **Then:** if the tools' pause is long (more than ~0.5 s), apply them at the next step boundary the sim reaches
+  by itself instead of finishing the step at once (`Sim::finish_step` in `brush` / `spawn`).
+
 ## Progress
 
 Phase 0 (started 2026-11-06):
@@ -593,3 +624,87 @@ Phase 4 (2026-11-08; paused once at the user's request, then finished):
     dispersion; do it with the single-star cluster presets (phase 8) or the star system view (phase 7).
   - A galaxy-scale run of a light well sinking to the centre: friction is tested in a static field only.
 - [ ] **Laptop:** L5 in the laptop backlog.
+
+Phases 5 - 8 (2026-11-08 - 09, one pass at the user's request "finish all the remaining phases"; the phases'
+code shares files, so they were built together and committed together):
+
+Phase 5, the universe scale:
+
+- [x] **Mesh gravity (TreePM)**, `shaders/pm.wgsl`: cloud-in-cell deposit with 64-bit integer sums, a 2D FFT in
+  workgroup memory (radix 2, up to 1024 cells a side), the long-range Green's function of this 2D universe with 1/r²
+  gravity, -2πG Σ_k / k · erfc(k r_s) (the 2D transform of erf(r / 2 r_s) / r), CIC deconvolved twice. The tree
+  does the short range (erfc factor, nodes beyond 4.5 r_s left out). The long range is a kick-drift-kick on the
+  longest step: half kicks at each step's end (`Work::Pm`) and start. Test: TreePM against the tree alone for
+  clumps over 6 Mpc, median error 0.3%, 99th percentile 4% (512 cells; the mesh carries ~60% of the pull).
+- [x] **Expansion** (`src/sim/cosmo.rs`): flat ΛCDM, a(t) in closed form (WGSL too); positions comoving (the fixed-point
+  box), velocities peculiar. Each step's a and H (`cosmo_step`, on the GPU from the clock) are copied into the shared
+  parameters: `unit_pc` becomes physical pc per unit, so every pass works in physical units unchanged. Hubble drag
+  on velocities, adiabatic cooling of the gas, softening comoving until a = 0.25.
+- [x] **The early universe** (`--scene universe`, `init::universe`): 20 Mpc from z = 30, dark matter and gas on
+  interleaved lattices, Zel'dovich displacements and velocities from a Gaussian field. The 2D sheet stands for a 1 Mpc
+  slab; its linear growth is scale-dependent (δ'' + 2Hδ' = 2πGΣkδ), so the start is set backwards from the chosen
+  spectrum today, mode by mode (`Cosmology::growth`, tested against ΛCDM where the sheet matches 3D). Gas density
+  from Σ maps 2D collapse to 3D (ρ ∝ Σ^1.5, `gas_rho`); UV background after z = 8 (10^4 K floor for thin gas);
+  photoelectric heating scaled by metallicity; star formation also from gas held up only by the Jeans floor.
+  - **Result (100k, RTX):** the cosmic web forms (filaments by z ~ 4, halos at the nodes by z = 0; density variance
+    3 -> 51); ~290 halos of 32+ particles by z = 0; 4e11 Msun of stars; gas metallicity 0.27 solar.
+  - **Fixed on the way:** gas ran away at z ~ 2 where the Courant step fell under the shortest step (dense gas at its
+    Jeans floor next to AGN-heated gas): a gas particle now takes only the share of its hydro push its step can
+    follow (`hydro_share`).
+- [x] **Galaxy finder** (`shaders/finder.wgsl`): friends of friends on the GPU (12 linking rounds with hooking and
+  pointer jumping; whole nodes within the linking length taken at once), group sums with 64-bit integers (exact,
+  including negative values: `split64`). Universe: dark matter linked at 0.2 of its mean spacing (halos); placed
+  galaxies: stars, gas and wells at 300 pc, every 200 Myr (universe: every 100). 8 rounds of 16 slices each, spread over
+  frames (~0.26 s of GPU in all at 500k in the galaxy).
+  Test: three clumps found with their exact members, masses and centres.
+- [x] **Gas merging and splitting** (`shaders/resolution.wgsl`): thin hot light gas merges in pairs (mass, momentum,
+  energy kept), heavy gas splits into free slots.
+- [x] **Placed galaxies:** `--scene pair` (two Milky Way-like galaxies, parabolic orbit, pericentre 25 kpc) and
+  `--scene group` (1 large, 3 medium, 20 dwarfs within 600 kpc, falling together), each galaxy built in balance on
+  its own and placed (`init::place`).
+  - **Pair merger (100k):** first pericentre at ~400 Myr, apocentre 68 kpc at ~900 Myr, second passage at 1.3 Gyr,
+    central wells merged at ~1.55 Gyr.
+- [x] **Acceptance (RTX 2070 Super, window, 525k):** web forms; pair merges in ~1.5 Gyr; the group's 24 galaxies at
+  60.0 fps (worst frame 17.6 ms).
+- [x] **Window speed fixes:** the finder leaves out the dark matter's part of the tree and starts from a cautious
+  cost estimate (an optimistic one let its first run overload frames and cut the galaxy's speed by a third); the
+  wells' surroundings walk is now one workgroup a well (it was one thread: 13 - 19 ms
+  at 500k, now ~3); `Work::Evolve` is split in three items; old populations give back their mass every 8th step.
+- **Known:**
+  - Super wells overgrow in the universe (~5% of their halo by z = 0): the AGN's heat goes into one gas particle and
+    is mostly capped away, so it doesn't regulate them.
+  - The universe's lattice still shows in the voids.
+- [ ] **Laptop:** L6.
+
+Phase 6, joining the views:
+
+- [x] Click a galaxy's ring (drawn round each galaxy the finder found while it is small on screen) or a particle
+  (`shaders/probe.wgsl`: the nearest within 10 px, ties to the lowest id): it is followed (the camera glides to it)
+  and zoomed to, with a panel about it. Dragging stops following; Esc clears.
+- [x] Speed by zoom (on by default, A): ~10 Myr/s on a galaxy, ~0.5 on its centre, up to 2,000 on the universe.
+- [x] Level of detail: close up, brighter stars are bigger squares (same light), white dwarfs, neutron stars and
+  stellar black holes fade in.
+- [x] **Acceptance:** `zooming_and_following_change_nothing`: the galaxy run whole and as the window would (budgets
+  and speeds varying, a particle picked and followed, finder results read back each frame) end bit-identical.
+
+Phase 7, the star system view:
+
+- [x] `src/system.rs`: planets from the star's id, mass, elements at birth and companion: rocky planets from Mg/Si,
+  gas giants with the Fischer & Valenti metallicity law (hot Jupiters 10%), ice giants from C/N/O; the companion
+  clears unstable orbits; giants swallow inner planets, white dwarfs keep widened outer ones, supernovae unbind them.
+  The window ("Star system" in the panel) draws the Kepler orbits and the companion moving at years per second.
+- [x] Tests: the same star gives the same system; metal-rich stars have 3x+ the giants; primordial stars none;
+  white dwarfs keep only widened outer planets.
+
+Phase 8, tools, presets, release:
+
+- [x] **Tools** (menu or keys 1 - 7): select, place a galaxy (built in balance), a super well, pour gas, kick, delete
+  and move under a brush. They act between steps (`Sim::brush`, `Sim::spawn`); new particles go into spare slots
+  (5% of the particles in the window: massless, at the centre, in the longest step, no forces).
+- [x] **Saves and presets** (`src/save.rs`): the whole universe (every particle's records, the config and the clock)
+  in one lz4-packed file; F5 / F9 quick save and load; "Save as preset" into `presets/`, listed in the menu. Test:
+  a saved universe loads bit-identical and runs on.
+- [x] **Release builds:** `squareverse_v3/ci/v3-release.yml` (to be moved into `.github/workflows/`) builds Windows, Linux and macOS (arm64, x86_64) packages
+  on a `v3.*` tag (or by hand); untested here (it runs on GitHub).
+- [ ] `/optimize` and the laptop backlog (L1 - L7), when the user asks.
+

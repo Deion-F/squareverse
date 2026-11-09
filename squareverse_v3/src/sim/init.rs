@@ -177,7 +177,7 @@ pub fn build(cfg: &SimConfig) -> Initial {
 }
 
 /// A galaxy (`Scene::Galaxy`): masses Msun, lengths pc, ages Myr. The defaults are roughly the Milky Way's.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct GalaxyConfig {
     /// Exponential disc: mass, scale length, cut at this many scale lengths.
     pub disc_mass: f64,
@@ -766,4 +766,304 @@ pub fn galaxy_stats(cfg: &SimConfig, s: &super::State, now_myr: f64) -> GalaxySt
         new_star_mass: new_mass,
         new_star_metallicity: if new_mass > 0.0 { nz / new_mass } else { 0.0 },
     }
+}
+
+/// The early universe (`Scene::Universe`): dark matter and gas on two interleaved lattices over the whole periodic
+/// box, moved off them by the Zel'dovich approximation (displacement Ψ, velocity a H f Ψ) from a Gaussian random
+/// field whose spectrum today is `cosmo::Cosmology::delta2_today`, run back to the start through the sheet's linear
+/// growth (scale-dependent in 2D, `Cosmology::growth`). Positions are comoving (the box), velocities peculiar
+/// (physical pc / Myr). The gas starts at 100 K, primordial.
+pub fn universe(cfg: &SimConfig) -> Initial {
+    use crate::fft::{C64, fft2, wavenumber};
+    let cm = cfg.cosmology.clone().unwrap_or_default();
+    let l = cfg.box_pc;
+    let side = ((cfg.particles.max(8) as f64 / 2.0).sqrt().floor() as usize).max(2);
+    let m = side.next_power_of_two().max(16);
+    let a0 = cm.a_start();
+    let h0 = cm.hubble(a0);
+    let mut rng = Rng::new(cfg.seed);
+
+    // white noise, its transform shaped by the spectrum at the start
+    let mut noise: Vec<C64> = (0..m * m).map(|_| C64::new(rng.normal(), 0.0)).collect();
+    fft2(&mut noise, m, false);
+    let cell = l / m as f64;
+    // growth on a log table of k
+    let (k_lo, k_hi) = (std::f64::consts::TAU / l * 0.9, std::f64::consts::PI * m as f64 / l * 1.5);
+    let table: Vec<(f64, f64, f64)> = (0..48)
+        .map(|i| {
+            let k = k_lo * (k_hi / k_lo).powf(i as f64 / 47.0);
+            let (d, f) = cm.growth(k, a0);
+            (k, d, f)
+        })
+        .collect();
+    let growth_at = |k: f64| -> (f64, f64) {
+        let x = ((k / k_lo).ln() / (k_hi / k_lo).ln() * 47.0).clamp(0.0, 46.999);
+        let (i, t) = (x.floor() as usize, x.fract());
+        let (a, b) = (table[i], table[i + 1]);
+        ((a.1.ln() * (1.0 - t) + b.1.ln() * t).exp(), a.2 * (1.0 - t) + b.2 * t)
+    };
+    let mut disp = vec![C64::default(); m * m];
+    let mut vel = vec![C64::default(); m * m];
+    for iy in 0..m {
+        for ix in 0..m {
+            if ix == m / 2 || iy == m / 2 || (ix == 0 && iy == 0) {
+                continue; // Nyquist and the mean
+            }
+            let (kx, ky) = (wavenumber(ix, m, l), wavenumber(iy, m, l));
+            let k2 = kx * kx + ky * ky;
+            let k = k2.sqrt();
+            let p = std::f64::consts::TAU * cm.delta2_today(k) / k2; // P(k) today
+            let (d, f) = growth_at(k);
+            let delta = noise[iy * m + ix].scale((p / (cell * cell)).sqrt() * d);
+            // Ψ_k = i k δ_k / k²; packed as Ψx + i Ψy (both real in space)
+            let i_delta = C64::new(-delta.im, delta.re);
+            let (px, py) = (i_delta.scale(kx / k2), i_delta.scale(ky / k2));
+            let packed = C64::new(px.re - py.im, px.im + py.re);
+            disp[iy * m + ix] = packed;
+            vel[iy * m + ix] = packed.scale(a0 * h0 * f);
+        }
+    }
+    fft2(&mut disp, m, true);
+    fft2(&mut vel, m, true);
+    // bilinear read of a periodic field at (x, y) in grid units
+    let sample = |f: &[C64], x: f64, y: f64| -> C64 {
+        let (x0, y0) = (x.floor(), y.floor());
+        let (tx, ty) = (x - x0, y - y0);
+        let at = |i: f64, j: f64| f[(j.rem_euclid(m as f64) as usize) * m + i.rem_euclid(m as f64) as usize];
+        at(x0, y0)
+            .scale((1.0 - tx) * (1.0 - ty))
+            .add(at(x0 + 1.0, y0).scale(tx * (1.0 - ty)))
+            .add(at(x0, y0 + 1.0).scale((1.0 - tx) * ty))
+            .add(at(x0 + 1.0, y0 + 1.0).scale(tx * ty))
+    };
+
+    let n = side * side;
+    let total = cm.sigma_mean() * l * l;
+    let m_dm = total * (1.0 - cm.baryon_share) / n as f64;
+    let m_gas = total * cm.baryon_share / n as f64;
+    let spacing = l / side as f64;
+    let h_gas = 2.8 * spacing * a0;
+    let mut out = Initial::with_capacity(2 * n);
+    out.single_stars = false;
+    for (offset, gas) in [(0.0, false), (0.5, true)] {
+        for j in 0..side {
+            for i in 0..side {
+                let (x, y) = ((i as f64 + 0.25 + offset) * spacing, (j as f64 + 0.25 + offset) * spacing);
+                let (gx, gy) = (x / cell, y / cell);
+                let d = sample(&disp, gx, gy);
+                let v = sample(&vel, gx, gy);
+                let p = Fixed2::from_pc(x + d.re, y + d.im, l);
+                if gas {
+                    out.push_gas(p, [v.re, v.im], m_gas, 100.0, h_gas, PRIMORDIAL);
+                } else {
+                    out.push_kind(p, [v.re, v.im], m_dm, (5000.0, 0.0), Kind::DarkMatter, [0.0, 0.0, m_dm as f32, f32::from_bits(PART_HALO as u32)]);
+                    out.set_chem(PRIMORDIAL);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What the universe looks like (headless reports): the scale factor, particles by kind, where the gas is and how
+/// hot, the stars formed, the super wells, and how clumped the matter is.
+#[derive(Clone, Debug, Serialize)]
+pub struct UniverseStats {
+    pub time_myr: f64,
+    pub redshift: f64,
+    pub kinds: [u32; 8],
+    /// Gas mass by temperature: under 2·10^4 K, 2·10^4 - 10^5, above 10^5 (Msun), and its metallicity (solar = 1).
+    pub gas_cold_warm_hot: [f64; 3],
+    pub gas_metallicity: f64,
+    /// Mass in stars (all star-like kinds), and the stars' metallicity.
+    pub star_mass: f64,
+    pub star_metallicity: f64,
+    /// Super wells: how many, and the heaviest (Msun).
+    pub wells: u32,
+    pub heaviest_well: f64,
+    /// Clumping of the matter on a 256² grid over the box: the variance of the density contrast, and the share of
+    /// the mass in cells above 10x and 100x the mean.
+    pub density_variance: f64,
+    pub mass_above_10x: f64,
+    pub mass_above_100x: f64,
+    /// The gas's hydrogen density (cm⁻³, as the shaders read it from Σ) at the 50th, 99th and 99.9th percentile by
+    /// mass, and the temperature (K) of the densest 1%.
+    pub gas_density_cm3: [f64; 3],
+    pub dense_gas_temperature_k: f64,
+    /// The fastest particle (pc / Myr) and its kind, and how many have a speed or position that isn't finite.
+    pub fastest: (f64, u32),
+    pub not_finite: u32,
+}
+
+pub fn universe_stats(cfg: &SimConfig, s: &super::State, time_myr: f64, redshift: f64) -> UniverseStats {
+    let mut kinds = [0u32; 8];
+    let (mut gas, mut gz, mut gm) = ([0.0f64; 3], 0.0, 0.0);
+    let (mut sm, mut sz) = (0.0, 0.0);
+    let (mut wells, mut heaviest) = (0, 0.0f64);
+    let g = 256usize;
+    let mut grid = vec![0.0f64; g * g];
+    for i in 0..s.pos.len() {
+        let k = s.kind[i] as usize;
+        kinds[k.min(7)] += 1;
+        let m = s.mass[i] as f64;
+        if k == Kind::Gone as usize || m <= 0.0 {
+            continue;
+        }
+        let (x, y) = s.pos[i].to_pc(cfg.box_pc);
+        let cx = ((x / cfg.box_pc * g as f64) as usize).min(g - 1);
+        let cy = ((y / cfg.box_pc * g as f64) as usize).min(g - 1);
+        grid[cy * g + cx] += m;
+        let z = (s.chem[i][1] + s.chem[i][2] + s.chem[i][3]) as f64 / SOLAR_Z;
+        match k {
+            k if k == Kind::Gas as usize => {
+                let t = s.star[i][0] as f64;
+                gas[if t < 2e4 { 0 } else if t < 1e5 { 1 } else { 2 }] += m;
+                gz += m * z;
+                gm += m;
+            }
+            k if k == Kind::Well as usize => {
+                wells += 1;
+                heaviest = heaviest.max(m);
+            }
+            k if k == Kind::DarkMatter as usize => {}
+            _ => {
+                sm += m;
+                sz += m * z;
+            }
+        }
+    }
+    let total: f64 = grid.iter().sum();
+    let mean = total / (g * g) as f64;
+    let var = grid.iter().map(|&m| (m / mean - 1.0).powi(2)).sum::<f64>() / (g * g) as f64;
+    let above = |f: f64| grid.iter().filter(|&&m| m > f * mean).sum::<f64>() / total;
+    // the gas's density as common.wgsl gas_rho reads it
+    let cm = cfg.cosmology.clone().unwrap_or_default();
+    let sigma_gas = cm.sigma_mean() * cm.baryon_share;
+    let rho_of = |sig: f64| {
+        let z0 = if cfg.cosmology.is_some() { (0.5 * cm.sheet_pc * (sigma_gas / sig.max(1e-12)).sqrt()).max(cfg.gas.thickness_pc) } else { cfg.gas.thickness_pc };
+        sig / (2.0 * z0) * 40.7 * 0.71
+    };
+    let mut dens: Vec<(f64, f64, f64)> = (0..s.pos.len())
+        .filter(|&i| s.kind[i] == Kind::Gas as u32)
+        .map(|i| (rho_of(s.gas[i][1] as f64), s.mass[i] as f64, s.star[i][0] as f64))
+        .collect();
+    dens.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let gtot: f64 = dens.iter().map(|d| d.1).sum();
+    let pct = |p: f64| {
+        let mut acc = 0.0;
+        for d in &dens {
+            acc += d.1;
+            if acc >= p * gtot {
+                return d.0;
+            }
+        }
+        dens.last().map_or(0.0, |d| d.0)
+    };
+    let top = &dens[dens.len() - (dens.len() / 100).max(1).min(dens.len())..];
+    let dense_t = top.iter().map(|d| d.1 * d.2).sum::<f64>() / top.iter().map(|d| d.1).sum::<f64>().max(1e-30);
+    let mut fastest = (0.0f64, 0u32);
+    let mut not_finite = 0;
+    for i in 0..s.vel.len() {
+        let v = (s.vel[i][0] as f64).hypot(s.vel[i][1] as f64);
+        if !v.is_finite() {
+            not_finite += 1;
+        } else if v > fastest.0 && s.kind[i] != Kind::Gone as u32 {
+            fastest = (v, s.kind[i]);
+        }
+    }
+    UniverseStats {
+        fastest,
+        not_finite,
+        gas_density_cm3: if dens.is_empty() { [0.0; 3] } else { [pct(0.5), pct(0.99), pct(0.999)] },
+        dense_gas_temperature_k: dense_t,
+        time_myr,
+        redshift,
+        kinds,
+        gas_cold_warm_hot: gas,
+        gas_metallicity: if gm > 0.0 { gz / gm } else { 0.0 },
+        star_mass: sm,
+        star_metallicity: if sm > 0.0 { sz / sm } else { 0.0 },
+        wells,
+        heaviest_well: heaviest,
+        density_variance: var,
+        mass_above_10x: above(10.0),
+        mass_above_100x: above(100.0),
+    }
+}
+
+/// A galaxy scaled from the default (Milky Way-like) one: masses x `f`, sizes x sqrt(f) (the surface densities stay,
+/// so the discs stay as stable).
+pub fn scaled_galaxy(f: f64) -> GalaxyConfig {
+    let g = GalaxyConfig::default();
+    let r = f.sqrt();
+    GalaxyConfig {
+        disc_mass: g.disc_mass * f,
+        disc_scale_pc: g.disc_scale_pc * r,
+        bulge_mass: g.bulge_mass * f,
+        bulge_scale_pc: g.bulge_scale_pc * r,
+        halo_mass: g.halo_mass * f,
+        halo_core_pc: g.halo_core_pc * r,
+        halo_radius_pc: g.halo_radius_pc * r,
+        well_mass: g.well_mass * f,
+        gas_mass: g.gas_mass * f,
+        gas_scale_pc: g.gas_scale_pc * r,
+        ..g
+    }
+}
+
+/// Where a copy of a galaxy goes: which template, its centre (pc from the box's origin), its bulk velocity
+/// (pc / Myr), turned by `angle` (radians) and, if `mirror`, spinning the other way.
+#[derive(Clone, Copy, Debug)]
+pub struct Placement {
+    pub template: usize,
+    pub center_pc: (f64, f64),
+    pub velocity: [f64; 2],
+    pub angle: f64,
+    pub mirror: bool,
+}
+
+/// Copies of galaxies (each built and set in equilibrium alone, centred on `template_center`) placed in one box.
+pub fn place(templates: &[Initial], template_center: Fixed2, box_pc: f64, placements: &[Placement]) -> Initial {
+    let total: usize = placements.iter().map(|p| templates[p.template].len()).sum();
+    let mut out = Initial::with_capacity(total);
+    out.single_stars = templates.iter().all(|t| t.single_stars);
+    for p in placements {
+        let t = &templates[p.template];
+        let center = Fixed2::from_pc(p.center_pc.0, p.center_pc.1, box_pc);
+        let (c, s) = (p.angle.cos(), p.angle.sin());
+        let turn = |x: f64, y: f64| {
+            let y = if p.mirror { -y } else { y };
+            (c * x - s * y, s * x + c * y)
+        };
+        for i in 0..t.len() {
+            let (dx, dy) = Fixed2::from_words(t.pos[i]).delta_pc(template_center, box_pc);
+            let (x, y) = turn(dx, dy);
+            let k = t.kin[i];
+            let (vx, vy) = turn(k[0] as f64, k[1] as f64);
+            let kind = t.body[i][1] >> KIND_SHIFT;
+            let mass = f32::from_bits(t.body[i][0]) as f64;
+            let pos = center.offset_pc(x, y, box_pc);
+            let v = [vx + p.velocity[0], vy + p.velocity[1]];
+            if kind == Kind::Well as u32 {
+                out.push_well(pos, v, mass);
+                let last = out.len() - 1;
+                out.about[last][..3].copy_from_slice(&t.about[i][..3]);
+            } else {
+                let kd = match kind {
+                    0 => Kind::Star,
+                    1 => Kind::DarkMatter,
+                    3 => Kind::WhiteDwarf,
+                    4 => Kind::NeutronStar,
+                    5 => Kind::BlackHole,
+                    6 => Kind::Gone,
+                    _ => Kind::Gas,
+                };
+                out.push_kind(pos, v, mass, (k[2] as f64, k[3] as f64), kd, t.about[i]);
+                let last = out.len() - 1;
+                out.gas[last] = t.gas[i];
+                out.chem[last] = t.chem[i];
+            }
+        }
+    }
+    out
 }

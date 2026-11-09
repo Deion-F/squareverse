@@ -39,7 +39,8 @@ fn run(g: &Gpu, sim: &mut Sim, steps: u32) {
     let mut timer = GpuTimer::new(&g.device, &g.queue, false);
     let mut left = steps;
     while left > 0 {
-        let k = left.min(5);
+        // a submit at a time stays short (Mesa's D3D12 under WSL gave up on a 2.3 s one: 5 steps of a galaxy pair)
+        let k = left.min(if sim.n > 50_000 { 1 } else { 5 });
         let mut enc = g.device.create_command_encoder(&Default::default());
         sim.encode_steps(&mut enc, k, &mut timer);
         g.queue.submit([enc.finish()]);
@@ -272,6 +273,7 @@ fn hash_sees_one_changed_word() {
         about: vec![[0.0; 4]],
         gas: vec![[0.0; 4]],
         chem: vec![[0.0; 4]],
+        pm: vec![[0.0; 4]],
     };
     assert_ne!(state_hash(&s(1)), state_hash(&s(2)));
 }
@@ -488,7 +490,10 @@ fn a_well_swallows_what_comes_close_and_keeps_the_momentum() {
     // the first step's evolution pass does the swallowing
     let mut timer = GpuTimer::new(&g.device, &g.queue, false);
     let mut enc = g.device.create_command_encoder(&Default::default());
-    sim.advance(&mut enc, &mut timer, Limit { budget_ms: 1e-9, new_sub_steps: 1 });
+    // (its first two items: the stars, then the wells)
+    for _ in 0..2 {
+        sim.advance(&mut enc, &mut timer, Limit { budget_ms: 1e-9, new_sub_steps: 1 });
+    }
     g.queue.submit([enc.finish()]);
     g.wait().unwrap();
     let s = sim.read_state(&g).unwrap();
@@ -769,4 +774,326 @@ fn white_dwarfs_in_close_binaries_go_off_as_type_ia() {
     assert!(n_tight > 20, "{n_tight}");
     assert_eq!(wrong, 0);
     assert!(s.kind.iter().zip(&expect).all(|(&k, &t)| t || k == Kind::WhiteDwarf as u32 || k == Kind::Star as u32));
+}
+
+/// Mesh gravity (TreePM): the tree's short-range part plus the mesh's long-range part give the same pull as the
+/// tree alone, for clumps spread over several Mpc in the middle of the 20 Mpc box (far from the box's edge the
+/// periodic images hardly matter).
+#[test]
+fn tree_pm_matches_the_tree() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let base = SimConfig { scene: squareverse::sim::Scene::Disc, softening_pc: 1_000.0, dm_softening_pc: 1_000.0, theta: 0.3, levels: 1, ..SimConfig::default() };
+    let mut rng = squareverse::rng::Rng::new(5);
+    let mut init = Initial::with_capacity(8_000);
+    let centre = (base.box_pc / 2.0, base.box_pc / 2.0);
+    // 8 clumps of 600 and 3,200 spread evenly over 6 Mpc
+    for k in 0..8 {
+        let (cx, cy) = (centre.0 + 2.5e6 * (rng.f64() - 0.5) * 2.0, centre.1 + 2.5e6 * (rng.f64() - 0.5) * 2.0);
+        for _ in 0..600 {
+            let (r, a) = (150_000.0 * rng.f64().sqrt() * (1.0 + k as f64 * 0.1), rng.f64() * std::f64::consts::TAU);
+            init.push_kind(Fixed2::from_pc(cx + r * a.cos(), cy + r * a.sin(), base.box_pc), [0.0; 2], 1e9, (5000.0, 0.0), squareverse::sim::init::Kind::DarkMatter, [0.0; 4]);
+        }
+    }
+    for _ in 0..3_200 {
+        let (x, y) = (centre.0 + 3e6 * (rng.f64() - 0.5) * 2.0, centre.1 + 3e6 * (rng.f64() - 0.5) * 2.0);
+        init.push_kind(Fixed2::from_pc(x, y, base.box_pc), [0.0; 2], 1e9, (5000.0, 0.0), squareverse::sim::init::Kind::DarkMatter, [0.0; 4]);
+    }
+    let tree = Sim::from_initial(&g, base.clone(), &init).unwrap();
+    g.wait().unwrap();
+    let st = tree.read_state(&g).unwrap();
+    for cells in [256u32, 512] {
+        let pm = Sim::from_initial(&g, SimConfig { pm_cells: cells, ..base.clone() }, &init).unwrap();
+        g.wait().unwrap();
+        let sp = pm.read_state(&g).unwrap();
+        let mut errs: Vec<f64> = (0..init.len())
+            .map(|i| {
+                let (a, b) = (st.acc[i], sp.acc[i]);
+                let p = sp.pm[i];
+                let (ax, ay) = (b[0] as f64 + p[0] as f64, b[1] as f64 + p[1] as f64);
+                let (rx, ry) = (a[0] as f64, a[1] as f64);
+                ((ax - rx).hypot(ay - ry)) / rx.hypot(ry).max(1e-30)
+            })
+            .collect();
+        let (med, p99) = (percentile(&mut errs, 0.5), percentile(&mut errs, 0.99));
+        let mesh_share = (0..init.len()).map(|i| (sp.pm[i][0] as f64).hypot(sp.pm[i][1] as f64) / (st.acc[i][0] as f64).hypot(st.acc[i][1] as f64)).sum::<f64>() / init.len() as f64;
+        eprintln!("TreePM {cells}² against the tree: median error {med:.2e}, 99th percentile {p99:.2e}; the mesh's share of the pull {mesh_share:.2}");
+        assert!(med < 0.01 && p99 < 0.05, "{med} {p99}");
+        assert!(mesh_share > 0.3, "the mesh should carry much of the pull ({mesh_share})");
+    }
+}
+
+/// Diagnostic, on demand: `cargo test --release --test gpu -- --ignored --nocapture universe_blowup`. Steps the
+/// universe one step at a time and prints the first particles to go non-finite.
+#[test]
+#[ignore]
+fn universe_blowup() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { particles: 100_000, ..SimConfig::universe() };
+    let mut sim = Sim::new(&g, cfg).unwrap();
+    let from: u32 = std::env::var("SV_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(125);
+    run(&g, &mut sim, from);
+    if std::env::var_os("SV_ITEMS").is_some() {
+        // item by item
+        let mut timer = GpuTimer::new(&g.device, &g.queue, false);
+        let mut prev = sim.read_state(&g).unwrap();
+        for item in 0..4000 {
+            let mut enc = g.device.create_command_encoder(&Default::default());
+            sim.advance(&mut enc, &mut timer, Limit { budget_ms: 0.0, new_sub_steps: 1 });
+            g.queue.submit([enc.finish()]);
+            g.wait().unwrap();
+            let s = sim.read_state(&g).unwrap();
+            let gh = s.gas.clone();
+            let lim: f32 = std::env::var("SV_ULIM").ok().and_then(|v| v.parse().ok()).unwrap_or(f32::INFINITY);
+            let bad: Vec<usize> = (0..s.vel.len()).filter(|&i| !(s.vel[i][0].is_finite() && gh[i][0].is_finite() && gh[i][1].is_finite() && gh[i][2].is_finite() && s.acc[i][0].is_finite()) || gh[i][0] > lim).collect();
+            if !bad.is_empty() {
+                // where the wells are
+                for w in (0..s.kind.len()).filter(|&j| s.kind[j] == 2) {
+                    let (dx, dy) = s.pos[w].delta_pc(s.pos[bad[0]], sim.cfg.box_pc);
+                    eprintln!("  well {w} mass {:e} at {:.0} pc from the first", s.mass[w], dx.hypot(dy));
+                }
+            }
+            if !bad.is_empty() {
+                eprintln!("item {item} (sub-step {}, step {}): {} bad", sim.time_myr(), sim.steps, bad.len());
+                for &i in bad.iter().take(6) {
+                    eprintln!("  {i}: kind {} mass {} vel {:?} gas {:?} acc {:?}", s.kind[i], s.mass[i], s.vel[i], s.gas[i], s.acc[i]);
+                    eprintln!("     before: kind {} mass {} vel {:?} gas {:?} acc {:?} star {:?} about {:?}", prev.kind[i], prev.mass[i], prev.vel[i], prev.gas[i], prev.acc[i], prev.star[i], prev.about[i]);
+                }
+                return;
+            }
+            prev = s;
+        }
+        return;
+    }
+    let mut prev = sim.read_state(&g).unwrap();
+    for step in from..from + 40 {
+        run(&g, &mut sim, 1);
+        let s = sim.read_state(&g).unwrap();
+        let bad: Vec<usize> = (0..s.vel.len()).filter(|&i| !(s.vel[i][0].is_finite() && s.vel[i][1].is_finite() && s.gas[i][0].is_finite())).collect();
+        if !bad.is_empty() {
+            eprintln!("step {step}: {} bad", bad.len());
+            for &i in bad.iter().take(5) {
+                eprintln!("  {i}: kind {} mass {} vel {:?} gas {:?} acc {:?} pm {:?}", s.kind[i], s.mass[i], s.vel[i], s.gas[i], s.acc[i], s.pm[i]);
+                eprintln!("     before: kind {} mass {} vel {:?} gas {:?} acc {:?} star {:?}", prev.kind[i], prev.mass[i], prev.vel[i], prev.gas[i], prev.acc[i], prev.star[i]);
+            }
+            return;
+        }
+        prev = s;
+    }
+    eprintln!("no blow-up");
+}
+
+/// Diagnostic, on demand: `cargo test --release --test gpu -- --ignored --nocapture pair_merger_diag`. The pair
+/// scene's two central wells' separation and the galaxies found, every 100 Myr.
+#[test]
+#[ignore]
+fn pair_merger_diag() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let particles = std::env::var("SV_N").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+    let scene = if std::env::var_os("SV_GROUP").is_some() { squareverse::sim::Scene::Group } else { squareverse::sim::Scene::Pair };
+    let mut cfg = SimConfig { particles, ..SimConfig::for_scene(scene) };
+    if std::env::var_os("SV_NORES").is_some() {
+        cfg.gas.merge_below = 0.0;
+        cfg.gas.split_above = 0.0;
+    }
+    if std::env::var_os("SV_NOFIND").is_some() {
+        cfg.finder.every_myr = 0.0;
+    }
+    let mut sim = Sim::new(&g, cfg).unwrap();
+    for _ in 0..30 {
+        let s = sim.read_state(&g).unwrap();
+        let wells: Vec<usize> = (0..s.kind.len()).filter(|&i| s.kind[i] == 2 && s.mass[i] > 1e5).collect();
+        let sep = if wells.len() >= 2 {
+            let (dx, dy) = s.pos[wells[0]].delta_pc(s.pos[wells[1]], sim.cfg.box_pc);
+            dx.hypot(dy)
+        } else {
+            0.0
+        };
+        let gals = sim.find_galaxies(&g).unwrap().to_vec();
+        let big = gals.iter().filter(|x| x.stars > 1e8).count();
+        eprintln!("{:6.0} Myr: {} wells over 1e5 Msun, first two {:.1} kpc apart; {} galaxies with over 1e8 Msun of stars (of {})", sim.time_myr(), wells.len(), sep / 1000.0, big, gals.len());
+        run(&g, &mut sim, 50);
+    }
+}
+
+/// The galaxy finder: three clumps of stars (300, 500 and 800, each within 1 kpc), far apart, and lone stars in
+/// between, are found as three groups with the right members, masses and centres.
+#[test]
+fn the_finder_finds_the_clumps() {
+    use squareverse::sim::init::{Initial, Kind};
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { central_mass: 0.0, ..SimConfig::test_disc() };
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut rng = squareverse::rng::Rng::new(3);
+    let mut init = Initial::with_capacity(2_000);
+    let clumps = [(300usize, -40_000.0f64, 0.0f64), (500, 30_000.0, 20_000.0), (800, 0.0, -50_000.0)];
+    for &(k, x, y) in &clumps {
+        for _ in 0..k {
+            let (r, a) = (1_000.0 * rng.f64().sqrt(), rng.f64() * std::f64::consts::TAU);
+            init.push_kind(c.offset_pc(x + r * a.cos(), y + r * a.sin(), cfg.box_pc), [5.0, 0.0], 2.0, (5000.0, 1.0), Kind::Star, [0.0; 4]);
+        }
+    }
+    for i in 0..20 {
+        init.push_kind(c.offset_pc(-100_000.0 + 10_000.0 * i as f64, 80_000.0, cfg.box_pc), [0.0; 2], 2.0, (5000.0, 1.0), Kind::Star, [0.0; 4]);
+    }
+    let mut sim = Sim::from_initial(&g, cfg.clone(), &init).unwrap();
+    let found = sim.find_galaxies(&g).unwrap().to_vec();
+    eprintln!("{found:?}");
+    assert_eq!(found.len(), 3);
+    for (gx, &(k, x, y)) in found.iter().zip(clumps.iter().rev()) {
+        assert_eq!(gx.members as usize, k);
+        assert!((gx.stars - 2.0 * k as f64).abs() < 0.01 && (gx.mass - 2.0 * k as f64).abs() < 0.01);
+        let (dx, dy) = Fixed2::from_pc(gx.center_pc.0, gx.center_pc.1, cfg.box_pc).delta_pc(c.offset_pc(x, y, cfg.box_pc), cfg.box_pc);
+        // the clump's own centre of mass (its random sampling)
+        let own = (0..init.len()).filter(|&i| {
+            let (ex, ey) = Fixed2::from_words(init.pos[i]).delta_pc(c.offset_pc(x, y, cfg.box_pc), cfg.box_pc);
+            ex.hypot(ey) < 2_000.0
+        });
+        let ids: Vec<usize> = own.collect();
+        let (sx, sy) = ids.iter().fold((0.0, 0.0), |(a, b), &i| {
+            let (ex, ey) = Fixed2::from_words(init.pos[i]).delta_pc(c.offset_pc(x, y, cfg.box_pc), cfg.box_pc);
+            (a + ex, b + ey)
+        });
+        let (ox, oy) = (sx / ids.len() as f64, sy / ids.len() as f64);
+        eprintln!("centre off by ({dx:.1}, {dy:.1}) pc; the clump's own centre of mass ({ox:.1}, {oy:.1})");
+        assert!((dx - ox).hypot(dy - oy) < 5.0, "centre off by {:.0} pc", (dx - ox).hypot(dy - oy));
+        assert!((gx.velocity[0] - 5.0).abs() < 1e-3);
+    }
+}
+
+/// Phase 6: looking changes nothing. The galaxy (gas, stars, wells, the finder) run whole, and as the window would
+/// with the speed the zoom suggests changing all the time (new sub-steps a frame and the GPU budget varying), a
+/// particle picked and followed and the finder's results read back each frame: the same state, bit for bit.
+#[test]
+fn zooming_and_following_change_nothing() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { particles: 20_000, seed: 4, finder: squareverse::sim::FinderConfig { every_myr: 4.0, ..Default::default() }, ..SimConfig::default() };
+    let mut whole = Sim::new(&g, cfg.clone()).unwrap();
+    run(&g, &mut whole, 4);
+    let mut looked = Sim::new(&g, cfg.clone()).unwrap();
+    let mut timer = GpuTimer::new(&g.device, &g.queue, false);
+    let mut rng = squareverse::rng::Rng::new(11);
+    let centre = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut frames = 0;
+    let mut followed = 0;
+    while looked.steps < 4 {
+        // a click now and then somewhere in the disc, and following whatever it picked
+        if frames % 17 == 0 {
+            looked.pick(centre.offset_pc(8_000.0 * (rng.f64() - 0.5), 8_000.0 * (rng.f64() - 0.5), cfg.box_pc), 300.0, frames % 2 == 0);
+        }
+        if let Some(Some(id)) = looked.picked.take() {
+            looked.track_id = Some(id);
+        }
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        let limit = Limit { budget_ms: rng.f64() * 0.05, new_sub_steps: (rng.f64() * 3.0) as u32 };
+        looked.advance(&mut enc, &mut timer, limit);
+        looked.encode_probe(&g.queue, &mut enc);
+        g.queue.submit([enc.finish()]);
+        looked.after_submit();
+        g.wait().unwrap();
+        looked.collect(None);
+        followed += looked.tracked.is_some() as u32;
+        frames += 1;
+    }
+    let (a, b) = (whole.read_state(&g).unwrap(), looked.read_state(&g).unwrap());
+    eprintln!("4 steps whole and over {frames} frames, a particle followed in {followed}, {} galaxies seen", looked.galaxies.len());
+    assert!(followed > 0 && !looked.galaxies.is_empty());
+    let mass = |s: &State| s.mass.iter().map(|&m| m as f64).sum::<f64>();
+    assert_eq!(mass(&a), mass(&b));
+    assert_eq!(Sim::momentum(&a), Sim::momentum(&b));
+    assert_eq!(state_hash(&a), state_hash(&b));
+}
+
+/// Phase 8: a universe saved and loaded is the same universe (every particle's position, velocity, mass, kind and
+/// records), its clock carries on, and it runs on.
+#[test]
+fn a_saved_universe_loads_the_same() {
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { particles: 20_000, seed: 6, spare_share: 0.05, ..SimConfig::default() };
+    let mut sim = Sim::new(&g, cfg).unwrap();
+    run(&g, &mut sim, 3);
+    let dir = std::env::temp_dir().join(format!("sv3-save-{}", std::process::id()));
+    let path = dir.join("galaxy.sqv");
+    squareverse::save::save(&g, &sim, &path, "test").unwrap();
+    let size = std::fs::metadata(&path).unwrap().len();
+    let mut back = squareverse::save::load(&g, &path).unwrap();
+    let (a, b) = (sim.read_state(&g).unwrap(), back.read_state(&g).unwrap());
+    eprintln!("saved {} particles in {} kB; steps {} -> {}", a.pos.len(), size / 1024, sim.steps, back.steps);
+    assert_eq!(a.pos.len(), b.pos.len());
+    assert_eq!(back.steps, sim.steps);
+    assert_eq!(a.pos, b.pos);
+    assert_eq!(a.vel, b.vel);
+    assert_eq!(a.mass, b.mass);
+    assert_eq!(a.kind, b.kind);
+    assert_eq!(a.about, b.about);
+    assert_eq!(a.chem, b.chem);
+    run(&g, &mut back, 2);
+    let c = back.read_state(&g).unwrap();
+    assert!(c.vel.iter().all(|v| v[0].is_finite() && v[1].is_finite()));
+    assert_eq!(back.steps, sim.steps + 2);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Phase 8: the tools. A brush deletes what is within its radius, kicks change the momentum by Σ m Δv, and new
+/// particles go into the spare slots and take part.
+#[test]
+fn the_tools_delete_kick_and_add() {
+    use squareverse::sim::{ALL_KINDS, Brush};
+    use squareverse::sim::init::Kind;
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = SimConfig { particles: 20_000, seed: 8, spare_share: 0.05, ..SimConfig::default() };
+    let centre = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut sim = Sim::new(&g, cfg.clone()).unwrap();
+    let gone = |s: &State| s.kind.iter().filter(|&&k| k == Kind::Gone as u32).count();
+    let s0 = sim.read_state(&g).unwrap();
+    let spares = gone(&s0);
+    assert_eq!(spares, (0.05 * 20_000.0) as usize);
+    // delete everything within 2 kpc of a point in the disc
+    let at = centre.offset_pc(6_000.0, 0.0, cfg.box_pc);
+    let inside = (0..s0.pos.len()).filter(|&i| s0.kind[i] != Kind::Gone as u32 && {
+        let (dx, dy) = s0.pos[i].delta_pc(at, cfg.box_pc);
+        dx.hypot(dy) <= 2_000.0
+    }).count();
+    sim.brush(&g, at, 2_000.0, ALL_KINDS, Brush::Delete).unwrap();
+    let s1 = sim.read_state(&g).unwrap();
+    eprintln!("deleted {inside} within 2 kpc");
+    assert!(inside > 100);
+    assert_eq!(gone(&s1), spares + inside);
+    // kick the stars within 3 kpc of the centre by (10, 0) pc/Myr
+    let p0 = Sim::momentum(&s1);
+    let kicked: f64 = (0..s1.pos.len()).filter(|&i| s1.kind[i] == Kind::Star as u32 && {
+        let (dx, dy) = s1.pos[i].delta_pc(centre, cfg.box_pc);
+        dx.hypot(dy) <= 3_000.0
+    }).map(|i| s1.mass[i] as f64).sum();
+    sim.brush(&g, centre, 3_000.0, 1 << Kind::Star as u32, Brush::Kick([10.0, 0.0])).unwrap();
+    let p1 = Sim::momentum(&sim.read_state(&g).unwrap());
+    assert!(((p1[0] - p0[0]) - 10.0 * kicked).abs() < 1e-3 * 10.0 * kicked, "{p0:?} {p1:?} {kicked}");
+    // pour 500 gas particles of 1e6 Msun into a 1 kpc disc
+    let mut add = squareverse::sim::init::Initial::with_capacity(500);
+    let mut rng = squareverse::rng::Rng::new(1);
+    for _ in 0..500 {
+        let (r, a) = (1_000.0 * rng.f64().sqrt(), rng.f64() * std::f64::consts::TAU);
+        add.push_gas(at.offset_pc(r * a.cos(), r * a.sin(), cfg.box_pc), [0.0, 0.0], 1e6, 1e4, 200.0, squareverse::sim::init::elements(1.0));
+    }
+    let m_before: f64 = sim.read_state(&g).unwrap().mass.iter().map(|&m| m as f64).sum();
+    let placed = sim.spawn(&g, &add).unwrap();
+    assert_eq!(placed, 500);
+    run(&g, &mut sim, 2);
+    let s3 = sim.read_state(&g).unwrap();
+    let m_after: f64 = s3.mass.iter().map(|&m| m as f64).sum();
+    eprintln!("mass {m_before:.4e} + 5e8 -> {m_after:.4e}");
+    assert!(((m_after - m_before) - 5e8).abs() < 0.02 * 5e8);
+    assert!(s3.vel.iter().all(|v| v[0].is_finite() && v[1].is_finite()));
+    // the new gas has a density (it took part in the gas passes)
+    let new_gas = (0..s3.pos.len()).filter(|&i| s3.kind[i] == Kind::Gas as u32 && {
+        let (dx, dy) = s3.pos[i].delta_pc(at, cfg.box_pc);
+        dx.hypot(dy) < 1_500.0
+    }).filter(|&i| s3.gas[i][1] > 0.0).count();
+    assert!(new_gas > 300, "{new_gas}");
 }

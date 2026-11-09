@@ -1,0 +1,65 @@
+# To use: move this file to .github/workflows/ at the repo root (the push from Claude Code lacked the
+# GitHub "workflow" permission, so it waits here).
+# Builds Squareverse v3 for Windows, Linux and macOS (Apple silicon and Intel), and on a tag v3.* attaches the
+# packages to a GitHub release. Run it by hand from the Actions tab (workflow_dispatch) to get the builds as
+# artifacts without a release. The Mac builds are unsigned: the first start needs right-click -> Open.
+name: v3 release builds
+
+on:
+  push:
+    tags: ["v3.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x86_64
+            exe: squareverse.exe
+          - os: ubuntu-22.04
+            name: linux-x86_64
+            exe: squareverse
+          - os: macos-14
+            name: macos-arm64
+            exe: squareverse
+          - os: macos-13
+            name: macos-x86_64
+            exe: squareverse
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: squareverse_v3
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries (window, keyboard)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      - name: Build
+        run: cargo build --release --locked
+      - name: Unit tests (the GPU tests skip themselves without a GPU)
+        run: cargo test --release --locked --lib
+      - name: Package
+        run: |
+          out=squareverse-v3-${{ matrix.name }}
+          mkdir -p "$out/presets"
+          cp target/release/${{ matrix.exe }} "$out/"
+          if [ "$RUNNER_OS" = "Windows" ]; then cp target/release/dxcompiler.dll target/release/dxil.dll "$out/"; fi
+          cp README.md "$out/"
+          if [ "$RUNNER_OS" = "Windows" ]; then 7z a "$out.zip" "$out" > /dev/null; else zip -qr "$out.zip" "$out"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: squareverse-v3-${{ matrix.name }}
+          path: squareverse_v3/squareverse-v3-${{ matrix.name }}.zip
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v3.')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: squareverse_v3/squareverse-v3-${{ matrix.name }}.zip

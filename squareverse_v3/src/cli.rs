@@ -17,6 +17,18 @@ pub struct Cli {
     /// Headless: after the run, draw one frame (1280 x 800, the default view) into this PNG file.
     #[arg(long)]
     pub snapshot: Option<PathBuf>,
+    /// No galaxy finder.
+    #[arg(long)]
+    pub no_finder: bool,
+    /// Window: spare particle slots for the tools, as a share of the particles (default 0.05).
+    #[arg(long)]
+    pub spares: Option<f64>,
+    /// Window: start with this speed in Myr/s ("auto": by zoom, the default; "max": as fast as the budget allows).
+    #[arg(long)]
+    pub speed: Option<String>,
+    /// Draw the dark matter (window: from the start; headless: in the snapshot).
+    #[arg(long)]
+    pub show_dm: bool,
     /// The starting scene (default: galaxy).
     #[arg(long, value_enum)]
     pub scene: Option<crate::sim::Scene>,

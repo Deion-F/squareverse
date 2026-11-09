@@ -34,6 +34,7 @@ fn well_count() -> u32 {
     return min(atomicLoad(&wsink[0]), MAX_WELLS);
 }
 const SINK_WORDS: u32 = 6u;
+const BATCH: u32 = 8u;
 const PART_NEW: u32 = 5u;   // about.w of stars born in the run
 const SINK_SCALE: f32 = 1024.0;   // fixed-point units per Msun (and per Msun pc / Myr)
 const TWO32: f32 = 4294967296.0;
@@ -118,9 +119,12 @@ fn ia_count(age: f32) -> f32 {
 // time, as Kennicutt-Schmidt). It keeps its mass and elements; its star's mass is drawn from the IMF.
 fn form_star(i: u32, b: vec2<u32>) {
     let g = gas[2u * i];
-    let rho = g.y / (2.0 * c.gas_b.w);
-    // cool enough: under the set temperature, or on (or near) the dense gas's equation of state
-    if (rho < c.gas_b.x || g.x > max(u_of_temperature(c.gas_b.y), 3.0 * eos_u(g.y))) {
+    let rho = gas_rho(g.y);
+    // cool enough: under the set temperature, or on (or near) the dense gas's equation of state, or held up only by
+    // the Jeans floor (integrate.wgsl u_floor; with massive particles, as in the universe, it is far above 10^4 K:
+    // the gas would collapse further if the kernel could follow it)
+    let jeans = 2.0 * c.g * g.y * g.z / (c.gas_a.w * (c.gas_a.w - 1.0));
+    if (rho < c.gas_b.x || g.x > max(max(u_of_temperature(c.gas_b.y), 3.0 * eos_u(g.y)), 1.5 * jeans)) {
         return;
     }
     let tff = sqrt(3.0 * 3.14159265 / (32.0 * c.g * rho));
@@ -166,6 +170,16 @@ fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let m = mt.y;
     let age = f32(ctl[3]) * c.dt - mt.x;
+    // a population past its supernovae changes slowly: it is brought up to date every BATCH-th step (its own, by
+    // id), giving back what built up since in one go, so a step's feedback walks (feedback.wgsl) are fewer
+    let single = c.single_stars == 1u;
+    var span = 1.0;
+    if (!single && age > 50.0 && ctl[3] > 0u) {
+        if (((b.y & ID_MASK) + ctl[3]) % BATCH != 0u) {
+            return;
+        }
+        span = f32(BATCH);
+    }
     let life = lifetime(m);
     var k = K_STAR;
     var tl: vec2<f32>;
@@ -189,7 +203,6 @@ fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     var mass: f32;
-    let single = c.single_stars == 1u;
     if (single) {
         mass = select(mt.z, mt.z * remnant_mass(m) / m, k != K_STAR);
     } else {
@@ -239,7 +252,7 @@ fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         // core-collapse supernovae, 0.0118 per Msun formed (Kroupa, 8 - 100 Msun), spread over ages 3 - 40 Myr
         energy = mt.z * 0.0118 / 37.0 * overlap(age - c.dt, age, 3.0, 40.0) * c.gas_d.x;
-        let n_ia = mt.z * (ia_count(age) - ia_count(age - c.dt));
+        let n_ia = mt.z * (ia_count(age) - ia_count(age - span * c.dt));
         energy += n_ia * c.gas_d.x;
         fe_ia = 0.7 * n_ia;
     }
@@ -263,12 +276,10 @@ fn tick_clock() {
 
 // adds x (scaled to fixed point; may be negative) to the 64-bit sum in words (at, at + 1)
 fn add64(at: u32, x: f32) {
-    let v = x * SINK_SCALE;
-    let hi = floor(v / TWO32);
-    let lo = u32(v - hi * TWO32);
-    let old = atomicAdd(&wsink[WELL_SINK + at], lo);
-    let carry = select(0u, 1u, old + lo < old);
-    atomicAdd(&wsink[WELL_SINK + at + 1u], bitcast<u32>(i32(hi)) + carry);
+    let w = split64(x * SINK_SCALE);
+    let old = atomicAdd(&wsink[WELL_SINK + at], w.x);
+    let carry = select(0u, 1u, old + w.x < old);
+    atomicAdd(&wsink[WELL_SINK + at + 1u], w.y + carry);
 }
 
 fn read64(at: u32) -> f32 {

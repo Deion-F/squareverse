@@ -9,6 +9,12 @@
 @group(0) @binding(3) var<storage, read_write> todo_list: array<u32>;
 @group(0) @binding(4) var<storage, read_write> todo_n: array<u32>;
 @group(0) @binding(5) var<uniform> t: Tick;
+@group(0) @binding(6) var<storage, read> body: array<vec2<u32>>;
+
+// whose step ends now (swallowed, merged and spare particles, K_GONE, need no forces)
+fn listed(i: u32) -> bool {
+    return bin_ends(c.levels, bins[i].x, t.s) && kind_of(body[i]) != K_GONE;
+}
 
 @compute @workgroup_size(256)
 fn flag(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -16,7 +22,7 @@ fn flag(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= c.n) {
         return;
     }
-    flags[i] = select(0u, 1u, bin_ends(c.levels, bins[i].x, t.s));
+    flags[i] = select(0u, 1u, listed(i));
 }
 
 @compute @workgroup_size(256)
@@ -25,7 +31,7 @@ fn scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= c.n) {
         return;
     }
-    let ends = bin_ends(c.levels, bins[i].x, t.s);
+    let ends = listed(i);
     if (ends) {
         todo_list[flags[i]] = i;
     }

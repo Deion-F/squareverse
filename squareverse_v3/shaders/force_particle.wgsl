@@ -4,6 +4,8 @@
 // whose time step ends this sub-step. A pair is softened by the larger of the two kinds' softenings (a node: its
 // largest). Faster than the group walk on the GPUs measured (2026-11-06). Writes (ax, ay, phi_self, phi_central)
 // per particle; phi_self counts each pair once per side, so the self-gravity energy is half its mass-weighted sum.
+// With mesh gravity (pm.wgsl) the walk gives only the short-range part: each pull times common.wgsl short_range,
+// and nodes beyond short_cut() left out.
 
 @group(0) @binding(0) var<uniform> c: Common;
 @group(0) @binding(1) var<storage, read> pos: array<vec4<u32>>;
@@ -27,6 +29,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = todo_list[k];
     let q = pos[i];
     let eps2_i = eps2_of(kind_of(body[i]));
+    let p = vec2<u32>(q.x - c.origin_x, q.z - c.origin_y);
+    let cut = short_cut();
+    let mesh = c.pm.x > 0.0;
     var a = vec2<f32>(0.0);
     var phi = 0.0;
     var stack: array<u32, STACK>;
@@ -50,7 +55,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             m = bitcast<f32>(bj.x);
             eps2 = max(eps2_i, eps2_of(kind_of(bj)));
             d = fx_delta2(pos[j], q) * c.unit_pc;
+            if (mesh && dot(d, d) > cut * cut) {
+                continue;
+            }
         } else {
+            if (mesh && box_distance_to(p, node[NODE_VEC4 * r + 1u]) > cut) {
+                continue;
+            }
             let extra = node[NODE_VEC4 * r + 2u];  // (mass, opening radius^2, sxx, sxy)
             let tail = node[NODE_VEC4 * r + 3u];   // (syy, first particle, count, largest softening^2)
             d = fx_delta2(node[NODE_VEC4 * r], q) * c.unit_pc;
@@ -78,14 +89,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sd = vec2<f32>(sxx * d.x + sxy * d.y, sxy * d.x + syy * d.y);
             let aa = dot(d, sd);
             let tr = sxx + syy;
-            a += (0.5 * c.g * ir5) * (-6.0 * sd + (15.0 * aa * ir2 - 3.0 * tr) * d);
-            phi -= 0.5 * c.g * ir5 * (3.0 * aa - tr * r2);
+            var fq = vec2<f32>(1.0);
+            if (mesh) {
+                fq = short_range(sqrt(dot(d, d)));
+            }
+            a += (0.5 * c.g * ir5 * fq.x) * (-6.0 * sd + (15.0 * aa * ir2 - 3.0 * tr) * d);
+            phi -= 0.5 * c.g * ir5 * (3.0 * aa - tr * r2) * fq.y;
         }
         let s2 = dot(d, d) + eps2;
         let inv = inverseSqrt(s2);
         let gm = c.g * m * inv;
-        a += d * (gm * inv * inv);
-        phi -= gm;
+        var f = vec2<f32>(1.0);
+        if (mesh) {
+            f = short_range(sqrt(dot(d, d)));
+        }
+        a += d * (gm * inv * inv * f.x);
+        phi -= gm * f.y;
     }
     // the central mass
     let dc = fx_delta2(c.center, q) * c.unit_pc;

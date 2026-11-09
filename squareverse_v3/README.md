@@ -4,15 +4,19 @@ Galaxies and the universe they live in, simulated on the GPU and drawn as square
 `squareverse_v2` in Rust + wgpu: one native program per OS (Windows: DX12 / Vulkan, Mac: Metal, Linux: Vulkan / GL),
 nothing for users to install. The design, the decisions behind it and progress are in `../PLAN_V3.md`.
 
-**Status: phase 4 (super wells and binaries) done.** The default scene is a Milky-Way-like galaxy in balance: a disc
+**Status: phases 5 - 8 done** (universe scale, joined views, star system view, tools / presets / release builds).
+The default scene is a Milky-Way-like galaxy in balance: a disc
 of stars, a gas disc, a bulge, a dark matter halo and a super well at the centre.
 - **Gas:** SPH hydrodynamics. It cools and forms stars (near the Kennicutt-Schmidt law).
 - **Stars:** they age into giants and remnants, and give back mass, elements and supernova heat.
 - **Super wells:** they feed on gas (Bondi, Eddington-capped) and heat it (AGN). Dynamical friction sinks them; bound
   pairs merge; new ones form from dense metal-free gas and, with single stars, from stellar black holes.
 - **Binaries:** each star has its companion at birth; close ones with white dwarfs explode as type Ia supernovae.
+- **Universe:** the early universe in a 20 Mpc box from z = 30, with mesh gravity and expansion, a galaxy finder, and
+  pair and group scenes of galaxies.
+- **Views and tools:** click to select and follow, a star system view, tools, saves and presets.
 
-Next: the universe scale (phase 5).
+Next: the laptop backlog (`../PLAN_V3.md`) and `/optimize`, when asked.
 
 ## Setting up a machine (WSL / Ubuntu), once
 
@@ -38,7 +42,10 @@ cargo run --release -- --headless --theta 0.5 --walk group --rebuild-every 1   #
 cargo run --release -- --headless --dt 2 --levels 7 --eta 0.025 --eta-jerk 0.1    # time-step options
 cargo run --release -- --toomre-q 1.0                 # a cold galaxy disc: a bar and spiral arms
 cargo run --release -- --scene disc                   # the phase-1 test disc
+cargo run --release -- --scene universe               # also: pair, group (see "The scenes")
+cargo run --release -- --speed 20 --show-dm --spares 0.1    # window: start speed, dark matter drawn, spare slots
 cargo run --release -- --headless --no-feedback --no-cooling --no-star-formation --gas-mass 0   # gas switches
+cargo run --release -- --headless --no-finder         # without the galaxy finder
 cargo test -- --nocapture                             # unit + GPU tests
 cargo build --release --target x86_64-pc-windows-gnu  # the Windows exe, from WSL (needs mingw-w64)
 ```
@@ -127,7 +134,8 @@ black hole, or swallowed. The kind is kept in the top 4 bits of its id word.
   - When a particle is one star (stars per particle about 1), its mass becomes the remnant's at death.
   - When it stands for a population (the galaxy: ~10^5 - 10^6 stars each), it loses mass smoothly as its stars die,
     0.046 ln(age / 0.276 Myr + 1) of its birth mass (Jungwiert et al. 2001).
-  - For now that mass just leaves; phase 3 returns it as gas.
+  - That mass goes to the nearest gas particle (see the gas section). An old population gives it back every 8th
+    step (`BATCH` in `evolve.wgsl`), since it changes slowly.
 
 **Super wells:** heavy particles with their own softening.
 - **Swallowing:** a single-star particle that comes within `accretion_pc` (2 pc) of a well, bound to it, is swallowed.
@@ -148,16 +156,21 @@ black hole, or swallowed. The kind is kept in the top 4 bits of its id word.
 **Cooling and heating** (`shaders/integrate.wgsl`), solved implicitly over each gas particle's step:
 - **Below 10^4 K:** Koyama & Inutsuka (2002), with photoelectric heating.
 - **Above:** collisional ionisation equilibrium, blended between primordial and solar by metallicity.
-- **Density:** a surface density Σ stands for a density Σ / 2 z0, with half-thickness z0 = 100 pc.
+- **Density:** a surface density Σ stands for a density Σ / 2 z0, with half-thickness z0 = 100 pc. In the universe
+  (`gas_rho`) it is ρ ∝ Σ^1.5 instead, which maps the 2D collapse to 3D.
+- **Photoelectric heating** scales with metallicity in the universe only.
 - **Floors:**
   - 100 K;
   - a Jeans floor (the 2D Jeans length kept above 2 H);
   - above the star formation density, an effective equation of state, P ∝ rho^(4/3) from 8,000 K (Schaye & Dalla
     Vecchia 2008). Without it the cooled gas collapsed into ~40 massive clumps.
-- **Courant:** a gas particle's step also stays under 0.3 H / (signal speed).
+- **Courant:** a gas particle's step also stays under 0.3 H / (signal speed). A gas particle takes only the share of
+  its hydro push that its step can follow (`hydro_share`); without it gas ran away in the universe where dense gas
+  sat next to AGN-heated gas.
 
 **Star formation** (`shaders/evolve.wgsl`):
-- **Where:** gas denser than 0.1 hydrogen atoms per cm³ that is cool (under 15,000 K, or on the equation of state).
+- **Where:** gas denser than 0.1 hydrogen atoms per cm³ that is cool (under 15,000 K, or on the equation of state),
+  and gas held up only by its Jeans floor.
 - **How fast:** with chance 1 - exp(-0.01 dt / t_ff) a step, the gas particle becomes a star particle. It keeps its
   mass and elements; its star is drawn from the IMF.
 - **Determinism:** the dice are a hash of the particle id and the clock, so a seed gives the same run.
@@ -179,16 +192,16 @@ particle's mass loss goes to its nearest gas particle within 500 pc.
 - **Metals:** gas metallicity 1.12 -> 1.54 solar; stars born later are richer (1.63 -> 2.01 solar in the test's
   150 Myr).
 - **Gas:** stays in its disc (half-mass radius 8.0 -> 8.7 kpc), mostly 10^4 K, ~5% above 10^5 K.
-- **Speed at 500k:** the window holds 60 fps at 2.2 Myr/s.
+- **Speed at 500k:** the window holds 60 fps at 2.2 - 2.35 Myr/s.
 
-**Not yet:**
-- merging and splitting gas particles;
-- gas momentum from stellar mass loss (the gas keeps its own velocity).
+**Not yet:** gas momentum from stellar mass loss (the gas keeps its own velocity). Merging and splitting gas
+particles is in the universe section below.
 
 ## Super wells and binaries (phase 4)
 
 The wells are listed each step, in sorted order by a prefix sum (`wells_list.wgsl`, at most 256), so they can
-appear and merge and a seed still gives the same run. Once a step of dt:
+appear and merge and a seed still gives the same run. A well's surroundings are walked by one workgroup a well
+(`wells_env.wgsl`). Once a step of dt:
 - **Bondi accretion** (`wells_env.wgsl`) from the nearest gas particle: mdot = 4 pi G² M² rho / (c_s² + v²)^(3/2).
   - **Caps:** Eddington (M / 45 Myr) and a quarter of that gas particle a step.
   - **Bookkeeping:** the mass leaves the gas with its momentum, through the feedback deposit as a negative mass.
@@ -219,7 +232,98 @@ function of its id and mass, so it costs no memory and is the same everywhere.
 - **Not yet:**
   - encounters hardening, softening or breaking binaries; they need the local stellar density per star, for the
     single-star cluster scenes;
-  - drawing the pairs (phase 7's star system view).
+  - drawing the pairs in the sky (the star system view draws a star's companion, see phase 7).
+
+## The universe scale (phase 5)
+
+**Mesh gravity (TreePM)** (`shaders/pm.wgsl`, `src/fft.rs`): the long range comes from a mesh, the short range from
+the tree.
+- **Mesh:** `pm_cells` (512) cells a side; cloud-in-cell deposit with 64-bit integer sums, a 2D FFT in workgroup
+  memory (radix 2, up to 1024 cells), the long-range Green's function of this 2D universe with 1/r² gravity,
+  -2πG Σ_k / k · erfc(k r_s), CIC deconvolved twice.
+- **Tree:** does the short range (erfc factor; nodes beyond 4.5 r_s are left out).
+- **Steps:** the long range is a kick-drift-kick on the longest step: half kicks at each step's end (`Work::Pm`) and
+  start.
+- **Test:** TreePM against the tree alone for clumps over 6 Mpc: median error 0.3%, 99th percentile 4% (the mesh
+  carries ~60% of the pull).
+
+**Expansion** (`src/sim/cosmo.rs`): flat ΛCDM, a(t) in closed form (in WGSL too).
+- Positions are comoving (the fixed-point box), velocities peculiar. Each step's a and H are put into the shared
+  parameters, and `unit_pc` becomes physical pc per unit, so every pass works in physical units unchanged.
+- Hubble drag on the velocities, adiabatic cooling of the gas, softening comoving until a = 0.25.
+
+**The early universe** (`--scene universe`, `init::universe`, `SimConfig::universe`):
+- **Box:** 20 Mpc comoving from z = 30; dark matter and gas on interleaved lattices, with Zel'dovich displacements
+  and velocities from a Gaussian field.
+- **Steps:** dt 20 Myr, `levels` 5 (down to 1.25 Myr). Softening 1 kpc for stars and gas, 2 kpc for dark matter,
+  comoving (4 and 8 kpc) until a = 0.25.
+- **2D sheet growth:** the sheet stands for a 1 Mpc slab, and its linear growth depends on scale (δ'' + 2Hδ' =
+  2πGΣkδ), so the start is set backwards from the chosen spectrum today, mode by mode (`Cosmology::growth`).
+- **Gas:** density from Σ as ρ ∝ Σ^1.5; a UV background after z = 8 (a 10^4 K floor for thin gas).
+- **Particles** are 10^7 - 10^8 Msun, so star particles are populations.
+- **Wells** grow by Bondi accretion only (`accretion_pc` 0).
+
+**Galaxy finder** (`shaders/finder.wgsl`): friends of friends on the GPU (12 linking rounds), group sums in exact
+64-bit integers.
+- **Universe:** dark matter linked at 0.2 of its mean spacing (halos of 32 or more particles). **Placed galaxies:**
+  stars, gas and wells at 300 pc.
+- Runs every 200 Myr (universe 100): 8 linking rounds of 16 slices, which the window spreads over frames. `--no-finder` switches it off.
+- The headless report lists the heaviest 50 groups.
+
+**Gas merging and splitting** (`shaders/resolution.wgsl`): thin, hot, light gas merges in pairs (mass, momentum and
+energy kept); heavy gas splits into free slots.
+
+**Measured (100k particles, RTX 2070 Super):**
+- The cosmic web forms: filaments by z ~ 4, halos at the nodes by z = 0; density variance 3 -> 51.
+- ~290 halos of 32+ particles by z = 0; 4e11 Msun of stars; gas metallicity 0.27 solar.
+- Pair merger: first pericentre at ~400 Myr, apocentre 68 kpc at ~900 Myr, second passage at 1.3 Gyr, central wells
+  merged at ~1.55 Gyr.
+
+**Known:** super wells overgrow in the universe (~5% of their halo by z = 0), because the AGN's heat goes into one gas
+particle and is mostly capped away. The universe's lattice still shows in the voids.
+
+## Joining the views (phase 6)
+
+- **Select:** click a galaxy's ring (drawn round each galaxy the finder found, while it is small on screen) or a
+  particle (`shaders/probe.wgsl`: the nearest within 10 px, ties to the lowest id). It is followed (the camera
+  glides to it) and zoomed to, and a panel describes it. Dragging stops following; Esc clears the selection.
+- **Speed by zoom** (on by default, A or the menu's checkbox): about 10 Myr/s on a galaxy, ~0.5 on its centre, up
+  to 2,000 on the whole universe. Choosing a speed turns it off.
+- **Level of detail:** close up, brighter stars are bigger squares (the same light), and white dwarfs, neutron stars
+  and stellar black holes fade in.
+- **Test:** `zooming_and_following_change_nothing`: the galaxy run whole and as the window would run it (budgets and
+  speeds varying, a particle picked and followed) ends bit-identical.
+
+## The star system view (phase 7)
+
+`src/system.rs`: a star's planets come from its id, mass, birth elements and companion, so the same star always
+has the same system.
+- **Rocky planets** from Mg / Si; **gas giants** with the Fischer & Valenti metallicity law (hot Jupiters 10%);
+  **ice giants** from C / N / O. Primordial stars have none.
+- **Companion:** clears unstable orbits.
+- **Fate:** giants swallow inner planets, white dwarfs keep widened outer ones, supernovae unbind them.
+- **Window:** "Star system" in the panel of a selected star draws the Kepler orbits and the companion, moving at
+  years per second.
+
+## Tools, saves and presets (phase 8)
+
+- **Tools** (menu or keys 1 - 7): select, place a galaxy (built in balance), a super well, pour gas, kick, delete
+  and move, under a brush. They act between steps (`Sim::brush`, `Sim::spawn`).
+- **Spare slots:** new particles go into spare slots, `--spares` (5% of the particles in the window): massless, at
+  the centre, in the longest step, with no forces until used. So the window's default 500,000 is 525,000 in all.
+- **Saves** (`src/save.rs`): the whole universe (every particle's records, the config and the clock) in one
+  lz4-packed file. F5 / F9 quick save and load (`saves/quick.sqv`). "Save as preset" in the menu writes into
+  `presets/`; the presets are listed there with a Load button.
+- **Test:** a saved universe loads bit-identical and runs on.
+
+## Release builds
+
+`squareverse_v3/ci/v3-release.yml` (to be moved into `.github/workflows/`) builds packages for Windows, Linux and macOS (Apple silicon and Intel) when a tag
+`v3.*` is pushed (or by hand from the Actions tab, giving the builds as artifacts).
+- Each package holds the exe, an empty `presets/` folder and this README; the Windows one also `dxcompiler.dll` and
+  `dxil.dll`.
+- The Mac builds are unsigned: the first start needs right-click -> Open.
+- The workflow runs on GitHub and has not been tried here.
 
 ## The scenes
 
@@ -254,10 +358,19 @@ function of its id and mass, so it costs no memory and is the same everywhere.
 - stars round a fixed central point mass of 1e10 Msun, a 2e9 Msun disc from 1 to 15 kpc;
 - softening 20 pc, IMF masses scaled to the disc, no stellar evolution.
 
+**Pair** (`--scene pair`): two Milky Way-like galaxies, each built in balance and placed (`init::place`) on a
+parabolic orbit with a pericentre of 25 kpc.
+
+**Group** (`--scene group`): one large, three medium and twenty dwarf galaxies within 600 kpc, falling together.
+
+**Universe** (`--scene universe`): see "The universe scale".
+
 **Default particle counts** depend on the GPU (`src/budget.rs`):
 - 500,000 on a discrete GPU;
 - 50,000 on an integrated one;
 - 250,000 on a known discrete GPU reached through a translation layer (WSL's OpenGL over D3D12).
+
+In the window, `--spares` (5%) adds spare slots for the tools on top.
 
 The frame-rate targets are 60 fps on the desktop (RTX 2070 Super), and on the laptop (integrated Radeon) 60 if
 possible, never below a stable 30.
@@ -283,11 +396,15 @@ The menu is behind the button in the bottom-right corner (or Tab), with an (i) b
 
 * **Simulation:**
   - pause;
-  - speed: sim time per second, 0.5 - 200 Myr/s or "max" (the default: as much as the frame budget allows), with
-    the speed reached shown below;
-  - the scene (galaxy or test disc) and the galaxy's Toomre Q, for the next reset;
+  - speed by zoom (on by default): the zoom suggests the speed;
+  - speed: sim time per second, 0.5 - 1000 Myr/s or "max" (as much as the frame budget allows), with the speed
+    reached shown below; choosing one turns speed by zoom off;
+  - the scene (galaxy, pair, group, universe or test disc) and the galaxy's Toomre Q, for the next reset;
   - particles and seed for the next reset, with a button back to this GPU's default;
   - Reset.
+* **Tools:** the tool buttons and the chosen tool's settings: for a galaxy its mass (x Milky Way) and particles; for
+  a super well its mass; for gas its mass, radius and temperature; the brush radius in px.
+* **Saves and presets:** quick save / load, "Save as preset" with a name, and the list of presets with a Load button.
 * **Display:** frame-rate target 60 / 30 fps, dark matter on / off (dim violet), gas on / off (by temperature), brightness (light each star adds), exposure (the whole picture), square
   size (1 - 6 px), reset view, fullscreen.
 * **Advanced:**
@@ -295,7 +412,8 @@ The menu is behind the button in the bottom-right corner (or Tab), with an (i) b
   - the time-step range, force evaluations per particle per Myr, and the share of particles in each time-step bin;
   - GPU milliseconds per pass, from timestamp queries.
 
-The top-left corner shows particles, simulated time, Myr per second and fps against the target. The top-right shows
+The top-left corner shows particles, simulated time, the redshift z (universe), the number of galaxies found, Myr
+per second and fps against the target. The top-right shows
 the GPU and its total ms a frame.
 
 | Key | |
@@ -304,6 +422,10 @@ the GPU and its total ms a frame.
 | H | the list of keys |
 | Space | pause / run |
 | [ / ] | slower / faster (sim time per second) |
+| A | speed by zoom on / off |
+| 1 - 7 | tools: select, galaxy, super well, gas, kick, delete, move |
+| F5 / F9 | quick save / quick load (`saves/quick.sqv`) |
+| Click | select a galaxy (its ring) or a particle; it is followed |
 | R | reset the universe |
 | D | show / hide the dark matter |
 | G | show / hide the gas |
@@ -312,7 +434,7 @@ the GPU and its total ms a frame.
 | F11 | fullscreen |
 | Wheel | zoom at the cursor |
 | Drag | move the view (left or right button) |
-| Esc | close the key list / menu |
+| Esc | close the key list / menu / star system window, else clear the selection |
 
 ## Headless runs
 
@@ -325,6 +447,11 @@ prints a JSON report (`src/headless.rs`), or writes it to `--report`. The report
 - `bin_counts` (particles in each time-step bin) and `force_evals_per_myr`;
 - for the galaxy, `galaxy_start` / `galaxy_end`: each part's half-mass radius, the disc's radial dispersion at 1, 2
   and 3 scale lengths, the rotation curve, particles by kind, and the central well's mass;
+- for the universe, `universe_start` / `universe_end`: redshift, particles by kind, gas cold / warm / hot,
+  metallicity, star mass, wells, density variance, mass above 10x and 100x the mean, gas density percentiles, the
+  fastest particle and `not_finite`;
+- `galaxy_count` and `galaxies`: the finder's heaviest 50 groups, each with members, `center_pc`, velocity, mass,
+  stars, gas, wells, dark and `radius_pc`;
 - energy before and after, and its relative change;
 - `state_hash`: FNV-1a over every position and velocity word. The same seed on the same machine and backend gives the
   same hash.
@@ -343,7 +470,9 @@ The window's `--exit-after-frames N` prints one JSON line:
 Run `cargo test --release -- --nocapture`.
 
 **Unit tests:** fixed-point round trip, wrap and sub-AU separations; the IMF's range and mean; the main sequence; the
-disc's mass.
+disc's mass; the FFT round trip; `cosmo::age_and_growth`; the star systems (`system::`, 4 tests: the same star gives
+the same system, metal-rich stars have 3x or more the giants, primordial stars none, white dwarfs keep only widened
+outer planets).
 
 **GPU tests** (`tests/gpu.rs`, one shared device; with no GPU they print why and check nothing, and `SV_ALLOW_CPU=1`
 runs them in software):
@@ -365,6 +494,11 @@ runs them in software):
   friction slows a light well; dense metal-free gas collapses into wells; single stars' black holes become wells
   and merge;
 - type Ia supernovae go off exactly where the CPU's `binary_of` says (GPU and CPU binaries agree);
+- TreePM against the tree alone (`tree_pm_matches_the_tree`);
+- the finder finds three clumps with their exact members, masses and centres (`the_finder_finds_the_clumps`);
+- zooming and following change nothing (`zooming_and_following_change_nothing`);
+- a saved universe loads bit-identical and runs on (`a_saved_universe_loads_the_same`);
+- the tools delete, kick and add (`the_tools_delete_kick_and_add`);
 - the GPU matches a CPU f64 reference (`src/sim/reference.rs`) with the disc centred on the box's corner, so particles
   cross the wrap and every step carries between the words.
 
@@ -372,14 +506,25 @@ runs them in software):
 - `force_accuracy_table`: the force error for theta 0.4 - 1.0;
 - `clump_force_table`: the error in the evolved, clumpy disc for `open_small`;
 - `galaxy_diagnostics`: the galaxy's rotation curve, energies and half-mass radii over time (settings from `SV_*`
-  environment variables).
+  environment variables);
+- `universe_blowup`: the universe stepped one step at a time, printing the first particles to go non-finite;
+- `pair_merger_diag`: the pair scene's two central wells' separation and the galaxies found, every 100 Myr (`SV_GROUP` for the group).
 
 ## Measured (Windows exe, RTX 2070 Super on Vulkan)
 
-**Galaxy, window, 60 fps target (2026-11-08):**
+**Galaxy, window, 60 fps target (2026-11-08, before gas; with gas and wells it is 2.35 Myr/s, below):**
 - **500,000 particles:** 60.0 fps, worst frame 17.2 ms, 3.8 Myr/s. One turn at 8 kpc (~200 Myr) takes ~50 s.
 - **1,000,000 particles:** 59.7 fps, worst frame 31.7 ms, 1.2 Myr/s. Some frames came late, so the budget shrank.
-- **Headless:** 170 GPU ms per Myr at 500k.
+- **Headless:** 170 GPU ms per Myr at 500k (175 with gas and wells, 2026-11-09).
+
+**Scenes, window, 525,000 particles with 5% spares (2026-11-09):**
+
+| Scene | fps | Worst frame | Sim speed |
+|---|---|---|---|
+| Galaxy | 60.0 | 17.3 ms | 2.35 Myr/s |
+| Pair | 60.0 | 17.6 ms | 2.46 Myr/s |
+| Group | 60.0 | 17.6 ms | 3.13 Myr/s |
+| Universe | 60.0 | 17.4 ms | 37.5 Myr/s |
 
 **Test disc, window, speed "max" (2026-11-07):**
 

@@ -3,7 +3,7 @@
 // tree (morton.wgsl), so the walks below only look there: `ctl[1] .. ctl[2]` is that run (`range_*`).
 //
 // `density`: the surface density Σ_i = Σ_j m_j W(r_ij, H_i), with H_i adapted towards sqrt(N m / (pi Σ)) (at most
-// 25% a step; a second pass when it moved more than 5%).
+// 25% a step; a second pass when it moved more than 5%), between half the softening and gas_f.x.
 // `force`: pressure and artificial viscosity (Monaghan 1997, signal speed form), the standard "density - energy"
 // SPH equations with P = (gamma - 1) Σ u:
 //   a_i  = -Σ_j m_j (P_i/Σ_i² ∇W(H_i) + P_j/Σ_j² ∇W(H_j) + Π_ij ∇W̄)
@@ -29,11 +29,7 @@ fn rel(q: vec4<u32>) -> vec2<u32> {
 
 // distance from a point (hi words relative to the origin) to a node's box, pc
 fn box_distance(p: vec2<u32>, r: u32) -> f32 {
-    let b = node[NODE_VEC4 * r + 1u];   // (min x, min y, max x, max y)
-    let dx = select(0u, b.x - p.x, p.x < b.x) + select(0u, p.x - b.z, p.x > b.z);
-    let dy = select(0u, b.y - p.y, p.y < b.y) + select(0u, p.y - b.w, p.y > b.w);
-    let d = vec2<f32>(f32(dx), f32(dy)) * c.unit_pc;
-    return max(length(d) - 2.0 * c.unit_pc, 0.0);
+    return box_distance_to(p, node[NODE_VEC4 * r + 1u]);
 }
 
 // does the node hold any of the gas run?
@@ -110,12 +106,12 @@ fn density(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let g = gas[2u * i];
     let m = bitcast<f32>(body[i].x);
-    var h = max(g.z, c.gas_c.w);
+    var h = clamp(g.z, c.gas_c.w * sqrt(c.cosmo.z), c.gas_f.x);
     var sigma = surface_density(i, h);
     // at least half the gravity softening (finer isn't resolved, and dense clumps' reach shrinking to ~1 pc let the
     // Courant step fall under the shortest one: cooling gas blew the disc apart, 2026-11-08), at most 3 kpc (a lone
     // particle's reach would otherwise grow without end)
-    let want = clamp(clamp(sqrt(c.gas_a.x * m / (3.14159265 * max(sigma, 1e-12))), 0.8 * h, 1.25 * h), c.gas_c.w, 3000.0);
+    let want = clamp(clamp(sqrt(c.gas_a.x * m / (3.14159265 * max(sigma, 1e-12))), 0.8 * h, 1.25 * h), c.gas_c.w * sqrt(c.cosmo.z), c.gas_f.x);
     if (abs(want / h - 1.0) > 0.05) {
         h = want;
         sigma = surface_density(i, h);

@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod budget;
+pub mod fft;
 pub mod cli;
 pub mod fixed;
 pub mod gpu;
@@ -9,9 +10,12 @@ pub mod headless;
 pub mod kernels;
 pub mod render;
 pub mod rng;
+pub mod save;
 pub mod sim;
 pub mod snapshot;
 pub mod sort;
 pub mod timing;
 pub mod ui;
 pub mod units;
+pub mod view;
+pub mod system;

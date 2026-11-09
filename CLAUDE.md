@@ -15,7 +15,7 @@ Two versions live here:
   WSL the Linux build reaches the GPU only through Mesa's OpenGL over D3D12 (set up automatically by
   `gpu::prepare_platform`).
 - Laptop checks are collected in PLAN_V3.md "Laptop backlog" (the user runs them in one go later, with the optimizer); add each new one there with what to change on its result.
-- Headless: `squareverse --headless --steps N` (steps of dt, 2 Myr, each 2^(levels-1) block sub-steps; `--scene galaxy|disc`) `--particles P --seed S [--report r.json] [--snapshot s.png]`; the
+- Headless: `squareverse --headless --steps N` (steps of dt, 2 Myr (universe 20), each 2^(levels-1) block sub-steps; `--scene galaxy|disc|universe|pair|group`) `--particles P --seed S [--report r.json] [--snapshot s.png] [--show-dm]`; the
   snapshot is the final frame as a PNG, which you can look at with Read.
 - If `cc` is missing (no `build-essential`), cargo can't link. Ask the user to run `sudo apt install -y
   build-essential mingw-w64`; until then a Zig linker can stand in (see PLAN_V3.md Progress).

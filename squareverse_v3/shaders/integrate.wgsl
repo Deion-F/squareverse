@@ -55,17 +55,22 @@ fn cooling_lambda(temp: f32, z: f32) -> f32 {
 }
 
 // heating less cooling per mass, (pc/Myr)^2 / Myr, at density rho_cgs (g/cm^3)
+// photoelectric heating per hydrogen atom: from dust, so in the universe (gas_e.z) it scales with the metallicity
+fn heating(z: f32) -> f32 {
+    return GAMMA_HEAT * select(1.0, min(z, 1.0), c.gas_e.z > 0.5);
+}
+
 fn net_heating(u: f32, rho_cgs: f32, n_h: f32, z: f32) -> f32 {
-    let erg_g_s = (GAMMA_HEAT * n_h - n_h * n_h * cooling_lambda(gas_temperature(u), z)) / rho_cgs;
+    let erg_g_s = (heating(z) * n_h - n_h * n_h * cooling_lambda(gas_temperature(u), z)) / rho_cgs;
     return erg_g_s * 3301.0;   // erg/g/s -> (pc/Myr)^2 / Myr
 }
 
 // u after dt of heating and cooling: u1 = u0 + dt rate(u1), by bisection in log u
 fn cool(u0: f32, sigma: f32, z: f32, dt: f32, u_min: f32) -> f32 {
-    let rho_cgs = max(sigma, 1e-6) / (2.0 * c.gas_b.w) * 6.77e-23;
+    let rho_cgs = gas_rho(max(sigma, 1e-6)) * 6.77e-23;
     let n_h = 0.71 * rho_cgs / 1.6726e-24;
     var lo = log(u_min);
-    var hi = log(max(u0, u_min) + dt * 3301.0 * GAMMA_HEAT * n_h / rho_cgs + 1e-6);
+    var hi = log(max(u0, u_min) + dt * 3301.0 * heating(z) * n_h / rho_cgs + 1e-6);
     if (exp(lo) - u0 - dt * net_heating(exp(lo), rho_cgs, n_h, z) >= 0.0) {
         return u_min;
     }
@@ -82,9 +87,34 @@ fn cool(u0: f32, sigma: f32, z: f32, dt: f32, u_min: f32) -> f32 {
 }
 
 // the least u: the temperature floor, and the Jeans floor c_s² > 2 G Σ H
+// and, after reionisation (UV background on, z below cosmo_q.z), 10^4 K for gas thinner than the self-shielding
+// density gas_e.w (photoionisation heating keeps it there)
 fn u_floor(g: vec4<f32>) -> f32 {
     let gm = c.gas_a.w * (c.gas_a.w - 1.0);
-    return max(max(u_of_temperature(c.gas_c.x), 2.0 * c.g * g.y * g.z / gm), eos_u(g.y));
+    var t_min = c.gas_c.x;
+    if (c.cosmo_q.y > 0.5 && 1.0 / c.cosmo.x - 1.0 < c.cosmo_q.z && gas_rho(g.y) < c.gas_e.w) {
+        t_min = max(t_min, 1e4);
+    }
+    return max(max(u_of_temperature(t_min), 2.0 * c.g * g.y * g.z / gm), eos_u(g.y));
+}
+
+// Expansion: peculiar velocities decay as 1/a (dv/dt = g - H v), and the gas cools adiabatically, the sheet's area
+// growing as a² (du/dt = -2 (gamma - 1) H u). Factors over time h; 1 in a static box.
+fn hubble_drag(h: f32) -> f32 {
+    return exp(-c.cosmo.y * h);
+}
+
+fn adiabatic(h: f32) -> f32 {
+    return exp(-2.0 * (c.gas_a.w - 1.0) * c.cosmo.y * h);
+}
+
+// The share of its hydro push and heating a gas particle takes over a step of bin b: all of it, unless its Courant
+// step is shorter than the shortest step there is (dense gas held up by its Jeans floor, or next to gas heated far
+// above it): then as much as that step can follow, so the explicit update stays stable (the unresolved gas reacts
+// slower instead of blowing up; it ran away in the universe at z ~ 2, 2026-11-08).
+fn hydro_share(g: vec4<f32>, gh: vec4<f32>, b: u32) -> f32 {
+    let want = c.gas_a.z * g.z / max(gh.w, 1e-3);
+    return min(1.0, want / bin_dt(b));
 }
 
 fn is_gas(i: u32) -> bool {
@@ -118,13 +148,15 @@ fn kick_drift(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = kin[i];
     var v = k.xy;
     let b = bins[i].x;
-    if (bin_starts(c.levels, b, t.s)) {
+    if (bin_starts(c.levels, b, t.s) && kind_of(body[i]) != K_GONE) {
         let h = 0.5 * bin_dt(b);
+        v *= hubble_drag(h);
         if (is_gas(i)) {
             let g = gas[2u * i];
             let gh = gas[2u * i + 1u];
-            v += (acc[i].xy + gh.xy) * h;
-            gas[2u * i] = vec4<f32>(max(g.x + gh.z * h, u_floor(g)), g.yzw);
+            let f = hydro_share(g, gh, b);
+            v += (acc[i].xy + gh.xy * f) * h;
+            gas[2u * i] = vec4<f32>(max(g.x * adiabatic(h) + gh.z * f * h, u_floor(g)), g.yzw);
         } else {
             v += acc[i].xy * h;
         }
@@ -141,7 +173,7 @@ fn kick(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let st = bins[i];
     let b = st.x;
-    if (!bin_ends(c.levels, b, t.s)) {
+    if (!bin_ends(c.levels, b, t.s) || kind_of(body[i]) == K_GONE) {
         return;
     }
     var a = acc[i].xy;
@@ -152,9 +184,10 @@ fn kick(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gas_here) {
         let g = gas[2u * i];
         let gh = gas[2u * i + 1u];
-        a += gh.xy;
+        let f = hydro_share(g, gh, b);
+        a += gh.xy * f;
         let floor_u = u_floor(g);
-        var u = max(g.x + gh.z * 0.5 * bin_dt(b), floor_u);
+        var u = max(g.x * adiabatic(0.5 * bin_dt(b)) + gh.z * f * 0.5 * bin_dt(b), floor_u);
         if (c.gas_c.y > 0.5) {
             let ch = chem[i];
             u = cool(u, g.y, (ch.y + ch.z + ch.w) / SOLAR_Z, bin_dt(b), floor_u);
@@ -163,7 +196,7 @@ fn kick(@builtin(global_invocation_id) gid: vec3<u32>) {
         kz = vec2<f32>(gas_temperature(u), g.y);   // drawn by temperature and surface density
         courant = bin_for(c.gas_a.z * g.z / max(gh.w, 1e-3));
     }
-    kin[i] = vec4<f32>(k.xy + a * (0.5 * bin_dt(b)), kz);
+    kin[i] = vec4<f32>(k.xy * hubble_drag(0.5 * bin_dt(b)) + a * (0.5 * bin_dt(b)), kz);
     var want = max(wanted_bin(a), courant);
     let da = length(a - bitcast<vec2<f32>>(st.yz));
     if (c.eta_jerk > 0.0 && da > 0.0) {
@@ -197,6 +230,12 @@ fn init_bins(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     var a = acc[i].xy;
     var b = 0u;
+    if (kind_of(body[i]) == K_GONE) {
+        // spare slots and the like: the longest step, so they don't count as work in the short ones
+        bins[i] = vec4<u32>(0u, 0u, 0u, 0u);
+        atomicAdd(&counts[0], 1u);
+        return;
+    }
     if (is_gas(i)) {
         let g = gas[2u * i];
         let gh = gas[2u * i + 1u];

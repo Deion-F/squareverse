@@ -1,5 +1,9 @@
 // Every particle is a square snapped to the pixel grid, added (additive blending) into an HDR target, so where
 // many fall on one pixel they glow. Stars are coloured by their surface temperature. Prepended with fixed.wgsl.
+//
+// Level of detail (`lod`, 0 zoomed out on a galaxy or more, 1 at ~100x closer): stars' squares grow with their
+// luminosity (spreading the same light), and remnants fade in: white dwarfs blue-white, neutron stars as faint
+// violet points, stellar black holes as dark red ones.
 
 struct View {
     center: vec4<u32>,   // the camera, fixed point
@@ -10,6 +14,10 @@ struct View {
     brightness: f32,
     extrap_myr: f32,     // draw each particle this far along its velocity
     flags: u32,          // 1: draw the dark matter, 2: hide the gas
+    lod: f32,
+    _a: f32,
+    _b: f32,
+    _c: f32,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -77,11 +85,23 @@ fn vs(
         // a super well: a white marker, a few pixels across at any zoom
         size = max(3.0 * view.square_px, 5.0);
         color = vec3<f32>(3.0, 2.6, 2.2);
-    } else if (kind == 6u || star.y <= 0.0) {
-        color = vec3<f32>(0.0);   // swallowed, or a neutron star / black hole: nothing to see
+    } else if (kind == 6u) {
+        color = vec3<f32>(0.0);   // swallowed
+    } else if (kind == 4u || kind == 5u) {
+        // a neutron star or a stellar black hole: only seen close up
+        let tint = select(vec3<f32>(0.5, 0.06, 0.04), vec3<f32>(0.35, 0.3, 0.9), kind == 4u);
+        color = tint * smoothstep(0.4, 0.9, view.lod) * view.brightness;
+    } else if (star.y <= 0.0 && kind != 3u) {
+        color = vec3<f32>(0.0);
     } else {
-        let glow = pow(clamp(star.y, 1e-3, 1e5), 0.3);
-        color = blackbody(star.x) * glow * view.brightness;
+        var glow = pow(clamp(star.y, 1e-3, 1e5), 0.3);
+        if (kind == 3u) {
+            glow = max(glow, 0.3 * smoothstep(0.4, 0.9, view.lod));   // white dwarfs show up close
+        }
+        // close up, brighter stars are bigger squares, with the same light spread over them
+        let grow = 1.0 + view.lod * clamp(0.6 * (log(max(star.y, 1e-3)) / log(10.0) + 1.0), 0.0, 3.0);
+        size = floor(view.square_px * grow + 0.5);
+        color = blackbody(star.x) * glow * view.brightness * (view.square_px * view.square_px) / (size * size);
     }
     var out: VOut;
     if (all(color == vec3<f32>(0.0))) {

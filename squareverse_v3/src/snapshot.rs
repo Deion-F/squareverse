@@ -17,7 +17,8 @@ pub fn default_look() -> Look {
     Look { square_px: 1.0, brightness: 0.5, exposure: 1.0, show_dm: false, show_gas: true }
 }
 
-pub fn save(gpu: &Gpu, sim: &Sim, path: &Path) -> Result<()> {
+/// Saves the default view; `show_dm` also draws the dark matter.
+pub fn save(gpu: &Gpu, sim: &Sim, path: &Path, show_dm: bool) -> Result<()> {
     let (w, h) = SIZE;
     let d = &gpu.device;
     let tex = d.create_texture(&wgpu::TextureDescriptor {
@@ -42,7 +43,7 @@ pub fn save(gpu: &Gpu, sim: &Sim, path: &Path) -> Result<()> {
     let camera = Camera { center_pc: sim.cfg.center_pc, px_per_pc: w.min(h) as f64 / (2.3 * sim.cfg.view_radius_pc()) };
     let mut timer = GpuTimer::new(d, &gpu.queue, false);
     let mut enc = d.create_command_encoder(&Default::default());
-    renderer.draw(d, &gpu.queue, &mut enc, &view, SIZE, sim, &camera, &default_look(), 0.0, &mut timer);
+    renderer.draw(d, &gpu.queue, &mut enc, &view, SIZE, sim, &camera, &Look { show_dm, ..default_look() }, 0.0, &mut timer);
     enc.copy_texture_to_buffer(
         tex.as_image_copy(),
         wgpu::TexelCopyBufferInfo {

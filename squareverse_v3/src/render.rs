@@ -18,6 +18,8 @@ struct ViewUniform {
     brightness: f32,
     extrap_myr: f32,
     flags: u32,
+    lod: f32,
+    _pad: [f32; 3],
 }
 
 #[repr(C)]
@@ -52,6 +54,11 @@ impl Camera {
             w.0 - (px.0 - viewport.0 / 2.0) / self.px_per_pc,
             w.1 - (viewport.1 / 2.0 - px.1) / self.px_per_pc,
         );
+    }
+
+    /// Level of detail: 0 at a galaxy-wide view (0.05 px a pc) or wider, 1 a hundred times closer.
+    pub fn lod(&self) -> f64 {
+        ((self.px_per_pc / 0.05).log10() / 2.0).clamp(0.0, 1.0)
     }
 
     /// Moves the view by a mouse drag of (dx, dy) pixels.
@@ -285,6 +292,8 @@ impl Renderer {
             brightness: look.brightness,
             extrap_myr: extrap_myr as f32,
             flags: look.show_dm as u32 | ((!look.show_gas) as u32) << 1,
+            lod: camera.lod() as f32,
+            _pad: [0.0; 3],
         };
         queue.write_buffer(&self.view_buf, 0, bytemuck::bytes_of(&view));
         let tone = ToneUniform { exposure: look.exposure, manual_srgb: self.manual_srgb as u32, _pad: [0; 2] };

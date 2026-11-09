@@ -7,6 +7,8 @@ use egui::{Align2, Color32, RichText, Ui};
 /// What the menu changes. The app reads it every frame and acts on the `*_requested` flags.
 pub struct UiState {
     pub paused: bool,
+    /// The speed follows the zoom (`view::suggested_speed`) until a speed is chosen.
+    pub auto_speed: bool,
     /// Index into `SPEEDS`.
     pub speed: usize,
     pub fps_target: u32,
@@ -26,12 +28,63 @@ pub struct UiState {
     pub reset_requested: bool,
     pub view_reset_requested: bool,
     pub fullscreen_requested: bool,
+    /// The mouse's tool and its settings (phase 8).
+    pub tool: Tool,
+    pub tools: ToolSettings,
+    /// Saving and loading: the name for a new preset, the presets found, and what was asked for.
+    pub preset_name: String,
+    pub presets: Vec<(String, std::path::PathBuf)>,
+    pub save_requested: Option<std::path::PathBuf>,
+    pub load_requested: Option<std::path::PathBuf>,
+    /// A message for the status line, and until when.
+    pub message: Option<(String, std::time::Instant)>,
+}
+
+/// What a click (or drag) in the view does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    /// Pick a galaxy or a particle, and follow it.
+    Select,
+    /// Place a galaxy (built in balance) where clicked.
+    Galaxy,
+    /// Place a super well.
+    Well,
+    /// Pour a disc of gas.
+    Gas,
+    /// Drag to give everything under the brush a velocity.
+    Kick,
+    /// Delete everything under the brush.
+    Delete,
+    /// Drag to move everything under the brush.
+    Move,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolSettings {
+    /// A new galaxy's mass as a share of the default (Milky Way-like) one, and its particles.
+    pub galaxy_share: f64,
+    pub galaxy_particles: u32,
+    /// A new super well's mass, Msun.
+    pub well_mass: f64,
+    /// Gas poured: mass (Msun), the disc's radius (pc), temperature (K).
+    pub gas_mass: f64,
+    pub gas_radius_pc: f64,
+    pub gas_temperature_k: f64,
+    /// The brush's radius, pixels.
+    pub brush_px: f64,
+}
+
+impl Default for ToolSettings {
+    fn default() -> Self {
+        Self { galaxy_share: 0.3, galaxy_particles: 30_000, well_mass: 1e7, gas_mass: 1e9, gas_radius_pc: 2_000.0, gas_temperature_k: 1e4, brush_px: 30.0 }
+    }
 }
 
 impl UiState {
     pub fn new(particles: u32, seed: u64, fps_target: u32) -> Self {
         Self {
             paused: false,
+            auto_speed: true,
             speed: SPEEDS.len() - 1,
             fps_target,
             brightness: crate::snapshot::default_look().brightness,
@@ -48,13 +101,32 @@ impl UiState {
             reset_requested: false,
             view_reset_requested: false,
             fullscreen_requested: false,
+            tool: Tool::Select,
+            tools: ToolSettings::default(),
+            preset_name: String::new(),
+            presets: crate::save::list_presets(),
+            save_requested: None,
+            load_requested: None,
+            message: None,
         }
     }
 }
 
 /// Sim speeds to choose from, Myr of sim time per second; `None` (the last): as fast as the frame budget allows.
-pub const SPEEDS: [Option<f64>; 10] =
-    [Some(0.5), Some(1.0), Some(2.0), Some(5.0), Some(10.0), Some(20.0), Some(50.0), Some(100.0), Some(200.0), None];
+pub const SPEEDS: [Option<f64>; 12] = [
+    Some(0.5),
+    Some(1.0),
+    Some(2.0),
+    Some(5.0),
+    Some(10.0),
+    Some(20.0),
+    Some(50.0),
+    Some(100.0),
+    Some(200.0),
+    Some(500.0),
+    Some(1000.0),
+    None,
+];
 
 pub fn speed_name(speed: Option<f64>) -> String {
     match speed {
@@ -82,6 +154,19 @@ pub struct Hud {
     pub gpu_ms: Vec<(&'static str, f64)>,
     pub timestamps: bool,
     pub default_particles: u32,
+    /// The redshift (expanding universe only), and the galaxies the finder last counted (None: finder off).
+    pub redshift: Option<f64>,
+    pub galaxies: Option<usize>,
+    /// The speed the zoom suggests (Myr/s).
+    pub auto_myr_s: f64,
+}
+
+/// The index of the listed speed nearest `myr_s`.
+pub fn nearest_speed(myr_s: f64) -> usize {
+    (0..SPEEDS.len() - 1).min_by(|&a, &b| {
+        let d = |i: usize| (SPEEDS[i].unwrap_or(1.0) / myr_s).ln().abs();
+        d(a).total_cmp(&d(b))
+    }).unwrap_or(0)
 }
 
 pub const KEYS: &[(&str, &str)] = &[
@@ -89,6 +174,11 @@ pub const KEYS: &[(&str, &str)] = &[
     ("H", "this list of keys"),
     ("Space", "pause / run"),
     ("[ / ]", "slower / faster (sim time per second)"),
+    ("A", "speed by zoom on / off"),
+    ("1 - 7", "tools: select, galaxy, super well, gas, kick, delete, move"),
+    ("F5 / F9", "quick save / quick load"),
+    ("Click", "select a galaxy (its ring) or a particle; it is followed"),
+    ("Esc", "close the key list / menu / star system, else clear the selection"),
     ("R", "reset the universe"),
     ("D", "show / hide the dark matter"),
     ("G", "show / hide the gas"),
@@ -97,7 +187,6 @@ pub const KEYS: &[(&str, &str)] = &[
     ("F11", "fullscreen"),
     ("Wheel", "zoom at the cursor"),
     ("Drag", "move the view (left or right button)"),
-    ("Esc", "close the key list / menu"),
 ];
 
 fn info(ui: &mut Ui, text: &str) {
@@ -108,8 +197,10 @@ fn corners(ui: &Ui, hud: &Hud, fps_target: u32) {
     let ctx = ui.ctx();
     let mono = |s: String| RichText::new(s).monospace().color(Color32::from_gray(210));
     egui::Area::new(egui::Id::unique("status")).anchor(Align2::LEFT_TOP, [8.0, 6.0]).interactable(false).show(ctx, |ui| {
+        let z = hud.redshift.map_or(String::new(), |z| format!("   z = {z:.2}"));
+        let gals = hud.galaxies.map_or(String::new(), |n| format!("   {n} galaxies"));
         ui.label(mono(format!(
-            "{} particles   t = {:.1} Myr   {:.1} Myr/s   {:.0} / {} fps",
+            "{} particles   t = {:.1} Myr{z}{gals}   {:.1} Myr/s   {:.0} / {} fps",
             group(hud.particles as u64),
             hud.sim_time_myr,
             hud.myr_per_s,
@@ -136,8 +227,112 @@ pub fn group(n: u64) -> String {
     out
 }
 
+fn tools(ui: &mut Ui, st: &mut UiState) {
+    ui.horizontal_wrapped(|ui| {
+        for (t, name) in [
+            (Tool::Select, "Select"),
+            (Tool::Galaxy, "Galaxy"),
+            (Tool::Well, "Super well"),
+            (Tool::Gas, "Gas"),
+            (Tool::Kick, "Kick"),
+            (Tool::Delete, "Delete"),
+            (Tool::Move, "Move"),
+        ] {
+            ui.selectable_value(&mut st.tool, t, name);
+        }
+        info(
+            ui,
+            "What a click in the view does. Select: pick a galaxy (its ring, when small) or a particle, and follow it. \
+             Galaxy, Super well, Gas: place one where you click (moving with what is followed, if anything). Kick: \
+             drag to give everything under the brush a velocity (the longer the drag, the faster). Delete: click or \
+             drag to remove everything under the brush. Move: drag what is under the brush. The tools act between \
+             steps; new particles go into spare slots kept for them (5% of the particles).",
+        );
+    });
+    let t = &mut st.tools;
+    match st.tool {
+        Tool::Galaxy => {
+            ui.horizontal(|ui| {
+                ui.label("Mass");
+                ui.add(egui::Slider::new(&mut t.galaxy_share, 0.02..=2.0).logarithmic(true).suffix(" x Milky Way"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Particles");
+                ui.add(egui::DragValue::new(&mut t.galaxy_particles).range(2_000..=500_000).speed(500));
+            });
+        }
+        Tool::Well => {
+            ui.horizontal(|ui| {
+                ui.label("Mass");
+                ui.add(egui::Slider::new(&mut t.well_mass, 1e3..=1e10).logarithmic(true).suffix(" Msun"));
+            });
+        }
+        Tool::Gas => {
+            ui.horizontal(|ui| {
+                ui.label("Mass");
+                ui.add(egui::Slider::new(&mut t.gas_mass, 1e5..=1e11).logarithmic(true).suffix(" Msun"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Radius");
+                ui.add(egui::Slider::new(&mut t.gas_radius_pc, 50.0..=50_000.0).logarithmic(true).suffix(" pc"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Temperature");
+                ui.add(egui::Slider::new(&mut t.gas_temperature_k, 100.0..=1e7).logarithmic(true).suffix(" K"));
+            });
+        }
+        Tool::Kick | Tool::Delete | Tool::Move => {
+            ui.horizontal(|ui| {
+                ui.label("Brush");
+                ui.add(egui::Slider::new(&mut t.brush_px, 3.0..=300.0).logarithmic(true).suffix(" px"));
+            });
+        }
+        Tool::Select => {}
+    }
+}
+
+fn saves(ui: &mut Ui, st: &mut UiState) {
+    ui.horizontal(|ui| {
+        if ui.button("Quick save (F5)").clicked() {
+            st.save_requested = Some(crate::save::quick_path());
+        }
+        if ui.button("Quick load (F9)").clicked() {
+            st.load_requested = Some(crate::save::quick_path());
+        }
+        info(ui, "Saves the whole universe as it is (every particle, the settings and the clock), and loads it back to carry on.");
+    });
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut st.preset_name).hint_text("preset name").desired_width(150.0));
+        if ui.add_enabled(!st.preset_name.trim().is_empty(), egui::Button::new("Save as preset")).clicked() {
+            st.save_requested = Some(crate::save::preset_path(&st.preset_name));
+        }
+        info(ui, "Keeps the universe as it is now as a preset, in the presets folder, to start from again later (listed below).");
+    });
+    if !st.presets.is_empty() {
+        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+            for (name, path) in &st.presets {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Load").clicked() {
+                        st.load_requested = Some(path.clone());
+                    }
+                    ui.label(name);
+                });
+            }
+        });
+    }
+}
+
 pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
     corners(ui, hud, st.fps_target);
+    if let Some((m, until)) = &st.message {
+        if std::time::Instant::now() < *until {
+            egui::Area::new(egui::Id::unique("message")).anchor(Align2::CENTER_TOP, [0.0, 30.0]).interactable(false).show(ui.ctx(), |ui| {
+                ui.label(RichText::new(m).color(Color32::from_rgb(255, 220, 140)));
+            });
+        } else {
+            st.message = None;
+        }
+    }
     let ctx = ui.ctx().clone();
 
     egui::Area::new(egui::Id::unique("menu button")).anchor(Align2::RIGHT_BOTTOM, [-10.0, -10.0]).show(&ctx, |ui| {
@@ -178,14 +373,29 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
                 info(ui, "Stops and starts the clock. The view can still be moved and zoomed while paused.");
             });
             ui.horizontal(|ui| {
+                ui.checkbox(&mut st.auto_speed, "Speed by zoom (A)");
+                if st.auto_speed {
+                    ui.label(format!("{:.2} Myr/s", hud.auto_myr_s));
+                }
+                info(
+                    ui,
+                    "The zoom suggests the speed: about 10 Myr/s on a whole galaxy (a rotation in ~20 s), slower closer \
+                     in, up to ~2,000 Myr/s on the whole universe. Choosing a speed below turns it off.",
+                );
+            });
+            ui.horizontal(|ui| {
                 ui.label("Speed");
                 let mut i = st.speed as u32;
+                let before = i;
                 if ui.add(egui::Button::new("⏴").small()).clicked() {
                     i = i.saturating_sub(1);
                 }
                 ui.add(egui::Slider::new(&mut i, 0..=(SPEEDS.len() - 1) as u32).show_value(false));
                 if ui.add(egui::Button::new("⏵").small()).clicked() {
                     i = (i + 1).min(SPEEDS.len() as u32 - 1);
+                }
+                if i != before {
+                    st.auto_speed = false;
                 }
                 st.speed = i as usize;
                 ui.label(speed_name(SPEEDS[st.speed]));
@@ -211,11 +421,18 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
             ui.horizontal(|ui| {
                 ui.label("Scene");
                 ui.selectable_value(&mut st.scene, crate::sim::Scene::Galaxy, "Galaxy");
+                ui.selectable_value(&mut st.scene, crate::sim::Scene::Pair, "Pair");
+                ui.selectable_value(&mut st.scene, crate::sim::Scene::Group, "Group");
+                ui.selectable_value(&mut st.scene, crate::sim::Scene::Universe, "Universe");
                 ui.selectable_value(&mut st.scene, crate::sim::Scene::Disc, "Test disc");
                 info(
                     ui,
                     "What the next reset makes. Galaxy: a disc of stars, a bulge, a dark matter halo and a super well \
-                     at the centre, in balance. Test disc: stars round a fixed central mass (the phase-1 test scene).",
+                     at the centre, in balance. Pair: two such galaxies on a collision course. Group: 24 galaxies \
+                     (one large, three medium, twenty dwarfs) falling together. Universe: the early universe, 20 Mpc \
+                     across from redshift 30: dark matter and gas, nearly smooth, collapse into the cosmic web and \
+                     its galaxies as space expands. Test disc: stars round a fixed central mass (the phase-1 test \
+                     scene).",
                 );
             });
             if st.scene == crate::sim::Scene::Galaxy {
@@ -237,6 +454,14 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
             if ui.button("Reset (R)").clicked() {
                 st.reset_requested = true;
             }
+
+            ui.separator();
+            ui.heading("Tools");
+            tools(ui, st);
+
+            ui.separator();
+            ui.heading("Saves and presets");
+            saves(ui, st);
 
             ui.separator();
             ui.heading("Display");

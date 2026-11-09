@@ -221,11 +221,14 @@ impl AsyncRead {
         Self { buf, state: Arc::new(AtomicU8::new(READ_IDLE)), copied: false }
     }
 
-    pub fn copy(&mut self, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Buffer) {
+    /// Copies `src` for reading back, unless a read is still under way; returns whether it copied.
+    pub fn copy(&mut self, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Buffer) -> bool {
         if !self.copied && self.state.load(Ordering::Acquire) == READ_IDLE {
             encoder.copy_buffer_to_buffer(src, 0, &self.buf, 0, self.buf.size());
             self.copied = true;
+            return true;
         }
+        false
     }
 
     pub fn after_submit(&mut self) {
