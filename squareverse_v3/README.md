@@ -404,9 +404,10 @@ The menu is behind the button in the bottom-right corner (or Tab), with an (i) b
   - speed by zoom (on by default): the zoom suggests the speed;
   - speed: sim time per second, 0.5 - 1000 Myr/s or "max" (as much as the frame budget allows), with the speed
     reached shown below; choosing one turns speed by zoom off;
-  - the scene (galaxy, pair, group, universe or test disc) and the galaxy's Toomre Q, for the next reset;
+  - the scene (galaxy, pair, group, universe or test disc): clicking one starts it at once; the galaxy's Toomre Q
+    applies at the next reset;
   - particles and seed for the next reset, with a button back to this GPU's default;
-  - Reset.
+  - Reset (also after a load or a reset: the view goes to the new scene, and it runs even if it was paused).
 * **Tools:** the tool buttons and the chosen tool's settings: for a galaxy its mass (x Milky Way) and particles; for
   a super well its mass; for gas its mass, radius and temperature; the brush radius in px.
 * **Saves and presets:** quick save / load, "Save as preset" with a name, and the list of presets with a Load button.

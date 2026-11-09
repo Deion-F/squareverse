@@ -424,14 +424,24 @@ pub fn show(ui: &mut Ui, st: &mut UiState, hud: &Hud) {
             });
             ui.horizontal(|ui| {
                 ui.label("Scene");
-                ui.selectable_value(&mut st.scene, crate::sim::Scene::Galaxy, "Galaxy");
-                ui.selectable_value(&mut st.scene, crate::sim::Scene::Pair, "Pair");
-                ui.selectable_value(&mut st.scene, crate::sim::Scene::Group, "Group");
-                ui.selectable_value(&mut st.scene, crate::sim::Scene::Universe, "Universe");
-                ui.selectable_value(&mut st.scene, crate::sim::Scene::Disc, "Test disc");
+                if ui.selectable_value(&mut st.scene, crate::sim::Scene::Galaxy, "Galaxy").changed() {
+                    st.reset_requested = true;
+                }
+                if ui.selectable_value(&mut st.scene, crate::sim::Scene::Pair, "Pair").changed() {
+                    st.reset_requested = true;
+                }
+                if ui.selectable_value(&mut st.scene, crate::sim::Scene::Group, "Group").changed() {
+                    st.reset_requested = true;
+                }
+                if ui.selectable_value(&mut st.scene, crate::sim::Scene::Universe, "Universe").changed() {
+                    st.reset_requested = true;
+                }
+                if ui.selectable_value(&mut st.scene, crate::sim::Scene::Disc, "Test disc").changed() {
+                    st.reset_requested = true;
+                }
                 info(
                     ui,
-                    "What the next reset makes. Galaxy: a disc of stars, a bulge, a dark matter halo and a super well \
+                    "Starts that scene (clicking one starts it at once; Reset starts the chosen one again). Galaxy: a disc of stars, a bulge, a dark matter halo and a super well \
                      at the centre, in balance. Pair: two such galaxies on a collision course. Group: 24 galaxies \
                      (one large, three medium, twenty dwarfs) falling together. Universe: the early universe, 20 Mpc \
                      across from redshift 30: dark matter and gas, nearly smooth, collapse into the cosmic web and \

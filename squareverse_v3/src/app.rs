@@ -145,6 +145,8 @@ impl Running {
         let default_particles = budget::default_particles(&gpu);
         // the window keeps spare slots for the tools
         let cfg = SimConfig { spare_share: cli.spares.unwrap_or(SPARE_SHARE), ..config_from(cli, &gpu) };
+        // the menu's particle count is the scene's, without the spare slots
+        let base_particles = cfg.particles;
         let sim = Sim::new(&gpu, cfg)?;
         let timer = GpuTimer::new(&gpu.device, &gpu.queue, gpu.timestamps);
 
@@ -160,7 +162,7 @@ impl Running {
         let egui_renderer = egui_wgpu::Renderer::new(&gpu.device, format, Default::default());
 
         let camera = home_camera(&sim.cfg, (config.width, config.height));
-        let mut ui = UiState::new(sim.cfg.particles, sim.cfg.seed, cli.fps);
+        let mut ui = UiState::new(base_particles, sim.cfg.seed, cli.fps);
         ui.scene = sim.cfg.scene;
         ui.toomre_q = sim.cfg.galaxy.toomre_q;
         ui.show_dm = cli.show_dm;
@@ -232,11 +234,19 @@ impl Running {
         cfg.galaxy.toomre_q = self.ui.toomre_q;
         cfg.spare_share = self.spare_share;
         self.sim = Sim::new(&self.gpu, cfg)?;
-        self.view = ViewState::default();
+        self.started_fresh();
         self.display_myr = 0.0;
+        Ok(())
+    }
+
+    /// After a reset or a load: nothing selected, running, the view on the new scene.
+    fn started_fresh(&mut self) {
+        self.view = ViewState::default();
+        self.ui.paused = false;
+        self.past_today = self.sim.cfg.cosmology.is_some() && self.sim.redshift() <= 0.0;
         self.display_rate = 0.0;
         self.allowance = 0.0;
-        Ok(())
+        self.camera = home_camera(&self.sim.cfg, self.size());
     }
 
     fn key(&mut self, key: &Key) {
@@ -390,12 +400,9 @@ impl Running {
             match crate::save::load(&self.gpu, &path) {
                 Ok(sim) => {
                     self.sim = sim;
-                    self.view = ViewState::default();
                     self.ui.scene = self.sim.cfg.scene;
                     self.display_myr = self.sim.pos_time_myr();
-                    self.display_rate = 0.0;
-                    self.allowance = 0.0;
-                    self.camera = home_camera(&self.sim.cfg, self.size());
+                    self.started_fresh();
                     self.say(format!("loaded {}", path.display()));
                 }
                 Err(e) => self.say(format!("could not load: {e:#}")),
