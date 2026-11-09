@@ -11,7 +11,7 @@
 @group(0) @binding(4) var<storage, read_write> acc: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> wsink: array<atomic<u32>>;
 
-const MAX_WELLS: u32 = 64u;
+const MAX_WELLS: u32 = 256u;
 
 fn well_count() -> u32 {
     return min(atomicLoad(&wsink[0]), MAX_WELLS);

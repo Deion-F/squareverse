@@ -306,6 +306,13 @@ $E --list-adapters
   - If the gas passes dominate on the Radeon, candidates are a group walk for the gas density and force (the gas is
     spatially sorted), and slicing the gas passes like the force pass (`Work::Gas` is one item).
 
+### L5. Super wells and binaries (phase 4), for the optimizer
+
+- **What:** nothing new to run; L2 / L4's commands cover it (the galaxy now has accreting wells).
+- **Look for:** the `evolve` stage in `gpu_ms_mean`.
+- **Then:** if `evolve` is large, look at `wells_env.wgsl surroundings` (one thread a well, a tree walk of 500 pc)
+  and `swallow` (every particle loops over the wells, up to 256).
+
 ## Progress
 
 Phase 0 (started 2026-11-06):
@@ -557,7 +564,7 @@ Phase 3 (started 2026-11-08):
   `sf_efficiency` (0.01) and the gas fraction tune it. Material shed by stars arrives without the star's momentum.
 - [ ] **Laptop:** L4 in the laptop backlog.
 
-Phase 4 (started 2026-11-08, paused mid-phase at the user's request):
+Phase 4 (2026-11-08; paused once at the user's request, then finished):
 
 - [x] **Well list rebuilt each step** (`wells_list.wgsl`, a prefix sum in sorted order, so it's deterministic): wells
   can be born and merge. At most 64.
@@ -574,10 +581,15 @@ Phase 4 (started 2026-11-08, paused mid-phase at the user's request):
   a seed well at star formation. The gas metallicity is now kept in the gas record's 4th word.
 - [x] **Tests:** 19 pass (4 new: Eddington-capped feeding with AGN heat, mergers keeping mass and momentum, dynamical
   friction, direct collapse).
-- [ ] **Next when resumed:**
-  - Stellar black holes -> intermediate wells (single-star resolution: BH remnants merging in dense clusters).
-  - Tight-binary sub-grid (binary fraction and orbits at birth, encounters harden / soften / disrupt), with Type Ia
-    from binaries alongside the delay-time model.
-  - A galaxy diagnostic for a light well sinking to the centre.
-  - README phase-4 section, a laptop backlog item (L5), commit.
-
+- [x] **Well list to 256.** Single stars' black holes become (stellar-mass) wells that merge when bound into
+  intermediate wells; those under 1,000 Msun aren't drawn.
+- [x] **Binaries at birth** as a pure function of id and mass (`binary_of`, WGSL and Rust): fraction, log-normal
+  periods, q, eccentricity. **Type Ia** from close white-dwarf binaries for single stars (the GPU agrees with the CPU
+  on all 107 in the test).
+- [x] **Tests:** 21 pass (+2: black holes to wells to mergers; Ia from binaries).
+- [x] **RTX 2070 Super window, galaxy at 500k:** 60.0 fps, worst frame 19.7 ms, 2.3 Myr/s.
+- **Not done, carried:**
+  - Encounters hardening, softening or disrupting binaries: they need each star's local stellar density and
+    dispersion; do it with the single-star cluster presets (phase 8) or the star system view (phase 7).
+  - A galaxy-scale run of a light well sinking to the centre: friction is tested in a static field only.
+- [ ] **Laptop:** L5 in the laptop backlog.

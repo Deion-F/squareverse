@@ -71,6 +71,8 @@ fn vs(
         tint = mix(tint, hot, smoothstep(5.0, 6.5, lt));
         let glow = 0.25 * sqrt(clamp(star.y, 0.0, 400.0));
         color = tint * glow * view.brightness * f32((view.flags & 2u) == 0u);
+    } else if (kind == 2u && bitcast<f32>(body.x) < 1000.0) {
+        color = vec3<f32>(0.0);   // a stellar-mass well (a single star's black hole): not seen
     } else if (kind == 2u) {
         // a super well: a white marker, a few pixels across at any zoom
         size = max(3.0 * view.square_px, 5.0);

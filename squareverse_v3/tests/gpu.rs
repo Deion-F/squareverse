@@ -453,7 +453,8 @@ fn stars_live_die_and_leave_remnants() {
     let sim = Sim::from_initial(&g, cfg, &init).unwrap();
     let s = sim.read_state(&g).unwrap();
     eprintln!("kinds {:?}, masses {:?}, (T, L) {:?}", s.kind, s.mass, s.star);
-    assert_eq!(s.kind, vec![Kind::NeutronStar as u32, Kind::WhiteDwarf as u32, Kind::Star as u32, Kind::BlackHole as u32]);
+    // a single star's black hole is a (stellar-mass) super well
+    assert_eq!(s.kind, vec![Kind::NeutronStar as u32, Kind::WhiteDwarf as u32, Kind::Star as u32, Kind::Well as u32]);
     // single stars: the remnant's mass (white dwarf 0.109 m + 0.394, neutron star 1.4, black hole m / 4)
     assert!((s.mass[0] - 1.4).abs() < 1e-4 && (s.mass[1] - (0.109 * 7.0 + 0.394)).abs() < 1e-4 && s.mass[2] == 1.0);
     assert!((s.mass[3] - 10.0).abs() < 1e-4);
@@ -708,4 +709,64 @@ fn dense_primordial_gas_collapses_into_wells() {
     // a few gas particles the new wells have eaten below the collapse mass may still form stars
     assert!(count(Kind::Well) + count(Kind::Gone) >= 3);
     assert!(born_stars <= 2, "metal-free gas this dense and massive should collapse to wells, not stars: {born_stars}");
+}
+
+#[test]
+fn stellar_black_holes_become_wells_and_merge() {
+    use squareverse::sim::init::{Initial, Kind};
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = wells_cfg();
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    let mut init = Initial::with_capacity(3);
+    // two 40 Msun stars, 50 Myr old (they lived ~3 Myr): 10 Msun black holes, 0.5 pc apart, at rest: bound
+    for dx in [-0.25, 0.25] {
+        init.push_kind(c.offset_pc(dx, 0.0, cfg.box_pc), [0.0, 0.0], 40.0, (5000.0, 1.0), Kind::Star, [-50.0, 40.0, 40.0, 0.0]);
+    }
+    init.push(c.offset_pc(3_000.0, 0.0, cfg.box_pc), [0.0, 0.0], 1.0, (5772.0, 1.0)); // a bystander
+    let mut sim = Sim::from_initial(&g, cfg, &init).unwrap();
+    let s0 = sim.read_state(&g).unwrap();
+    run(&g, &mut sim, 1);
+    let s1 = sim.read_state(&g).unwrap();
+    eprintln!("kinds {:?} -> {:?}, masses {:?} -> {:?}", s0.kind, s1.kind, s0.mass, s1.mass);
+    assert_eq!(&s0.kind[..2], &[Kind::Well as u32, Kind::Well as u32]);
+    assert_eq!(&s1.kind[..2], &[Kind::Well as u32, Kind::Gone as u32]);
+    assert!((s1.mass[0] - 20.0).abs() < 1e-3, "{}", s1.mass[0]);
+}
+
+#[test]
+fn white_dwarfs_in_close_binaries_go_off_as_type_ia() {
+    use squareverse::sim::init::{Initial, Kind, binary_of, lifetime};
+    let Some(g) = gpu() else { return };
+    let g = g.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = wells_cfg();
+    let c = Fixed2::from_pc(cfg.center_pc.0, cfg.center_pc.1, cfg.box_pc);
+    // 3,000 single 5 Msun stars (they live 179 Myr: white dwarfs). Those whose companion (by binary_of) is close and
+    // 1 - 5 Msun are set to reach its lifetime 1 Myr into the run; the rest are 500 Myr old (the shader's binary_of
+    // must give the same companions as the CPU's)
+    let m = 5.0f32;
+    let mut init = Initial::with_capacity(3_000);
+    let mut expect = Vec::new();
+    for id in 0..3_000u32 {
+        let b = binary_of(id, m);
+        let m2 = (b[0] * m) as f64;
+        // the shader's rule: a companion, log P < 1.5, m2 >= 1, outliving the white dwarf's star
+        let tight = b[3] > 0.5 && b[1] < 1.5 && m2 >= 1.0 && lifetime(m2) > lifetime(m as f64);
+        // near the rule's edges float rounding on the GPU could tip it: those stay young (still stars)
+        let edge = b[3] > 0.5 && ((b[1] - 1.5).abs() < 0.05 || (m2 - 1.0).abs() < 0.05 || (m2 - m as f64).abs() < 0.05);
+        let age = if edge { 100.0 } else if tight { lifetime(m2) - 1.0 } else { 500.0 };
+        expect.push(tight && !edge);
+        let p = c.offset_pc(10.0 * (id % 60) as f64, 10.0 * (id / 60) as f64, cfg.box_pc);
+        init.push_kind(p, [0.0, 0.0], m as f64, (5000.0, 1.0), Kind::Star, [-age as f32, m, m, 0.0]);
+    }
+    let mut sim = Sim::from_initial(&g, cfg, &init).unwrap();
+    run(&g, &mut sim, 2); // the evolution passes at 0 and 2 Myr
+    let s = sim.read_state(&g).unwrap();
+    let gone: Vec<bool> = s.kind.iter().map(|&k| k == Kind::Gone as u32).collect();
+    let n_tight = expect.iter().filter(|&&t| t).count();
+    let wrong = gone.iter().zip(&expect).filter(|(a, b)| a != b).count();
+    eprintln!("{n_tight} of 3,000 white dwarfs in close binaries with 1 - 5 Msun companions; {wrong} disagree with binary_of");
+    assert!(n_tight > 20, "{n_tight}");
+    assert_eq!(wrong, 0);
+    assert!(s.kind.iter().zip(&expect).all(|(&k, &t)| t || k == Kind::WhiteDwarf as u32 || k == Kind::Star as u32));
 }

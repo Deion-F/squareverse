@@ -4,15 +4,15 @@ Galaxies and the universe they live in, simulated on the GPU and drawn as square
 `squareverse_v2` in Rust + wgpu: one native program per OS (Windows: DX12 / Vulkan, Mac: Metal, Linux: Vulkan / GL),
 nothing for users to install. The design, the decisions behind it and progress are in `../PLAN_V3.md`.
 
-**Status: phase 3 (gas and the star cycle) done.** The default scene is a Milky-Way-like galaxy in balance: a disc
+**Status: phase 4 (super wells and binaries) done.** The default scene is a Milky-Way-like galaxy in balance: a disc
 of stars, a gas disc, a bulge, a dark matter halo and a super well at the centre.
 - **Gas:** SPH hydrodynamics. It cools and forms stars (near the Kennicutt-Schmidt law).
-- **Stars:** they age into giants and remnants. They give back mass, elements (He, C/N/O, Mg/Si, Fe) and supernova
-  heat, so each generation forms richer in metals.
-- **Gravity:** a Barnes-Hut tree on the GPU. Each particle steps as often as it needs, and the frame rate holds
-  while the sim slows instead.
+- **Stars:** they age into giants and remnants, and give back mass, elements and supernova heat.
+- **Super wells:** they feed on gas (Bondi, Eddington-capped) and heat it (AGN). Dynamical friction sinks them; bound
+  pairs merge; new ones form from dense metal-free gas and, with single stars, from stellar black holes.
+- **Binaries:** each star has its companion at birth; close ones with white dwarfs explode as type Ia supernovae.
 
-Next: binaries and small super wells (phase 4), with gas accretion onto wells and their feedback.
+Next: the universe scale (phase 5).
 
 ## Setting up a machine (WSL / Ubuntu), once
 
@@ -182,9 +182,44 @@ particle's mass loss goes to its nearest gas particle within 500 pc.
 - **Speed at 500k:** the window holds 60 fps at 2.2 Myr/s.
 
 **Not yet:**
-- gas accretion onto the wells (Bondi) and their feedback (phase 4); for now a well swallows bound gas within 2 pc;
 - merging and splitting gas particles;
 - gas momentum from stellar mass loss (the gas keeps its own velocity).
+
+## Super wells and binaries (phase 4)
+
+The wells are listed each step, in sorted order by a prefix sum (`wells_list.wgsl`, at most 256), so they can
+appear and merge and a seed still gives the same run. Once a step of dt:
+- **Bondi accretion** (`wells_env.wgsl`) from the nearest gas particle: mdot = 4 pi G² M² rho / (c_s² + v²)^(3/2).
+  - **Caps:** Eddington (M / 45 Myr) and a quarter of that gas particle a step.
+  - **Bookkeeping:** the mass leaves the gas with its momentum, through the feedback deposit as a negative mass.
+  - **AGN feedback:** 0.015 of mdot c² heats the same gas.
+  - **Galaxy:** the central well grew 4e6 -> 3e7 Msun in 300 Myr (100k particles).
+- **Dynamical friction** (Chandrasekhar, Maxwellian, ln Λ = 3) from the stars and dark matter within 500 pc.
+  - **Who:** wells too light for the tree to drag properly, weighted 1 - M / 50 m (m the field particles' mean
+    mass).
+  - **Test:** a 5e6 Msun well slowed 30 -> 11.8 pc/Myr in 8 Myr, against 20.5 without friction.
+- **Mergers** (`wells_merge.wgsl`): two wells within 100 pc and bound to each other become one.
+  - **Kept:** mass, momentum, and the mass-weighted last acceleration (else the next half kick still carries the
+    partner's pull).
+  - **Instant:** the hardening below the resolution and the gravitational-wave inspiral.
+- **New wells:**
+  - **Direct collapse:** metal-poor (under 1e-3 solar), dense (over 10 cm^-3), massive (over 1e4 Msun) gas becomes a
+    seed well where it would form a star.
+  - **Stellar black holes:** with single stars (stars per particle about 1), a black hole remnant is a small well.
+    Bound ones merge into intermediate wells; under 1,000 Msun they aren't drawn.
+
+**Binaries** (`binary_of` in `shaders/common.wgsl` and `src/sim/init.rs`): a star's companion at birth is a pure
+function of its id and mass, so it costs no memory and is the same everywhere.
+- **Binary fraction:** 0.45 + 0.25 log10 m.
+- **Periods:** log-normal round 10^4.8 days, σ 2.3 dex; massive stars round 10^2, σ 1.5.
+- **Mass ratio:** q even over 0.1 - 1.
+- **Eccentricity:** thermal, circular under 10 days.
+- **Type Ia:** with single stars, a white dwarf with a companion closer than ~30 days (1 - 8 Msun) explodes when the
+  companion reaches its lifetime: 10^51 erg, 0.7 Msun of Fe. Populations keep the delay-time model.
+- **Not yet:**
+  - encounters hardening, softening or breaking binaries; they need the local stellar density per star, for the
+    single-star cluster scenes;
+  - drawing the pairs (phase 7's star system view).
 
 ## The scenes
 
@@ -326,6 +361,10 @@ runs them in software):
 - gas at 10^6 K cools to ~10^4 K and stays above the floor;
 - the galaxy's gas forms stars, its metallicity rises, later stars are richer, and the gas neither blows out nor
   collapses;
+- a well feeds on gas no faster than Eddington and heats it; bound wells merge keeping mass and momentum; dynamical
+  friction slows a light well; dense metal-free gas collapses into wells; single stars' black holes become wells
+  and merge;
+- type Ia supernovae go off exactly where the CPU's `binary_of` says (GPU and CPU binaries agree);
 - the GPU matches a CPU f64 reference (`src/sim/reference.rs`) with the disc centred on the box's corner, so particles
   cross the wrap and every step carries between the words.
 

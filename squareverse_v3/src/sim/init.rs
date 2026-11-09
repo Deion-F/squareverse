@@ -259,6 +259,38 @@ fn metallicity_at(g: &GalaxyConfig, r: f64) -> f64 {
     g.metallicity * 10f64.powf(-g.metal_gradient * (r / 1_000.0 - 8.0))
 }
 
+fn hash(x: u32) -> u32 {
+    let v = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+    let w = ((v >> ((v >> 28) + 4)) ^ v).wrapping_mul(277_803_737);
+    (w >> 22) ^ w
+}
+
+fn hash01(x: u32) -> f32 {
+    (hash(x) >> 8) as f32 / 16_777_216.0
+}
+
+/// A star's companion at birth, from its id and mass, as shaders/common.wgsl binary_of (the same numbers, bar rare
+/// float rounding at the edges): (mass ratio, log10 period in days, eccentricity, 1 if it has one). For the star
+/// system view (phase 7) and the tests.
+pub fn binary_of(id: u32, m: f32) -> [f32; 4] {
+    let s = hash(id ^ 0x9e37_79b9);
+    let frac = (0.45 + 0.25 * m.ln() / 10f32.ln()).clamp(0.2, 0.9);
+    if hash01(s) >= frac {
+        return [0.0; 4];
+    }
+    let q = 0.1 + 0.9 * hash01(s.wrapping_add(1));
+    let massive = m > 8.0;
+    let gauss = (-2.0 * hash01(s.wrapping_add(2)).max(1e-7).ln()).sqrt() * (std::f32::consts::TAU * hash01(s.wrapping_add(3))).cos();
+    let logp = ((if massive { 2.0 } else { 4.8 }) + (if massive { 1.5 } else { 2.3 }) * gauss).clamp(-0.5, 8.0);
+    let e = if logp < 1.0 { 0.0 } else { hash01(s.wrapping_add(4)).sqrt() };
+    [q, logp, e, 1.0]
+}
+
+/// Main-sequence lifetime, Myr, as shaders/evolve.wgsl.
+pub fn lifetime(m: f64) -> f64 {
+    (1e4 * m.powf(-2.5)).max(3.0)
+}
+
 /// The share of a Kroupa population's mass its dead stars have given back by `age` Myr (Jungwiert et al. 2001),
 /// as shaders/evolve.wgsl.
 pub fn returned_fraction(age: f64) -> f64 {

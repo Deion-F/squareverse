@@ -96,6 +96,35 @@ fn eos_u(sigma: f32) -> f32 {
     return u_of_temperature(8000.0) * pow(rho / c.gas_b.x, 1.0 / 3.0);
 }
 
+fn hash(x: u32) -> u32 {
+    let v = x * 747796405u + 2891336453u;
+    let w = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+fn hash01(x: u32) -> f32 {
+    return f32(hash(x) >> 8u) / 16777216.0;
+}
+
+// A star's companion at birth, from its id and mass, so it needs no storage (src/sim/init.rs binary_of is the
+// same): (mass ratio q, log10 period in days, eccentricity, 1 if it has one). The binary fraction rises with mass,
+// 0.45 + 0.25 log10 m (0.28 at 0.2 Msun, 0.45 at 1, 0.7 at 10); periods log-normal round 10^4.8 days (sigma 2.3
+// dex; massive stars round 10^2, 1.5 dex), after Raghavan et al. (2010) and Sana et al. (2012); q even over 0.1 - 1;
+// eccentricity thermal, circular under 10 days.
+fn binary_of(id: u32, m: f32) -> vec4<f32> {
+    let s = hash(id ^ 0x9e3779b9u);
+    let frac = clamp(0.45 + 0.25 * log(m) / log(10.0), 0.2, 0.9);
+    if (hash01(s) >= frac) {
+        return vec4<f32>(0.0);
+    }
+    let q = 0.1 + 0.9 * hash01(s + 1u);
+    let massive = m > 8.0;
+    let gauss = sqrt(-2.0 * log(max(hash01(s + 2u), 1e-7))) * cos(6.2831853 * hash01(s + 3u));
+    let logp = clamp(select(4.8, 2.0, massive) + select(2.3, 1.5, massive) * gauss, -0.5, 8.0);
+    let e = select(sqrt(hash01(s + 4u)), 0.0, logp < 1.0);
+    return vec4<f32>(q, logp, e, 1.0);
+}
+
 // the Wendland C2 kernel in 2D, reach H: W = 7 / (pi H^2) (1 - q)^4 (1 + 4q), q = r / H < 1
 fn kernel_w(r: f32, h: f32) -> f32 {
     let q = r / h;

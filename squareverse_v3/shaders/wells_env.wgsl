@@ -20,7 +20,7 @@
 @group(0) @binding(7) var<storage, read_write> wsink: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read_write> deposit: array<atomic<u32>>;
 
-const MAX_WELLS: u32 = 64u;
+const MAX_WELLS: u32 = 256u;
 const STACK: u32 = 96u;
 const TWO32: f32 = 4294967296.0;
 const MASS_SCALE: f32 = 1048576.0;

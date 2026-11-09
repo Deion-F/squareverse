@@ -7,7 +7,7 @@
 @group(0) @binding(2) var<storage, read_write> flags: array<u32>;
 @group(0) @binding(3) var<storage, read_write> wsink: array<atomic<u32>>;
 
-const MAX_WELLS: u32 = 64u;
+const MAX_WELLS: u32 = 256u;
 
 @compute @workgroup_size(256)
 fn flag(@builtin(global_invocation_id) gid: vec3<u32>) {

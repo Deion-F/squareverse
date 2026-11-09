@@ -27,8 +27,8 @@
 // what each star gives back this step: (mass, energy, new He, new C/N/O), (new Mg/Si, new Fe, -, -)
 @group(0) @binding(8) var<storage, read_write> emit: array<vec4<f32>>;
 
-const MAX_WELLS: u32 = 64u;
-const WELL_SINK: u32 = 65u;
+const MAX_WELLS: u32 = 256u;
+const WELL_SINK: u32 = 257u;
 
 fn well_count() -> u32 {
     return min(atomicLoad(&wsink[0]), MAX_WELLS);
@@ -81,12 +81,6 @@ fn remnant_mass(m: f32) -> f32 {
         return 1.4;
     }
     return 0.25 * m;
-}
-
-fn hash(x: u32) -> u32 {
-    let v = x * 747796405u + 2891336453u;
-    let w = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
-    return (w >> 22u) ^ w;
 }
 
 // a uniform number in [0, 1) from a particle's id, the clock and a stream number: the same every run
@@ -195,13 +189,35 @@ fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     var mass: f32;
-    if (c.single_stars == 1u) {
+    let single = c.single_stars == 1u;
+    if (single) {
         mass = select(mt.z, mt.z * remnant_mass(m) / m, k != K_STAR);
     } else {
         mass = mt.z * (1.0 - min(0.046 * log(max(age, 0.0) / 0.276 + 1.0), 0.5));
     }
+    var out_k = k;
+    // single stars only (a population's binaries are in its Ia delay-time model): a white dwarf with a close
+    // companion (period under ~30 days, companion of 1 - 8 Msun) explodes as a type Ia supernova when the companion
+    // evolves and feeds it (at the companion's main-sequence lifetime), leaving nothing
+    var ia = false;
+    if (single && k == K_WD) {
+        let bn = binary_of(b.y & ID_MASK, m);
+        let m2 = bn.x * m;
+        let t_ia = lifetime(m2);
+        if (bn.w > 0.5 && bn.y < 1.5 && m2 >= 1.0 && t_ia > life && age >= t_ia) {
+            ia = true;
+            out_k = K_GONE;
+            mass = 0.0;
+            tl = vec2<f32>(3000.0, 0.0);
+        }
+    }
+    // a single star's black hole is a small super well: wells that meet bound merge (wells_merge.wgsl), so in dense
+    // clusters they grow into intermediate wells
+    if (single && k == K_BH) {
+        out_k = K_WELL;
+    }
     let old_mass = bitcast<f32>(b.x);
-    body[i] = vec2<u32>(bitcast<u32>(mass), (k << KIND_SHIFT) | (b.y & ID_MASK));
+    body[i] = vec2<u32>(bitcast<u32>(mass), (out_k << KIND_SHIFT) | (b.y & ID_MASK));
     let v = kin[i];
     kin[i] = vec4<f32>(v.xy, tl);
 
@@ -212,9 +228,13 @@ fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dm = max(old_mass - mass, 0.0);
     var energy = 0.0;
     var fe_ia = 0.0;
-    if (c.single_stars == 1u) {
+    if (single) {
         if (kind == K_STAR && k != K_STAR && m >= 8.0) {
             energy = c.gas_d.x;   // its core-collapse supernova
+        }
+        if (ia) {
+            energy = c.gas_d.x;
+            fe_ia = min(0.7, dm);
         }
     } else {
         // core-collapse supernovae, 0.0118 per Msun formed (Kroupa, 8 - 100 Msun), spread over ages 3 - 40 Myr
@@ -225,7 +245,9 @@ fn evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // new elements in what is given back: early (core collapse) rich in O, Mg, Si, some Fe; later (AGB) C, N
     var fresh: vec4<f32>;
-    if (age < 40.0 || (c.single_stars == 1u && m >= 8.0)) {
+    if (ia) {
+        fresh = vec4<f32>(0.0, 0.0, dm - fe_ia, 0.0);   // the white dwarf all goes: Fe (below), the rest Si
+    } else if (age < 40.0 || (single && m >= 8.0)) {
         fresh = vec4<f32>(0.08, 0.0715, 0.0275, 0.011) * dm;
     } else {
         fresh = vec4<f32>(0.05, 0.02, 0.0, 0.0) * dm;

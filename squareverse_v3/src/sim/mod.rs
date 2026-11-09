@@ -557,9 +557,9 @@ impl Sim {
         let chem = [make("chem 0", bytemuck::cast_slice(&init.chem), false), make("chem 1", bytemuck::cast_slice(&init.chem), false)];
         // the wells' particle indices and what they swallowed (evolve.wgsl), what stars give back and where it
         // goes (feedback.wgsl)
-        anyhow::ensure!(init.wells <= 64, "at most 64 super wells");
-        // [0] how many wells, [1 ..= 64] their indices (wells_list.wgsl), then 6 sums a well (evolve.wgsl swallow)
-        let wsink = storage(d, "wells and sink", (65 + 64 * 6) * 4);
+        anyhow::ensure!(init.wells <= 256, "at most 256 super wells");
+        // [0] how many wells, [1 ..= 256] their indices (wells_list.wgsl), then 6 sums a well (evolve.wgsl swallow)
+        let wsink = storage(d, "wells and sink", (257 + 256 * 6) * 4);
         let emit = storage(d, "emit", n as u64 * 32);
         let deposit = storage(d, "deposit", n as u64 * 48);
         let counts = storage(d, "bin counts", MAX_LEVELS as u64 * 4);
@@ -833,8 +833,9 @@ impl Sim {
         }
         let one = Groups { x: 1, y: 1 };
         self.k.evolve.run(&mut pass, "swallow", &set.evolve, g);
-        self.k.evolve.run(&mut pass, "swallow_apply", &set.evolve, one);
-        self.k.wells_env.run(&mut pass, "surroundings", &set.wells_env, one);
+        let wells = Groups { x: 4, y: 1 }; // 256 wells, 64 a workgroup
+        self.k.evolve.run(&mut pass, "swallow_apply", &set.evolve, wells);
+        self.k.wells_env.run(&mut pass, "surroundings", &set.wells_env, wells);
         self.k.wells_merge.run(&mut pass, "merge", &set.wells_merge, one);
         if self.has_gas {
             // what stars gave back, and wells took, goes to the gas (the tree is the last sub-step's)
