@@ -32,6 +32,14 @@ line installs Rust into `~/.cargo`.
 
 ## Running
 
+From WSL, `squareverse_v3` runs the Windows exe (the GPU natively), with the sim's options after it
+(`squareverse_v3 --scene universe`). It builds the exe if there is none; `squareverse_v3 --rebuild` rebuilds first,
+`squareverse_v3 --rebuild-only` only rebuilds. It's `scripts/squareverse_v3`; install it once with
+`ln -s "$PWD/scripts/squareverse_v3" ~/.local/bin/` from this folder. Quick saves go to this folder's `saves/`
+wherever you start it; `--report` and `--snapshot` paths are relative to where you run it.
+
+With cargo (inside WSL the GPU is reached only through OpenGL):
+
 ```
 cargo run --release                                   # the window
 cargo run --release -- --particles 500000 --fps 30    # options: see --help
@@ -73,17 +81,23 @@ may take shorter steps from the end of any step, longer ones only where their bo
 
 1. **Open, drift** (`integrate.wgsl`): the opening half kick for the particles whose step begins now; every particle
    drifts one sub-step, in fixed point.
-2. **Tree.** Every 8 sub-steps (`rebuild_every`) it is rebuilt:
+2. **Tree.** Every `rebuild_every` sub-steps it is rebuilt (4 in the galaxy and pair, whose fast bulge outruns a
+   refitted tree; 8 in the test disc, universe and group):
    - **Sort** (`morton.wgsl`, `radix.wgsl`, `scan.wgsl`): the particles' bounding box and their 48-bit Morton keys,
      then a stable radix sort in six passes of 8 bits.
    - **Build**: `gather.wgsl` and `gather_step.wgsl` move the particles, their last accelerations and their bins into
      key order. Then `karras.wgsl` builds a binary radix tree (Karras 2012), and `moments.wgsl` climbs from the leaves
-     to give each node its mass, centre of mass, bounding box, opening radius and second moments.
+     to give each node its mass, centre of mass, bounding box, opening radius and second moments. A node is a 32-byte
+     walk record (centre of mass, mass, opening radius and children first; quadrupole and softening next; the box and
+     the particle run last), so opening a node reads half of it.
    - **Refit**: in between, only the moments are recomputed, for the new positions over the same tree.
 3. **Compact** (`compact.wgsl`): lists the particles whose step ends now.
 4. **Force** (`force_particle.wgsl`): each listed particle walks the tree. A node beyond its opening radius (size /
    theta plus the offset of its centre of mass from the box centre) acts as a softened point mass plus its quadrupole;
-   a nearer one is opened.
+   a nearer one is opened. The walk's stack lives in a function, not the entry point (otherwise every thread of the
+   dispatch zero-fills it, even those that return at once). On a short list, a particle's walk is split over up to 16
+   threads (`SPLIT_MAX`, with list x threads within `SPLIT_SLOTS`, 32,768); their partial sums are added in order.
+   Gas density (`density.wgsl`, shared with `hydro.wgsl`) runs in the same dispatch, in half of each workgroup.
    - `--walk group` uses `force.wgsl` instead: 64 particles walk together. It is slower, badly so on short lists.
    - `--open-small X` lets nodes smaller than X softening lengths act as one mass at any distance. It is off by
      default, because it measured no faster.
@@ -100,11 +114,12 @@ Measured 2026-11-07 (20k particles, 250 Myr), relative energy change for seeds 1
 | The old fixed 0.25 Myr step | 9e-6 / -3.6e-4 / 6.7e-5 | 4 |
 | Fixed 0.125 Myr | ~1e-5 | 8 |
 
-- **Speed (1M particles, RTX 2070 Super):** block steps take 91 GPU ms per Myr, against 105 for the fixed 0.25 Myr
-  step and ~210 for 0.125. `--levels 4` (down to 0.25 Myr) takes 71.
-- **Why the gain is modest:** a force pass over a few particles still costs about one tree walk's latency, roughly
-  20% of a full pass, because the GPU isn't full. So the sub-steps that only the deepest bin needs are expensive.
-  A walk split over several threads per particle would help (an /optimize candidate).
+- **Speed (1M particles, RTX 2070 Super, measured 2026-11-07, before the split walks):** block steps took 91 GPU ms
+  per Myr, against 105 for the fixed 0.25 Myr step and ~210 for 0.125. `--levels 4` (down to 0.25 Myr) took 71. On
+  2026-11-11 the test disc at 1M took 111.9 GPU ms a step (2 Myr), from 172.8.
+- **Why the gain was modest:** a force pass over a few particles costs about one tree walk's latency, roughly 20% of
+  a full pass (`FORCE_FLOOR`, 0.2, the window's first guess), because the GPU isn't full. So the sub-steps that only
+  the deepest bin needs are expensive. Splitting a short list's walks over threads (above) cut that.
 
 **Force error** (Gaussian cluster of 20k against direct summation), median / 99th percentile, measured 2026-11-06:
 
@@ -151,7 +166,8 @@ black hole, or swallowed. The kind is kept in the top 4 bits of its id word.
 - **Equations:** pressure P = (γ - 1) Σ u with γ 5/3, Monaghan artificial viscosity, "density - energy" form.
 - **Neighbours:** gas sorts into its own run and its own part of the tree (a class bit in the Morton key, like the
   dark matter). Each tree node keeps its largest H, so every pair is found from both sides.
-- **Cost:** two walks per step: density, then pressure forces.
+- **Cost:** two walks per step: density, then pressure forces. The density runs beside the gravity walk (`density.wgsl`);
+  the pressure forces are their own pass.
 
 **Cooling and heating** (`shaders/integrate.wgsl`), solved implicitly over each gas particle's step:
 - **Below 10^4 K:** Koyama & Inutsuka (2002), with photoelectric heating.
@@ -192,7 +208,7 @@ particle's mass loss goes to its nearest gas particle within 500 pc.
 - **Metals:** gas metallicity 1.12 -> 1.54 solar; stars born later are richer (1.63 -> 2.01 solar in the test's
   150 Myr).
 - **Gas:** stays in its disc (half-mass radius 8.0 -> 8.7 kpc), mostly 10^4 K, ~5% above 10^5 K.
-- **Speed at 500k:** the window holds 60 fps at 2.2 - 2.35 Myr/s.
+- **Speed at 525k:** the window holds 60 fps at 3.33 - 3.58 Myr/s (2026-11-11; 2.2 - 2.35 before).
 
 **Not yet:** gas momentum from stellar mass loss (the gas keeps its own velocity). Merging and splitting gas
 particles is in the universe section below.
@@ -263,11 +279,12 @@ the tree.
 - **Particles** are 10^7 - 10^8 Msun, so star particles are populations.
 - **Wells** grow by Bondi accretion only (`accretion_pc` 0).
 
-**Galaxy finder** (`shaders/finder.wgsl`): friends of friends on the GPU (12 linking rounds), group sums in exact
+**Galaxy finder** (`shaders/finder.wgsl`): friends of friends on the GPU (8 linking rounds), group sums in exact
 64-bit integers.
 - **Universe:** dark matter linked at 0.2 of its mean spacing (halos of 32 or more particles). **Placed galaxies:**
   stars, gas and wells at 300 pc.
-- Runs every 200 Myr (universe 100): 8 linking rounds of 16 slices, which the window spreads over frames. `--no-finder` switches it off.
+- Runs every 200 Myr (universe 100): 8 linking rounds of 16 slices, which the window spreads over frames. Rounds after
+  one that changes no label return at once. `--no-finder` switches it off.
 - The headless report lists the heaviest 50 groups.
 
 **Gas merging and splitting** (`shaders/resolution.wgsl`): thin, hot, light gas merges in pairs (mass, momentum and
@@ -519,21 +536,29 @@ runs them in software):
 
 ## Measured (Windows exe, RTX 2070 Super on Vulkan)
 
-**Galaxy, window, 60 fps target (2026-11-08, before gas; with gas and wells it is 2.35 Myr/s, below):**
-- **500,000 particles:** 60.0 fps, worst frame 17.2 ms, 3.8 Myr/s. One turn at 8 kpc (~200 Myr) takes ~50 s.
-- **1,000,000 particles:** 59.7 fps, worst frame 31.7 ms, 1.2 Myr/s. Some frames came late, so the budget shrank.
-- **Headless:** 170 GPU ms per Myr at 500k (175 with gas and wells, 2026-11-09).
+**Galaxy, window, 60 fps target (2026-11-11, 3 runs, seed 1; `OPTIMIZATIONS.md` has the before):**
+- **525,000 particles:** 60.0 fps, worst frame 17.3 - 17.4 ms, 3.33 - 3.58 Myr/s.
+- **1,000,000 particles:** 60.0 fps, worst frame 17.3 - 17.7 ms, 1.62 - 1.74 Myr/s, with the full 13.3 ms budget.
+  Before the cost model learned by tree age it was 0.56 - 0.74 Myr/s, worst frame 25.7 - 26.6 ms, the budget shrunk
+  to 6 - 8 ms.
+- **Headless:** 350.5 GPU ms a step (2 Myr, so ~175 a Myr) at 525k, from 638.5; 656 at 1M, from 1,303. The timer
+  used to stop at 256 passes a submit and under-reported a galaxy step (the old "170 - 175 GPU ms per Myr at 500k"
+  was really ~320).
 
-**Scenes, window, 525,000 particles with 5% spares (2026-11-09):**
+**Scenes, window, 525,000 particles with 5% spares (2026-11-11):**
 
 | Scene | fps | Worst frame | Sim speed |
 |---|---|---|---|
-| Galaxy | 60.0 | 17.3 ms | 2.35 Myr/s |
-| Pair | 60.0 | 17.6 ms | 2.46 Myr/s |
-| Group | 60.0 | 17.6 ms | 3.13 Myr/s |
-| Universe | 60.0 | 17.4 ms | 37.5 Myr/s |
+| Galaxy | 60.0 | 17.3 - 17.4 ms | 3.33 - 3.58 Myr/s |
+| Pair | 60.0 | 17.3 - 18.5 ms | 3.25 - 3.45 Myr/s |
+| Group | 60.0 | 17.2 ms | 3.48 - 3.61 Myr/s |
+| Universe | 60.0 | 17.2 - 17.3 ms | 50.5 - 51.1 Myr/s |
 
-**Test disc, window, speed "max" (2026-11-07):**
+Headless GPU ms a step (2 Myr; universe 20 Myr), 2026-11-11, before the pass -> after: galaxy 50k 129.4 -> 73.4,
+100k 199.5 -> 107.5, 525k 638.5 -> 350.5, 1M 1,303 -> 656; pair 525k 537.6 -> 341.3; group 525k 495.6 -> 333.1;
+universe 100k 63.4 -> 47.1, 525k 425.5 -> 289.1; test disc 1M 172.8 -> 111.9.
+
+**Test disc, window, speed "max" (measured 2026-11-07, before the 2026-11-11 speed-ups):**
 
 | Particles | fps | Worst frame | Sim speed |
 |---|---|---|---|
@@ -541,7 +566,8 @@ runs them in software):
 | 1,000,000 | 60.0 | 17.3 ms | 7.4 Myr/s |
 | 4,000,000 | 60.0 | 17.3 ms | 1.8 Myr/s |
 
-GPU ms per Myr of sim time, headless:
+GPU ms per Myr of sim time, headless (measured before 2026-11-11, so before the split walks; the 1M disc is now
+112 a step, above):
 
 | Particles | Block steps | Old fixed 0.25 Myr step |
 |---|---|---|

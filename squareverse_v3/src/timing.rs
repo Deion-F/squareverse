@@ -5,7 +5,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-const MAX_PASSES: u32 = 256;
+/// Passes timed in one submit. A galaxy step of 7 levels has ~450 and one of `MAX_LEVELS` ~900; a query set holds
+/// at most 4,096 timestamps (`wgpu::QUERY_SET_MAX_QUERIES`), two a pass.
+const MAX_PASSES: u32 = wgpu::QUERY_SET_MAX_QUERIES / 2;
 
 // read-back states
 const IDLE: u8 = 0;
@@ -18,6 +20,8 @@ pub struct GpuTimer {
     pub last: Vec<(&'static str, f64)>,
     /// The amount of work each of those passes was tagged with (`compute_units`; 1 by default).
     pub last_units: Vec<f64>,
+    /// And the tag each was given (`compute_tagged`; 0 by default).
+    pub last_tags: Vec<u32>,
 }
 
 struct Inner {
@@ -27,8 +31,10 @@ struct Inner {
     period_ns: f32,
     labels: Vec<&'static str>,
     units: Vec<f64>,
+    tags: Vec<u32>,
     read_labels: Vec<&'static str>,
     read_units: Vec<f64>,
+    read_tags: Vec<u32>,
     state: Arc<AtomicU8>,
     resolved: bool,
 }
@@ -58,13 +64,15 @@ impl GpuTimer {
                 period_ns: queue.get_timestamp_period(),
                 labels: Vec::new(),
                 units: Vec::new(),
+                tags: Vec::new(),
                 read_labels: Vec::new(),
                 read_units: Vec::new(),
+                read_tags: Vec::new(),
                 state: Arc::new(AtomicU8::new(IDLE)),
                 resolved: false,
             }
         });
-        Self { inner, last: Vec::new(), last_units: Vec::new() }
+        Self { inner, last: Vec::new(), last_units: Vec::new(), last_tags: Vec::new() }
     }
 
     pub fn enabled(&self) -> bool {
@@ -76,11 +84,12 @@ impl GpuTimer {
         if let Some(t) = &mut self.inner {
             t.labels.clear();
             t.units.clear();
+            t.tags.clear();
             t.resolved = false;
         }
     }
 
-    fn slot(&mut self, label: &'static str, units: f64) -> Option<(&wgpu::QuerySet, u32)> {
+    fn slot(&mut self, label: &'static str, units: f64, tag: u32) -> Option<(&wgpu::QuerySet, u32)> {
         let t = self.inner.as_mut()?;
         if t.state.load(Ordering::Acquire) != IDLE || t.labels.len() as u32 >= MAX_PASSES {
             return None;
@@ -88,6 +97,7 @@ impl GpuTimer {
         let i = t.labels.len() as u32;
         t.labels.push(label);
         t.units.push(units);
+        t.tags.push(tag);
         Some((&t.set, i * 2))
     }
 
@@ -97,7 +107,12 @@ impl GpuTimer {
 
     /// As `compute`, tagging the pass with how much work it does (for cost-per-unit estimates, `rate`).
     pub fn compute_units(&mut self, label: &'static str, units: f64) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
-        self.slot(label, units).map(|(set, i)| wgpu::ComputePassTimestampWrites {
+        self.compute_tagged(label, units, 0)
+    }
+
+    /// As `compute_units`, with a number of the caller's that comes back in `last_tags`.
+    pub fn compute_tagged(&mut self, label: &'static str, units: f64, tag: u32) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        self.slot(label, units, tag).map(|(set, i)| wgpu::ComputePassTimestampWrites {
             query_set: set,
             beginning_of_pass_write_index: Some(i),
             end_of_pass_write_index: Some(i + 1),
@@ -105,7 +120,7 @@ impl GpuTimer {
     }
 
     pub fn render(&mut self, label: &'static str) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
-        self.slot(label, 1.0).map(|(set, i)| wgpu::RenderPassTimestampWrites {
+        self.slot(label, 1.0, 0).map(|(set, i)| wgpu::RenderPassTimestampWrites {
             query_set: set,
             beginning_of_pass_write_index: Some(i),
             end_of_pass_write_index: Some(i + 1),
@@ -133,6 +148,7 @@ impl GpuTimer {
         t.resolved = false;
         t.read_labels = std::mem::take(&mut t.labels);
         t.read_units = std::mem::take(&mut t.units);
+        t.read_tags = std::mem::take(&mut t.tags);
         t.state.store(MAPPING, Ordering::Release);
         let state = t.state.clone();
         t.read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -159,6 +175,7 @@ impl GpuTimer {
                 .map(|(i, &l)| (l, ticks[2 * i + 1].wrapping_sub(ticks[2 * i]) as f64 * t.period_ns as f64 * 1e-6))
                 .collect();
             self.last_units = t.read_units.clone();
+            self.last_tags = t.read_tags.clone();
         }
         t.read.unmap();
         t.state.store(IDLE, Ordering::Release);

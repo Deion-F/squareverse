@@ -160,16 +160,17 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
                 ej = j;
                 accept = 1u;
             } else {
-                let extra = node[NODE_VEC4 * r + 2u];  // (mass, opening radius^2, sxx, sxy)
-                let tail = node[NODE_VEC4 * r + 3u];   // (syy, first particle, count, -)
+                let head = node[NODE_VEC4 * r + 1u];   // (mass, opening radius^2, the two children)
+                let quad = node[NODE_VEC4 * r + 2u];   // (sxx, sxy, syy, largest softening^2)
+                let run = node[NODE_VEC4 * r + 4u];    // (first particle, count, -, -)
                 let cr = fx_delta2(node[NODE_VEC4 * r], qref) * c.unit_pc;
                 let gap = max(max(gmin - cr, cr - gmax), vec2<f32>(0.0));
-                let open2 = bitcast<f32>(extra.y);
+                let open2 = bitcast<f32>(head.y);
                 // radius 0: a node under the softening scale, far enough unless it may hold one of the group
-                let holds = tail.y <= gimax && gimin < tail.y + tail.z;
+                let holds = run.x <= gimax && gimin < run.x + run.y;
                 if (dot(gap, gap) > open2 && (open2 > 0.0 || !holds)) {
-                    ea = vec4<f32>(cr, bitcast<f32>(extra.x), bitcast<f32>(extra.z));
-                    eb = vec4<f32>(bitcast<f32>(extra.w), bitcast<f32>(tail.x), bitcast<f32>(tail.w), 0.0);
+                    ea = vec4<f32>(cr, bitcast<f32>(head.x), bitcast<f32>(quad.x));
+                    eb = vec4<f32>(bitcast<f32>(quad.y), bitcast<f32>(quad.z), bitcast<f32>(quad.w), 0.0);
                     accept = 1u;
                 } else {
                     ch = child[r];
@@ -188,10 +189,10 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
         workgroupBarrier();
         if (full) {
             if (open == 1u) {
-                let extra = node[NODE_VEC4 * r + 2u];
-                ea = vec4<f32>(fx_delta2(node[NODE_VEC4 * r], qref) * c.unit_pc, bitcast<f32>(extra.x), bitcast<f32>(extra.z));
-                let tl = node[NODE_VEC4 * r + 3u];
-                eb = vec4<f32>(bitcast<f32>(extra.w), bitcast<f32>(tl.x), bitcast<f32>(tl.w), 0.0);
+                let head = node[NODE_VEC4 * r + 1u];
+                let quad = node[NODE_VEC4 * r + 2u];
+                ea = vec4<f32>(fx_delta2(node[NODE_VEC4 * r], qref) * c.unit_pc, bitcast<f32>(head.x), bitcast<f32>(quad.x));
+                eb = vec4<f32>(bitcast<f32>(quad.y), bitcast<f32>(quad.z), bitcast<f32>(quad.w), 0.0);
                 accept = 1u;
                 open = 0u;
             }

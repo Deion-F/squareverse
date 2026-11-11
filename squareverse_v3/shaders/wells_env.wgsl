@@ -35,7 +35,7 @@ fn rel(q: vec4<u32>) -> vec2<u32> {
 }
 
 fn box_distance(p: vec2<u32>, r: u32) -> f32 {
-    return box_distance_to(p, node[NODE_VEC4 * r + 1u]);
+    return box_distance_to(p, node[NODE_VEC4 * r + 3u]);
 }
 
 fn add64(at: u32, x: f32) {
@@ -155,7 +155,7 @@ fn surroundings(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
                 }
                 continue;
             }
-            if (box_distance(p, r) >= reach || sp + 2u > STACK || bitcast<f32>(node[NODE_VEC4 * r + 2u].x) <= 0.0) {
+            if (box_distance(p, r) >= reach || sp + 2u > STACK || bitcast<f32>(node[NODE_VEC4 * r + 1u].x) <= 0.0) {
                 continue;
             }
             let ch = child[r];

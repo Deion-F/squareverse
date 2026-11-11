@@ -259,8 +259,9 @@ $E --list-adapters
   - If fps misses the target although `sim_budget_ms` is small: the overhead between passes (the Intel UHD 630
     showed this on the desktop). Check that `budget_scale` (`src/app.rs`) settles, and reduce the passes per
     sub-step.
-  - If the worst frame is long while the mean is fine: the force floor (`FORCE_FLOOR`, `src/sim/mod.rs`, 0.2 of a
-    full pass, measured on the RTX) may differ on the Radeon. Measure the per-pass times with
+  - If the worst frame is long while the mean is fine: the force cost model (`Sim::force_cost`, learned by tree age
+    and sub-step kind; `FORCE_FLOOR`, `src/sim/mod.rs`, 0.2 of a full pass, is only its first guess, taken from the
+    RTX) may differ on the Radeon. Measure the per-pass times with
     `SV_DEBUG_PASSES=1 WSLENV=SV_DEBUG_PASSES $E --scene disc --headless --steps 3 --particles 50000` and set it
     from the deepest-bin-only sub-steps.
 
@@ -287,20 +288,21 @@ $E --list-adapters
 
 ### L3. For the optimizer, from the desktop (no laptop needed, but the same pass)
 
-- **The galaxy's sim speed:** 170 GPU ms per Myr at 500k on the RTX, 3.8 Myr/s in the window.
-  - Most of it is force passes over the short lists of the deep bins (7 levels), each costing about one walk's
-    latency (`FORCE_FLOOR`).
-  - Candidates: split a particle's walk over several threads on short lists; drift tree nodes instead of
-    refitting each sub-step.
-- **Late frames at 1M in the galaxy window:** 59.7 fps, worst frame 31.7 ms. The late-frame feedback shrank the sim
-  budget to 6.4 ms, giving 1.2 Myr/s. Find what the timestamps miss there (many small passes per frame?).
+- **The galaxy's sim speed:** done on 2026-11-11 (`squareverse_v3/OPTIMIZATIONS.md`): 350.5 GPU ms a step (2 Myr,
+  ~175 a Myr) at 525k on the RTX, 3.33 - 3.58 Myr/s in the window (before: 638.5 ms a step, 1.69 - 1.90 Myr/s). The
+  older "170 GPU ms per Myr" and "3.8 Myr/s" (before gas) were with a timer that missed passes.
+  - Split walks on short lists are in. Still a candidate: drift tree nodes instead of refitting each sub-step.
+- **Late frames at 1M in the galaxy window:** fixed on 2026-11-11 by the cost model learning by tree age and
+  kind, and the timer counting every pass (it stopped at 256 a submit): 60.0 fps, worst frame 17.3 - 17.7 ms,
+  1.62 - 1.74 Myr/s at the full 13.3 ms budget (before: 25.7 - 26.6 ms, 0.56 - 0.74 Myr/s, budget 6 - 8 ms).
 
 ### L4. Gas (phase 3), for the optimizer
 
 - **What:** after L2, the same commands. The galaxy now has gas. Also
   `$E --headless --steps 10 --particles 50000 | grep -E '"(gpu_ms_per_myr|gas)"'` for the gas passes' share.
 - **Look for:** `myr_per_s` against L2's figures. On the RTX, gas slowed the galaxy 3.8 -> 2.2 Myr/s at 500k (the
-  gas passes are ~30% of the GPU time, and gas adds particles in deep bins).
+  gas passes were ~30% of the GPU time, and gas adds particles in deep bins; measured before 2026-11-11, when the
+  galaxy with gas reached 3.33 - 3.58 Myr/s at 525k).
 - **Then:**
   - Set the integrated default (`src/budget.rs`) from the galaxy-with-gas figures, not L2's.
   - If the gas passes dominate on the Radeon, candidates are a group walk for the gas density and force (the gas is
@@ -330,9 +332,10 @@ $E --list-adapters
   - If `pm` is large on the Radeon: 256 mesh cells instead of 512 (`SimConfig::universe`, `pm_cells`; the force
     error is about the same, `tree_pm_matches_the_tree`), or a radix-4 FFT in `shaders/pm.wgsl`.
   - If one `find` part makes a frame late: more, smaller parts (`FIND_PARTS`), or fewer linking rounds.
-  - **Desktop numbers to compare (RTX 2070 Super, Vulkan, 2026-11-09, 525k incl. 5% spares):** galaxy 60.0 fps,
-    worst 17.3 ms, 2.35 Myr/s; pair 60.0, 17.6, 2.46; group (24 galaxies) 60.0, 17.6, 3.13; universe 60.0, 17.4,
-    37.5 Myr/s.
+  - **Desktop numbers to compare (RTX 2070 Super, Vulkan, 2026-11-11, 525k incl. 5% spares):** galaxy 60.0 fps,
+    worst 17.3 - 17.4 ms, 3.33 - 3.58 Myr/s; pair 60.0, 17.3 - 18.5, 3.25 - 3.45; group (24 galaxies) 60.0, 17.2,
+    3.48 - 3.61; universe 60.0, 17.2 - 17.3, 50.5 - 51.1 Myr/s. (2026-11-09, before the optimizer pass: galaxy
+    2.35 Myr/s, pair 2.46, group 3.13, universe 37.5.)
 
 ### L7. Selecting, the star system view and the tools (phases 6 - 8)
 
@@ -343,6 +346,50 @@ $E --list-adapters
   pause the window (they finish the step under way first), and the save / load time at the default count.
 - **Then:** if the tools' pause is long (more than ~0.5 s), apply them at the next step boundary the sim reaches
   by itself instead of finishing the step at once (`Sim::finish_step` in `brush` / `spawn`).
+
+### L8. The optimizer's desktop pass of 2026-11-11 (`squareverse_v3/OPTIMIZATIONS.md`), checked on the Radeon
+
+Each change below was measured only on the RTX 2070 Super. Before: commit `b595a56` (the pass started from it),
+built in a worktree (`git worktree add ../sv_before b595a56`, then its Windows build) as `$B`; after: the current
+build as `$E`. Run them alternately, three each.
+
+- **What:**
+
+  ```
+  for p in 25000 50000 100000; do for x in $B $E; do $x --headless --steps 5 --particles $p | grep -E '"(name|backend|wall_ms_per_step|gpu_ms_per_step|force|gas|sort|build|refit|integrate|compact)"' | tr -d '\n '; echo; done; done
+  for x in $B $E; do $x --exit-after-frames 600; $x --fps 30 --exit-after-frames 300; done
+  for rb in 8 4 2; do $E --headless --steps 5 --particles 50000 --rebuild-every $rb | grep -E '"(gpu_ms_per_step|sort|build|refit|force)"' | tr -d '\n '; echo; done
+  SV_DEBUG_PASSES=1 WSLENV=SV_DEBUG_PASSES $E --headless --steps 3 --particles 50000 2> passes.txt
+  for x in $B $E; do $x --scene universe --headless --steps 20 --particles 100000 | grep -E '"(gpu_ms_per_step|find|gas|force)"' | tr -d '\n '; echo; done
+  ```
+
+- **Look for, and then:**
+  - **Rebuild every 4 sub-steps** (galaxy and pair, `SimConfig::default` `rebuild_every`; the disc, universe and
+    group keep 8): from the `--rebuild-every` loop. If 8 is faster at 50k by more than ~10% (the sort was dear on
+    the Radeon in phase 1), make it 8 below some particle count, a function of the config only (never of measured
+    times: that would break reproducibility).
+  - **Force cost by tree age** (`Sim::force_cost`, `gas_cost`): with the window runs, `worst_frame_ms` under ~20
+    (60 fps) or ~37 (30 fps) and `sim_budget_ms` near its ceiling (it should no longer sink to half). If frames
+    still come late with a full budget, the late ones are work the timestamps don't see (gaps between passes):
+    the `budget_scale` feedback in `src/app.rs` handles that, not the cost model.
+  - **Split walks** (`shaders/force_particle.wgsl` `SPLIT_MAX` 16, `SPLIT_SLOTS` 32,768: a short list's particles
+    get up to 16 threads each, list x threads within 32k): from `passes.txt`, the `force` passes of the sub-steps
+    right after a rebuild (short lists, `units` well under 1). If they don't fall against `$B`, the Radeon fills up
+    with fewer threads: try `SPLIT_SLOTS` 8192 and 16384 (and `SPLIT_MAX` 8), and keep the fastest at 50k and 100k.
+  - **Gas density beside gravity** (force_particle.wgsl: 256-thread workgroups, half of them for density): the
+    `gas` and `force` stages together against `$B`'s. If they rose, the Radeon prefers them apart: make
+    `Work::Gas` run `density` for the particle walk too and give force_particle.wgsl back 128-thread groups
+    (src/sim/mod.rs `encode_item`, `Walk::workgroup`).
+  - **The 32-byte walk record** (node layout in `shaders/common.wgsl`) and **walks in functions** (force, gas,
+    feedback, finder): expected to help more on the Radeon (less memory traffic); nothing to change unless `force`
+    rose against `$B`.
+  - **The finder's early return** (`next_round`, finder.wgsl): `find` against `$B`'s. The finder's cadence
+    (`finder.every_myr`, 100 in the universe) is the user's call: halving it halves `find` again.
+  - **Not done on the desktop (under 4% there):** kicking only the list (`integrate.wgsl kick` runs over all n),
+    folding the compact flag into the scan, an epoch instead of `moments.wgsl reset`. In `passes.txt` add up
+    `integrate`, `compact` and `refit` per sub-step against `force`: if they are over ~10% of a sub-step on the
+    Radeon, do them (the kick needs the list without a ninth storage binding: e.g. pass its length in `bins`'
+    spare word).
 
 ## Progress
 
@@ -479,8 +526,8 @@ The Radeon now beats the UHD 630 stand-in at compute (20.3 vs 36 ms a step at 10
 - [x] Spread a step over several frames (2026-11-07), `Sim::advance`:
   - **How it works:** each sub-step is `Work` items. The window gives the sim a GPU budget each frame (85% of the
     period, less the drawing), and the sim runs the items that fit, slicing a force pass into up to 64 pieces.
-  - **Cost model:** costs per item are learned from timestamps, and a force dispatch costs at least 20% of a full
-    pass.
+  - **Cost model:** costs per item are learned from timestamps. (2026-11-11: force and gas costs are learned per tree
+    age and sub-step kind, replacing the single force rate with a 20% floor; `FORCE_FLOOR` is the first guess.)
   - **Overruns:** an item may start when 4/5 of it fits; the overrun comes off the next frame. Frames that arrive late
     shrink the budget.
   - **Drawing:** particles are drawn moved along their velocity to a smooth display clock.

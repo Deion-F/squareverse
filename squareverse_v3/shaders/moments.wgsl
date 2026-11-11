@@ -45,15 +45,15 @@ fn load(r: u32) -> Body {
     }
     let o = NODE_WORDS * r;
     b.com = vec4<u32>(atomicLoad(&node[o]), atomicLoad(&node[o + 1u]), atomicLoad(&node[o + 2u]), atomicLoad(&node[o + 3u]));
-    b.bmin = vec2<u32>(atomicLoad(&node[o + 4u]), atomicLoad(&node[o + 5u]));
-    b.bmax = vec2<u32>(atomicLoad(&node[o + 6u]), atomicLoad(&node[o + 7u]));
-    b.m = bitcast<f32>(atomicLoad(&node[o + 8u]));
-    b.s = vec3<f32>(bitcast<f32>(atomicLoad(&node[o + 10u])), bitcast<f32>(atomicLoad(&node[o + 11u])),
-                    bitcast<f32>(atomicLoad(&node[o + 12u])));
-    b.first = atomicLoad(&node[o + 13u]);
-    b.count = atomicLoad(&node[o + 14u]);
-    b.eps2 = bitcast<f32>(atomicLoad(&node[o + 15u]));
-    b.hmax = bitcast<f32>(atomicLoad(&node[o + 16u]));
+    b.m = bitcast<f32>(atomicLoad(&node[o + 4u]));
+    b.s = vec3<f32>(bitcast<f32>(atomicLoad(&node[o + 8u])), bitcast<f32>(atomicLoad(&node[o + 9u])),
+                    bitcast<f32>(atomicLoad(&node[o + 10u])));
+    b.eps2 = bitcast<f32>(atomicLoad(&node[o + 11u]));
+    b.bmin = vec2<u32>(atomicLoad(&node[o + 12u]), atomicLoad(&node[o + 13u]));
+    b.bmax = vec2<u32>(atomicLoad(&node[o + 14u]), atomicLoad(&node[o + 15u]));
+    b.first = atomicLoad(&node[o + 16u]);
+    b.count = atomicLoad(&node[o + 17u]);
+    b.hmax = bitcast<f32>(atomicLoad(&node[o + 18u]));
     return b;
 }
 
@@ -114,19 +114,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicStore(&node[o + 1u], com.y);
         atomicStore(&node[o + 2u], com.z);
         atomicStore(&node[o + 3u], com.w);
-        atomicStore(&node[o + 4u], bmin.x);
-        atomicStore(&node[o + 5u], bmin.y);
-        atomicStore(&node[o + 6u], bmax.x);
-        atomicStore(&node[o + 7u], bmax.y);
-        atomicStore(&node[o + 8u], bitcast<u32>(m));
-        atomicStore(&node[o + 9u], bitcast<u32>(open * open));
-        atomicStore(&node[o + 10u], bitcast<u32>(sm.x));
-        atomicStore(&node[o + 11u], bitcast<u32>(sm.y));
-        atomicStore(&node[o + 12u], bitcast<u32>(sm.z));
-        atomicStore(&node[o + 13u], min(a.first, b.first));
-        atomicStore(&node[o + 14u], a.count + b.count);
-        atomicStore(&node[o + 15u], bitcast<u32>(max(a.eps2, b.eps2)));
-        atomicStore(&node[o + 16u], bitcast<u32>(max(a.hmax, b.hmax)));
+        atomicStore(&node[o + 4u], bitcast<u32>(m));
+        atomicStore(&node[o + 5u], bitcast<u32>(open * open));
+        atomicStore(&node[o + 6u], ch.x);   // the children, beside what the gravity walk reads to open the node
+        atomicStore(&node[o + 7u], ch.y);
+        atomicStore(&node[o + 8u], bitcast<u32>(sm.x));
+        atomicStore(&node[o + 9u], bitcast<u32>(sm.y));
+        atomicStore(&node[o + 10u], bitcast<u32>(sm.z));
+        atomicStore(&node[o + 11u], bitcast<u32>(max(a.eps2, b.eps2)));
+        atomicStore(&node[o + 12u], bmin.x);
+        atomicStore(&node[o + 13u], bmin.y);
+        atomicStore(&node[o + 14u], bmax.x);
+        atomicStore(&node[o + 15u], bmax.y);
+        atomicStore(&node[o + 16u], min(a.first, b.first));
+        atomicStore(&node[o + 17u], a.count + b.count);
+        atomicStore(&node[o + 18u], bitcast<u32>(max(a.hmax, b.hmax)));
         k = parents[k];
     }
 }

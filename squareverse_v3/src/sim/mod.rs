@@ -63,7 +63,7 @@ impl Walk {
     fn workgroup(self) -> u32 {
         match self {
             Walk::Group => 64,     // force.wgsl GROUP
-            Walk::Particle => 128, // force_particle.wgsl workgroup_size
+            Walk::Particle => 128, // force_particle.wgsl SLOTS (its workgroups have as many again for gas density)
         }
     }
 }
@@ -291,7 +291,11 @@ impl Default for SimConfig {
             softening_pc: 50.0,
             theta: 0.6,
             open_small: 0.0,
-            rebuild_every: 8,
+            // the bulge's fast particles outrun a refitted tree: its boxes grow and overlap, and the walks open far
+            // more nodes (1.1k listed particles: 2.0 ms on a fresh tree, 7.0 ms seven sub-steps on, 525k). 4 against
+            // 8, GPU ms a step (RTX 2070 Super, 2026-11-11): 525k 513 against 635, 1M 943 against ~1,310, 100k 187
+            // against 198, 50k and 25k the same; 2 costs more in sorting than it saves (525 at 525k)
+            rebuild_every: 4,
             walk: Walk::Particle,
             dispersion: 0.1,
             scene: Scene::Galaxy,
@@ -320,6 +324,8 @@ impl SimConfig {
             scene: Scene::Disc,
             central_mass: 1e10,
             levels: 5,
+            // no dense bulge: rebuilding more often only costs (1M: 177 GPU ms a step at 4 against 173 at 8)
+            rebuild_every: 8,
             eta_jerk: 0.05,
             softening_pc: 20.0,
             well_softening_pc: 20.0,
@@ -336,6 +342,8 @@ impl SimConfig {
             scene: Scene::Universe,
             dt_myr: 20.0,
             levels: 5,
+            // the tree hardly ages here (525k from z = 30: 431 GPU ms a step at 8 and at 16, 456 at 4)
+            rebuild_every: 8,
             // physical; comoving (4 and 8 kpc) until a = 0.25
             softening_pc: 1_000.0,
             dm_softening_pc: 2_000.0,
@@ -359,7 +367,10 @@ impl SimConfig {
             Scene::Galaxy => Self::default(),
             Scene::Disc => Self::test_disc(),
             Scene::Universe => Self::universe(),
-            Scene::Pair | Scene::Group => Self { scene, ..Self::default() },
+            Scene::Pair => Self { scene, ..Self::default() },
+            // its galaxies are small and far apart: no gain from rebuilding more often (525k: 486 GPU ms a step at
+            // 4 against 499 at 8; 100k: 150 against 148)
+            Scene::Group => Self { scene, rebuild_every: 8, ..Self::default() },
         }
     }
 
@@ -482,9 +493,12 @@ pub enum Work {
 /// The stages GPU time is split into (timer labels).
 pub const STAGES: [&str; 12] = ["integrate", "sort", "build", "refit", "compact", "force", "evolve", "gas", "pm", "find", "wells", "feedback"];
 const FORCE: usize = 5;
-/// A force dispatch costs at least one tree walk's latency however few particles it has (the GPU isn't full):
-/// measured 2026-11-07 on the RTX 2070 Super, 2.2 of 10.7 ms at 500k, 4.5 of 21.5 at 1M.
+const GAS: usize = 7;
+/// The first guess of what a force dispatch costs at least, as a share of a full pass: one tree walk's latency,
+/// however few particles it has (the GPU isn't full). Measurements replace it (`Sim::force_cost`).
 const FORCE_FLOOR: f64 = 0.2;
+/// Tree ages (sub-steps since the rebuild) the force cost is learned for; older trees count as the last.
+const FORCE_AGES: usize = 8;
 
 impl Work {
     fn label(self) -> &'static str {
@@ -611,8 +625,19 @@ pub struct Sim {
     /// the bin counts as last read back (for the cost estimates and the HUD)
     pub bin_counts: [u32; MAX_LEVELS as usize],
     counts_read: AsyncRead,
-    /// estimated GPU ms per unit of work, by `STAGES` label (force: a full pass)
+    /// estimated GPU ms per unit of work, by `STAGES` label (force and gas: see `force_cost`, `gas_cost`)
     rates: [f64; 12],
+    /// Estimated GPU ms of a force dispatch, (the least, a full pass), by the tree's age and the sub-step's kind
+    /// (`sub_kind`): a slice costs the larger of the least (a walk's latency) and its busy share of a full pass.
+    /// Both grow as a refitted tree ages (its boxes overlap more); a short list on a fresh tree costs far less
+    /// than 0.2 of a full pass; and a particle of the short bins (the bulge) costs more than one of the long ones.
+    /// One rate for all had a 1M galaxy's slices on a new tree run 1.6x (up to 4x) over their estimate and the
+    /// short lists at 0.4 - 0.8 of theirs, so frames came late and the budget halved (RTX 2070 Super, 2026-11-11).
+    force_cost: [[(f64, f64); MAX_LEVELS as usize]; FORCE_AGES],
+    /// Estimated GPU ms of the gas passes by the sub-step's kind (a long list costs several times a short one).
+    gas_cost: [f64; MAX_LEVELS as usize],
+    /// sub-steps since the tree was rebuilt (0: rebuilt this sub-step)
+    tree_age: u32,
     /// the shared parameters (two copies: the force pass's rows differ), and where pm.wgsl cosmo_step leaves a
     /// step's scale factor
     common: [wgpu::Buffer; 2],
@@ -757,12 +782,17 @@ fn parse_groups(words: &[u32], box_pc: f64, a: f64) -> Vec<Galaxy> {
     out
 }
 
-fn begin<'e>(encoder: &'e mut wgpu::CommandEncoder, timer: &mut GpuTimer, label: &'static str, units: f64) -> wgpu::ComputePass<'e> {
-    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: timer.compute_units(label, units) })
+fn begin<'e>(encoder: &'e mut wgpu::CommandEncoder, timer: &mut GpuTimer, label: &'static str, units: f64, tag: u32) -> wgpu::ComputePass<'e> {
+    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: timer.compute_tagged(label, units, tag) })
 }
 
 fn module(body: &str) -> String {
     format!("{}{}", prelude(), body)
+}
+
+/// A module that uses the gas density walk (density.wgsl).
+fn density(body: &str) -> String {
+    format!("{}{}\n{}", prelude(), include_str!("../../shaders/density.wgsl"), body)
 }
 
 fn tools(body: &str) -> String {
@@ -885,7 +915,8 @@ impl Sim {
         let cosmo_out = storage(d, "cosmo", 32);
         let label = storage(d, "finder labels", n as u64 * 4);
         let gidx = storage(d, "finder roots", n as u64 * 4);
-        let found = storage(d, "finder groups", ((1 + MAX_GROUPS * GROUP_WORDS) * 4) as u64);
+        // [0] slots used, the slots, and two words for the linking rounds (finder.wgsl CHANGED, LAST)
+        let found = storage(d, "finder groups", ((1 + MAX_GROUPS * GROUP_WORDS + 2) * 4) as u64);
         let probe_out = storage(d, "probe", PROBE_WORDS * 4);
         let probe_params = uniform(d, "probe parameters", &ProbeParams::zeroed());
         let edit_params = uniform(d, "edit parameters", &EditParams::zeroed());
@@ -1056,7 +1087,7 @@ impl Sim {
             hydro: Kernel::new(
                 d,
                 "hydro",
-                &module(include_str!("../../shaders/hydro.wgsl")),
+                &density(include_str!("../../shaders/hydro.wgsl")),
                 &[U, R, R, R, W, R, R, R, W],
                 &["range_reset", "range_find", "density", "force"],
             ),
@@ -1080,11 +1111,15 @@ impl Sim {
             force: Kernel::new(
                 d,
                 "force",
-                &module(match cfg.walk {
-                    Walk::Group => include_str!("../../shaders/force.wgsl"),
-                    Walk::Particle => include_str!("../../shaders/force_particle.wgsl"),
-                }),
-                &[U, R, R, R, R, W, R, T, R],
+                &match cfg.walk {
+                    Walk::Group => module(include_str!("../../shaders/force.wgsl")),
+                    Walk::Particle => density(include_str!("../../shaders/force_particle.wgsl")),
+                },
+                match cfg.walk {
+                    Walk::Group => &[U, R, R, R, R, W, R, T, R],
+                    // and the gas, for its density beside the walk
+                    Walk::Particle => &[U, R, R, R, R, W, R, T, R, W],
+                },
                 &["main"],
             ),
             pm: Kernel::new(
@@ -1099,7 +1134,7 @@ impl Sim {
                 "finder",
                 &module(include_str!("../../shaders/finder.wgsl")),
                 &[U, R, R, R, R, W, W, W, R, T],
-                &["init", "link", "jump", "count", "assign", "sums"],
+                &["init", "link", "jump", "next_round", "count", "assign", "sums"],
             ),
             probe: Kernel::new(
                 d,
@@ -1147,7 +1182,10 @@ impl Sim {
                 evolve: k.evolve.bind(d, "evolve", &[&common, &pos[s], &kin[s], &body[s], &about[s], &active_n, &wsink, &gas[s], &emit]),
                 compact: k.compact.bind(d, "compact", &[&common, &bins[s], &flags, &active, &active_n, &tick, &body[s]]),
                 moments: k.moments.bind(d, "moments", &[&common, &pos[s], &body[s], &child, &parents, &counter, &node, &gas[s]]),
-                force: k.force.bind(d, "force", &[&force_common, &pos[s], &body[s], &child, &node, &acc[s], &active, &tick, &active_n]),
+                force: match cfg.walk {
+                    Walk::Group => k.force.bind(d, "force", &[&force_common, &pos[s], &body[s], &child, &node, &acc[s], &active, &tick, &active_n]),
+                    Walk::Particle => k.force.bind(d, "force", &[&force_common, &pos[s], &body[s], &child, &node, &acc[s], &active, &tick, &active_n, &gas[s]]),
+                },
                 pm: k.pm.bind(d, "pm", &[&common, &pos[s], &body[s], &mesh, &field, &pm_acc, &kin[s], &active_n, &cosmo_out]),
                 finder: k.finder.bind(d, "finder", &[&common, &pos[s], &body[s], &child, &node, &label, &gidx, &found, &kin[s], &tick]),
                 brush: k.brush.bind(d, "brush", &[&common, &edit_params, &pos[s], &kin[s], &body[s]]),
@@ -1193,6 +1231,9 @@ impl Sim {
             bin_counts: [0; MAX_LEVELS as usize],
             counts_read: AsyncRead::new(d, "bin counts read", MAX_LEVELS as u64 * 4),
             rates,
+            force_cost: [[(FORCE_FLOOR * rates[FORCE], rates[FORCE]); MAX_LEVELS as usize]; FORCE_AGES],
+            gas_cost: [rates[GAS]; MAX_LEVELS as usize],
+            tree_age: 0,
             about,
             gas,
             chem,
@@ -1238,12 +1279,12 @@ impl Sim {
             sim.encode_item(&mut enc, &mut timer, w, last);
         }
         {
-            let mut pass = begin(&mut enc, &mut timer, "integrate", 1.0);
+            let mut pass = begin(&mut enc, &mut timer, "integrate", 1.0, 0);
             sim.k.integrate.run_at(&mut pass, "init_bins", &sim.sets[sim.cur].integrate, &[0], sim.groups);
         }
         // the first long-range forces (no kick: the first step's opening half kick uses them)
         if sim.cfg.pm_cells > 0 {
-            let mut pass = begin(&mut enc, &mut timer, "pm", 1.0);
+            let mut pass = begin(&mut enc, &mut timer, "pm", 1.0, 0);
             sim.encode_pm(&mut pass, false);
         }
         gpu.queue.submit([enc.finish()]);
@@ -1264,7 +1305,7 @@ impl Sim {
             }
             return;
         }
-        let mut pass = begin(encoder, timer, "evolve", 1.0);
+        let mut pass = begin(encoder, timer, "evolve", 1.0, 0);
         let g = self.groups;
         let set = &self.sets[self.cur];
         if stars {
@@ -1279,7 +1320,7 @@ impl Sim {
     fn encode_evolve_part(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer, part: u8) {
         let g = self.groups;
         if part == 0 {
-            let mut pass = begin(encoder, timer, "evolve", 1.0);
+            let mut pass = begin(encoder, timer, "evolve", 1.0, 0);
             let set = &self.sets[self.cur];
             if self.cfg.pm_cells > 0 {
                 // the long-range forces' opening half kick (from the last step's end)
@@ -1293,12 +1334,12 @@ impl Sim {
         }
         let one = Groups { x: 1, y: 1 };
         if part == 1 {
-            let mut pass = begin(encoder, timer, "wells", 1.0);
+            let mut pass = begin(encoder, timer, "wells", 1.0, 0);
             let set = &self.sets[self.cur];
             self.wells_part(&mut pass, set, g);
             return;
         }
-        let mut pass = begin(encoder, timer, "feedback", 1.0);
+        let mut pass = begin(encoder, timer, "feedback", 1.0, 0);
         let set = &self.sets[self.cur];
         if self.has_gas {
             // what stars gave back, and wells took, goes to the gas (the tree is the last sub-step's)
@@ -1351,7 +1392,7 @@ impl Sim {
         let (f, g) = (&self.k.finder, self.groups);
         let t0 = self.tick_offset(0, 0);
         if part == 0 {
-            f.run_at(pass, "init", &set.finder, &[t0], Groups::for_items(self.n.max(1 + (MAX_GROUPS * GROUP_WORDS) as u32), 256));
+            f.run_at(pass, "init", &set.finder, &[t0], Groups::for_items(self.n.max(2 + (MAX_GROUPS * GROUP_WORDS) as u32), 256));
         } else if part + 1 < FIND_PARTS {
             // a slice of a linking round: CHUNKS / FIND_SLICES of the force pass's chunks, then (after the last) the
             // pointer jumps
@@ -1362,6 +1403,7 @@ impl Sim {
             if slice + 1 == FIND_SLICES {
                 f.run_at(pass, "jump", &set.finder, &[t0], g);
                 f.run_at(pass, "jump", &set.finder, &[t0], g);
+                f.run_at(pass, "next_round", &set.finder, &[t0], Groups { x: 1, y: 1 });
             }
         } else {
             for e in ["count", "assign", "sums"] {
@@ -1666,20 +1708,34 @@ impl Sim {
         }
     }
 
-    /// Estimated GPU ms (a force slice: at least `FORCE_FLOOR` of a full pass, unless it holds no particles).
+    /// The tree's age as `force_cost` counts it.
+    fn force_age(&self) -> usize {
+        (self.tree_age as usize).min(FORCE_AGES - 1)
+    }
+
+    /// The kind of the sub-step under way: how many of the shortest bins' steps end with it, less one (0: only
+    /// the shortest bin's). Sub-steps of a kind list the same bins, so they cost alike.
+    fn sub_kind(&self) -> usize {
+        ((self.sub + 1).trailing_zeros() as usize).min(MAX_LEVELS as usize - 1)
+    }
+
+    /// Estimated GPU ms (a force slice: `force_cost`, unless it holds no particles).
     fn estimate(&self, w: Work) -> f64 {
         match w {
             Work::Force { from, to } => {
                 let busy = self.busy(from, to);
-                if busy <= 0.0 { 0.02 } else { self.rates[FORCE] * busy.max(FORCE_FLOOR) }
+                let (least, full) = self.force_cost[self.force_age()][self.sub_kind()];
+                if busy <= 0.0 { 0.02 } else { least.max(full * busy) }
             }
+            Work::Gas => self.gas_cost[self.sub_kind()],
             _ => self.units(w) * self.rates[STAGES.iter().position(|&l| l == w.label()).expect("a stage label")],
         }
     }
 
     fn encode_item(&mut self, encoder: &mut wgpu::CommandEncoder, timer: &mut GpuTimer, w: Work, s: u32) {
         let units = self.units(w);
-        let mut pass = begin(encoder, timer, w.label(), units);
+        // the tag: what the force and gas costs are kept by (`collect`)
+        let mut pass = begin(encoder, timer, w.label(), units, (self.force_age() | self.sub_kind() << 8) as u32);
         let (c, g) = (self.cur, self.groups);
         let tick = self.tick_offset(s, 0);
         match w {
@@ -1723,7 +1779,10 @@ impl Sim {
             Work::Find(part) => self.encode_find_part(&mut pass, part),
             Work::Gas => {
                 let hg = g;
-                self.k.hydro.run(&mut pass, "density", &self.sets[c].hydro, hg);
+                // the per-particle walk found the density already, beside gravity
+                if self.cfg.walk == Walk::Group {
+                    self.k.hydro.run(&mut pass, "density", &self.sets[c].hydro, hg);
+                }
                 self.k.hydro.run(&mut pass, "force", &self.sets[c].hydro, hg);
             }
         }
@@ -1734,6 +1793,8 @@ impl Sim {
         self.encode_item(encoder, timer, w, self.sub);
         match w {
             Work::Open => self.sub_drifted += 1,
+            Work::Build => self.tree_age = 0,
+            Work::Refit => self.tree_age += 1,
             Work::Close => {
                 self.sub_done += 1;
                 self.sub += 1;
@@ -1769,7 +1830,7 @@ impl Sim {
             let est = self.estimate(w);
             if let Work::Force { from, to } = w {
                 // the longest slice that fits; with nothing spent yet, at least what costs no more than the floor
-                let floor = self.rates[FORCE] * FORCE_FLOOR;
+                let floor = self.force_cost[self.force_age()][self.sub_kind()].0;
                 // an item may start when four fifths of it fit (the window takes any overrun off the next frame)
                 let room = if spent == 0.0 { (1.25 * limit.budget_ms).max(floor) } else { 1.25 * (limit.budget_ms - spent) };
                 let k = (1..=to - from).rev().find(|&k| self.estimate(Work::Force { from, to: from + k }) <= room).unwrap_or(0);
@@ -1823,23 +1884,30 @@ impl Sim {
             self.galaxies_myr = self.find_pending.take().unwrap_or(self.galaxies_myr);
         }
         if let Some(t) = timer {
-            for (i, label) in STAGES.iter().enumerate().filter(|&(i, _)| i != FORCE) {
+            for (i, label) in STAGES.iter().enumerate().filter(|&(i, _)| i != FORCE && i != GAS) {
                 if let Some((ms, units)) = t.rate(label)
                     && units > 1e-6
                 {
                     self.rates[i] += 0.3 * (ms / units - self.rates[i]);
                 }
             }
-            // force passes: a full pass costs ms / max(busy, floor share)
-            let (mut ms_sum, mut units) = (0.0, 0.0);
-            for ((label, ms), &busy) in t.last.iter().zip(&t.last_units) {
+            // force and gas passes, by the tree's age and the sub-step's kind (the tag); of a force pass's two
+            // costs, the one its estimate went by learns from it. A first guess (still in `rates`, which these two
+            // stages leave alone) gives way to the first measurement outright
+            let learn = |cost: &mut f64, ms: f64, guess: f64| *cost += if *cost == guess { 1.0 } else { 0.3 } * (ms - *cost);
+            let (force_guess, gas_guess) = (self.rates[FORCE], self.rates[GAS]);
+            for (((label, ms), &busy), &tag) in t.last.iter().zip(&t.last_units).zip(&t.last_tags) {
+                let (age, kind) = ((tag as usize & 0xff).min(FORCE_AGES - 1), (tag as usize >> 8).min(MAX_LEVELS as usize - 1));
                 if *label == "force" && busy > 0.0 {
-                    ms_sum += ms;
-                    units += busy.max(FORCE_FLOOR);
+                    let (least, full) = &mut self.force_cost[age][kind];
+                    if *full * busy >= *least {
+                        learn(full, ms / busy, force_guess);
+                    } else {
+                        learn(least, *ms, FORCE_FLOOR * force_guess);
+                    }
+                } else if *label == "gas" {
+                    learn(&mut self.gas_cost[kind], *ms, gas_guess);
                 }
-            }
-            if units > 0.0 {
-                self.rates[FORCE] += 0.3 * (ms_sum / units - self.rates[FORCE]);
             }
         }
     }

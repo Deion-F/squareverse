@@ -10,6 +10,10 @@ Two versions live here:
 
 - Rust is in `~/.cargo/bin` (use `~/.cargo/bin/cargo` if `cargo` isn't on the PATH). `cargo build`, `cargo test --
   --nocapture`, `cargo run --release` from `squareverse_v3/`.
+- The user runs the sim with `squareverse_v3 [options]` (`squareverse_v3/scripts/squareverse_v3`, symlinked into
+  `~/.local/bin`): the Windows exe, run in `squareverse_v3/`. `--rebuild` rebuilds first, `--rebuild-only` just
+  rebuilds. After any change to v3 code or shaders, run `squareverse_v3 --rebuild-only` before ending the turn; it
+  refuses while the sim is open (ask the user to close it).
 - Windows exe from WSL: `cargo build --release --target x86_64-pc-windows-gnu` (needs `mingw-w64`), then run
   `target/x86_64-pc-windows-gnu/release/squareverse.exe` from WSL; it uses the GPU natively (DX12 / Vulkan). Inside
   WSL the Linux build reaches the GPU only through Mesa's OpenGL over D3D12 (set up automatically by

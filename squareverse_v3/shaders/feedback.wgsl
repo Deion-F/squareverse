@@ -24,7 +24,7 @@ fn rel(q: vec4<u32>) -> vec2<u32> {
 }
 
 fn box_distance(p: vec2<u32>, r: u32) -> f32 {
-    return box_distance_to(p, node[NODE_VEC4 * r + 1u]);
+    return box_distance_to(p, node[NODE_VEC4 * r + 3u]);
 }
 
 fn add64(at: u32, x: f32) {
@@ -34,21 +34,11 @@ fn add64(at: u32, x: f32) {
     atomicAdd(&deposit[at + 1u], w.y + carry);
 }
 
-@compute @workgroup_size(256)
-fn spread(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = flat_index(gid, c.row);
-    if (i >= c.n) {
-        return;
-    }
-    let e0 = emit[2u * i];
-    if (e0.x <= 0.0 && e0.y <= 0.0) {
-        return;
-    }
-    let e1 = emit[2u * i + 1u];
-    // the nearest gas particle
+// The nearest gas particle within the search radius to q (NONE: none). A function of its own, so that only the
+// threads that search set up its stack (an entry point's locals are set up by every thread it runs).
+fn nearest_gas(q: vec4<u32>) -> u32 {
     let g0 = ctl[1];
     let g1 = ctl[2];
-    let q = pos[i];
     let p = rel(q);
     var best = NONE;
     var best_d = c.gas_c.z;
@@ -73,8 +63,8 @@ fn spread(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             continue;
         }
-        let t = node[NODE_VEC4 * r + 3u];
-        if (t.y >= g1 || t.y + t.z <= g0 || box_distance(p, r) >= best_d || sp + 2u > STACK) {
+        let t = node[NODE_VEC4 * r + 4u];   // (first particle, count, -, -)
+        if (t.x >= g1 || t.x + t.y <= g0 || box_distance(p, r) >= best_d || sp + 2u > STACK) {
             continue;
         }
         let ch = child[r];
@@ -82,6 +72,21 @@ fn spread(@builtin(global_invocation_id) gid: vec3<u32>) {
         stack[sp + 1u] = ch.y;
         sp += 2u;
     }
+    return best;
+}
+
+@compute @workgroup_size(256)
+fn spread(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = flat_index(gid, c.row);
+    if (i >= c.n) {
+        return;
+    }
+    let e0 = emit[2u * i];
+    if (e0.x <= 0.0 && e0.y <= 0.0) {
+        return;
+    }
+    let e1 = emit[2u * i + 1u];
+    let best = nearest_gas(pos[i]);
     if (best == NONE) {
         return;
     }

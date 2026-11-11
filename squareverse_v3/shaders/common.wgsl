@@ -272,11 +272,15 @@ fn bin_ends(levels: u32, b: u32, s: u32) -> bool {
 // Particle arrays: pos vec4<u32> (fixed point), kin vec4<f32> (vx, vy, temperature K, luminosity Lsun),
 // body vec2<u32> (mass f32 bits, kind << KIND_SHIFT | id), about vec4<f32> (birth time Myr, the star's mass Msun
 // (0: no stellar evolution), the particle's mass at birth, the super well's number as f32 bits for wells).
-// Node records: NODE_WORDS u32s a node: centre of mass (4, fixed point), box (4: min x, min y, max x, max y, hi
-// words relative to the origin), mass, opening radius^2, and the second moments about the centre of mass sxx, sxy,
-// syy (Msun pc^2) for the quadrupole (all f32 bits), then the node's particles: the first one's index and how many
-// (a node covers a contiguous run of the sorted particles), the largest softening^2 among them, and the largest gas
-// smoothing length H among them (pc; 0 without gas), then 3 spare words.
+// Node records: NODE_WORDS u32s a node, as NODE_VEC4 vec4s, in the order the gravity walk wants them (to open a
+// node it reads the first two, 32 bytes side by side; to use it as one mass, the third as well):
+//   0: centre of mass (fixed point);
+//   1: mass, opening radius^2 (f32 bits), and its two children (as in `child`);
+//   2: the second moments about the centre of mass sxx, sxy, syy (Msun pc^2) for the quadrupole, and the largest
+//      softening^2 among its particles (f32 bits);
+//   3: box (min x, min y, max x, max y, hi words relative to the origin);
+//   4: the node's particles: the first one's index and how many (a node covers a contiguous run of the sorted
+//      particles), the largest gas smoothing length H among them (pc, f32 bits; 0 without gas), and a spare word.
 // `parents`: internal node k's parent at k, particle j's at n + j.
 const NODE_WORDS: u32 = 20u;
 const NODE_VEC4: u32 = 5u;

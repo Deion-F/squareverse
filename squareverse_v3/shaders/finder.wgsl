@@ -7,6 +7,8 @@
 // - `link` (repeated, each round in slices the window can spread over frames): each takes the lowest label among its neighbours (a tree walk), and hooks its old label's
 //   particle to it too, so whole chains merge in a few rounds (as Shiloach & Vishkin);
 // - `jump`: label = label of label (pointer jumping);
+// - `next_round`: after each round; a round that changed no label leaves a fixed point, so the rounds after it
+//   return at once (the result is the same);
 // - `count`, `assign`: groups of at least c.finder.z particles get a slot in `groups` (up to MAX_GROUPS);
 // - `sums`: each slot's totals: members, mass, centre of mass (relative to its first particle), momentum, and the
 //   mass in stars, gas and wells (64-bit integer sums, so any order gives the same result).
@@ -21,7 +23,7 @@
 @group(0) @binding(4) var<storage, read> node: array<vec4<u32>>;
 @group(0) @binding(5) var<storage, read_write> label: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> gidx: array<atomic<u32>>;      // per root: members, then its slot
-@group(0) @binding(7) var<storage, read_write> groups: array<atomic<u32>>;    // [0] slots used, then GROUP_WORDS a slot
+@group(0) @binding(7) var<storage, read_write> groups: array<atomic<u32>>;    // [0] slots used, then GROUP_WORDS a slot, then CHANGED, LAST
 @group(0) @binding(8) var<storage, read> kin: array<vec4<f32>>;
 @group(0) @binding(9) var<uniform> t: Tick;   // `link` runs in slices of the particles, from t.start
 
@@ -29,6 +31,9 @@ const STACK: u32 = 96u;
 const MAX_GROUPS: u32 = 4096u;
 const GROUP_WORDS: u32 = 26u;
 const HAS_SLOT: u32 = 0x80000000u;
+// after the slots: whether this round has changed a label so far (1/0), and whether the last round did
+const CHANGED: u32 = 1u + MAX_GROUPS * GROUP_WORDS;
+const LAST: u32 = CHANGED + 1u;
 const TWO32: f32 = 4294967296.0;
 const MASS_SCALE: f32 = 1024.0;   // units per Msun
 const MOMENT_SCALE: f32 = 64.0;   // units per Msun kpc, and per Msun pc / Myr
@@ -48,8 +53,12 @@ fn rel(q: vec4<u32>) -> vec2<u32> {
 @compute @workgroup_size(256)
 fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = flat_index(gid, c.row);
-    if (i < 1u + MAX_GROUPS * GROUP_WORDS) {
+    if (i < CHANGED) {
         atomicStore(&groups[i], 0u);
+    }
+    if (i == CHANGED) {
+        atomicStore(&groups[CHANGED], 0u);
+        atomicStore(&groups[LAST], 1u);   // the first round runs
     }
     if (i >= c.n) {
         return;
@@ -58,16 +67,9 @@ fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicStore(&gidx[i], 0u);
 }
 
-@compute @workgroup_size(256)
-fn link(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = t.start + flat_index(gid, c.row);
-    if (i >= c.n) {
-        return;
-    }
-    let own = atomicLoad(&label[i]);
-    if (own == NONE) {
-        return;
-    }
+// the lowest label among particle i's friends and its own (`own`). A function of its own, so that only the linked
+// particles' threads set up its stack (an entry point's locals are set up by every thread it runs).
+fn lowest_label(i: u32, own: u32) -> u32 {
     let q = pos[i];
     let p = rel(q);
     let b = c.finder.x * select(1.0, c.cosmo.x, c.finder.w > 0.5);   // comoving in the universe
@@ -92,12 +94,12 @@ fn link(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             continue;
         }
-        let bx = node[NODE_VEC4 * r + 1u];
+        let bx = node[NODE_VEC4 * r + 3u];
         // (massless nodes hold only spare and swallowed slots; without dark matter linked, its own part of the tree
         // is left out: dark matter sorts last, so a node whose first particle is dark matter holds nothing else)
-        let tail = node[NODE_VEC4 * r + 3u];
-        if (box_distance_to(p, bx) >= b || sp + 2u > STACK || bitcast<f32>(node[NODE_VEC4 * r + 2u].x) <= 0.0
-            || (c.finder.y < 0.5 && kind_of(body[tail.y]) == K_DM)) {
+        let run = node[NODE_VEC4 * r + 4u];   // (first particle, count, -, -)
+        if (box_distance_to(p, bx) >= b || sp + 2u > STACK || bitcast<f32>(node[NODE_VEC4 * r + 1u].x) <= 0.0
+            || (c.finder.y < 0.5 && kind_of(body[run.x]) == K_DM)) {
             continue;
         }
         // a node wholly within b: all of it is linked to this particle, so one label from it does (the rest follow
@@ -105,7 +107,7 @@ fn link(@builtin(global_invocation_id) gid: vec3<u32>) {
         let fx = max(abs(bitcast<i32>(p.x - bx.x)), abs(bitcast<i32>(p.x - bx.z)));
         let fy = max(abs(bitcast<i32>(p.y - bx.y)), abs(bitcast<i32>(p.y - bx.w)));
         if (length(vec2<f32>(f32(fx), f32(fy)) * c.unit_pc) + 2.0 * c.unit_pc < b) {
-            let first = node[NODE_VEC4 * r + 3u].y;
+            let first = run.x;
             if (linked(first)) {
                 best = min(best, atomicLoad(&label[first]));
                 continue;
@@ -116,16 +118,43 @@ fn link(@builtin(global_invocation_id) gid: vec3<u32>) {
         stack[sp + 1u] = ch.y;
         sp += 2u;
     }
+    return best;
+}
+
+@compute @workgroup_size(256)
+fn link(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = t.start + flat_index(gid, c.row);
+    if (i >= c.n || atomicLoad(&groups[LAST]) == 0u) {
+        return;
+    }
+    let own = atomicLoad(&label[i]);
+    if (own == NONE) {
+        return;
+    }
+    let best = lowest_label(i, own);
     if (best < own) {
         atomicMin(&label[i], best);
         atomicMin(&label[own], best);
+        changed();
     }
+}
+
+fn changed() {
+    if (atomicLoad(&groups[CHANGED]) == 0u) {
+        atomicStore(&groups[CHANGED], 1u);
+    }
+}
+
+@compute @workgroup_size(1)
+fn next_round() {
+    atomicStore(&groups[LAST], atomicLoad(&groups[CHANGED]));
+    atomicStore(&groups[CHANGED], 0u);
 }
 
 @compute @workgroup_size(256)
 fn jump(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = flat_index(gid, c.row);
-    if (i >= c.n) {
+    if (i >= c.n || atomicLoad(&groups[LAST]) == 0u) {
         return;
     }
     let l = atomicLoad(&label[i]);
@@ -135,6 +164,7 @@ fn jump(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ll = atomicLoad(&label[l]);
     if (ll < l) {
         atomicMin(&label[i], ll);
+        changed();
     }
 }
 

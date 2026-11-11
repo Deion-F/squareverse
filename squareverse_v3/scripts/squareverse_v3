@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Runs Squareverse v3 from WSL as the native Windows exe (the GPU through Vulkan / DX12, not WSL's GL).
+# Installed as `squareverse_v3` by a symlink in ~/.local/bin.
+#
+#   squareverse_v3 [options]                 run (building first if there is no exe yet); options go to the sim
+#   squareverse_v3 --rebuild [options]       rebuild, then run
+#   squareverse_v3 --rebuild-only            rebuild, don't run
+#
+# The sim runs in squareverse_v3/ (quick saves go to its saves/ folder wherever you start it from); --report and
+# --snapshot paths are taken relative to the folder you ran the command in.
+set -euo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exe="$here/target/x86_64-pc-windows-gnu/release/squareverse.exe"
+cargo="$(command -v cargo || echo "$HOME/.cargo/bin/cargo")"
+
+build() {
+    if tasklist.exe /FI "IMAGENAME eq squareverse.exe" 2>/dev/null | grep -qi squareverse; then
+        echo "squareverse.exe is running: close it first (Windows won't let the build replace a running exe)." >&2
+        exit 1
+    fi
+    echo "Building the Windows exe..." >&2
+    (cd "$here" && "$cargo" build --release --target x86_64-pc-windows-gnu)
+}
+
+mode=run
+args=()
+for a in "$@"; do
+    case "$a" in
+        --rebuild) mode=rebuild ;;
+        --rebuild-only) mode=rebuild-only ;;
+        *) args+=("$a") ;;
+    esac
+done
+
+if [[ $mode != run || ! -x $exe ]]; then
+    build
+fi
+[[ $mode == rebuild-only ]] && exit 0
+
+# file paths for the Windows exe: relative to where the command was run, as Windows paths
+win_path() { wslpath -w "$(realpath -m "$1")"; }
+out=()
+expect_path=0
+for a in "${args[@]+"${args[@]}"}"; do
+    if (( expect_path )); then
+        out+=("$(win_path "$a")")
+        expect_path=0
+        continue
+    fi
+    case "$a" in
+        --report | --snapshot) out+=("$a"); expect_path=1 ;;
+        --report=* | --snapshot=*) out+=("${a%%=*}=$(win_path "${a#*=}")") ;;
+        *) out+=("$a") ;;
+    esac
+done
+
+cd "$here"
+exec "$exe" "${out[@]+"${out[@]}"}"
